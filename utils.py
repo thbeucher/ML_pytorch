@@ -713,3 +713,115 @@ class AttentionLoss(nn.Module):
     current_loss = cross_entropy * (1 + self.decay_factor * kld_loss)
     
     return current_loss
+
+
+class ScoresMaster(object):
+  def __init__(self, idx_2_letter=None, pad_idx=None, joiner=''):
+    self.idx_2_letter = idx_2_letter
+    self.pad_idx = pad_idx
+    self.joiner = joiner
+
+    self.true_labels = []
+    self.pred_labels = []
+  
+  def reset_feed(self):
+    self.true_labels = []
+    self.pred_labels = []
+  
+  def partial_feed(self, true_labels, pred_labels):
+    self.true_labels += true_labels
+    self.pred_labels += pred_labels
+  
+  @classmethod
+  def remove_queue(cls, labels, stop_idx=-1):
+    return [l[:l.index(stop_idx) + 1 if stop_idx in l else None] for l in labels]
+  
+  def get_scores(self, pred_labels, true_labels, idx_2_letter=None, pad_idx=None, stop_idx=-1, from_feed=False, strategy='align'):
+    if from_feed:
+      pred_labels = self.pred_labels
+      true_labels = self.true_labels
+
+    pred_labels = self.remove_queue(pred_labels, stop_idx=stop_idx)
+    true_labels = self.remove_queue(true_labels, stop_idx=stop_idx)
+
+    idx_2_letter = idx_2_letter if idx_2_letter is not None else self.idx_2_letter
+    pad_idx = pad_idx if pad_idx is not None else self.pad_idx
+
+    assert idx_2_letter is not None, 'Must provide idx_2_letter'
+    assert pad_idx is not None, 'Must provide pad_idx'
+
+    true_sentences, pred_sentences = self.reconstruct_sentences(true_labels, pred_labels, idx_2_letter, pad_idx, joiner=self.joiner)
+    l_acc, w_acc, s_acc, awer = self.compute_scores(true_sentences, pred_sentences, strategy=strategy)
+
+    return l_acc, w_acc, s_acc, awer
+  
+  @classmethod
+  def compute_scores(cls, true_sentences, pred_sentences, strategy='align'):
+    '''
+
+    Params:
+      * true_sentences: list of string
+      * pred_sentences: list of string
+
+    Returns:
+      * character_accuracy: float
+      * word_accuracy: float
+      * sentence_accuracy: float
+      * wer: float, word error rate
+    '''
+    count_correct_sentences = 0
+    count_correct_words, count_words = 0, 0
+    count_correct_characters, count_characters = 0, 0
+    wers = []
+
+    for true, pred in zip(true_sentences, pred_sentences):
+      count_characters += len(true)
+      count_correct_characters += sum([1 for t, p in zip(true, pred) if t == p])
+
+      if strategy == 'align':
+        space_idxs = [0] + [i for i, c in enumerate(true) if c == ' '] + [len(true)]
+        is_words_correct = [
+          true[space_idxs[i] + 1 : space_idxs[i+1]] == pred[space_idxs[i] + 1 : space_idxs[i+1]]
+          for i in range(len(space_idxs) - 1)
+        ]
+        count_words += len(is_words_correct)
+        count_correct_words += sum(is_words_correct)
+      else:
+        true_word_list = true.split(' ')
+        pred_word_list = pred.split(' ')
+
+        count_words += len(true_word_list)
+        count_correct_words += sum([1 for tw, pw in zip(true_word_list, pred_word_list) if tw == pw])
+
+      if true == pred:
+        count_correct_sentences += 1
+      
+      wers.append(compute_WER(true, pred))
+    
+    character_accuracy = count_correct_characters / count_characters
+    word_accuracy = count_correct_words / count_words
+    sentence_accuracy = count_correct_sentences / len(true_sentences)
+
+    wer = np.mean(wers)
+
+    return character_accuracy, word_accuracy, sentence_accuracy, wer
+  
+  @classmethod
+  def reconstruct_sentences(cls, true_labels, pred_labels, idx_2_letter, pad_idx, joiner=''):
+    '''
+    Params:
+      * true_labels: list of list of int
+      * pred_labels: list of list of int
+
+    Returns:
+      * true_sentences: list of string
+      * pred_sentences: list of string
+    '''
+    true_sentences, pred_sentences = zip(*[
+      (
+        joiner.join([idx_2_letter[idx] for idx in true[:true.index(pad_idx) if pad_idx in true else None]]),
+        joiner.join([idx_2_letter[idx] for idx in pred[:pred.index(pad_idx) if pad_idx in pred else None]])
+      )
+      for true, pred in zip(true_labels, pred_labels)
+    ])
+    return true_sentences, pred_sentences
