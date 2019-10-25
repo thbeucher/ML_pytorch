@@ -1,5 +1,6 @@
 import os
 import re
+import ast
 import json
 import math
 import torch
@@ -825,3 +826,17 @@ class ScoresMaster(object):
       for true, pred in zip(true_labels, pred_labels)
     ])
     return true_sentences, pred_sentences
+
+
+def add_args_from_settings(argparser, settings_file='settings.json'):
+  '''
+  Params:
+    * argparser
+    * settings_file (optional) : str
+  '''
+  settings = load_json(settings_file)
+
+  converter = {'int': int, 'float': float, 'str': str, 'ast.literal_eval': ast.literal_eval}
+
+  for arg, info in settings.items():
+    argparser.add_argument(f'--{arg}', default=converter[info['type']](info['default']), type=converter[info['type']])
