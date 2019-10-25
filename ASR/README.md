@@ -1,3 +1,7 @@
+# ASR (Automatic Speech Recognition)
+
+Experiments conduct in this repository are currently using openslr dataset that you can download on http://www.openslr.org/12/
+
 ## data.py
 
 This file contains every functions to process data for ASR experiments
