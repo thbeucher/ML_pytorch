@@ -725,7 +725,7 @@ class Metadata(object):
 
 
 if __name__ == '__main__':
-  settings = u.load_json('settings.json')
+  settings = u.load_json('settings.json') if os.path.isfile('settings.json') else {'train_folder': None, 'test_folder': None}
 
   argparser = argparse.ArgumentParser(prog='data.py', description='data utils')
   argparser.add_argument('--dct_type', default=2, type=int)
