@@ -18,7 +18,12 @@ import utils as u
 
 
 def get_list_files(folder):
-  '''folder : str'''
+  '''
+  Specifically designed for openSLR tree format.
+  
+  Params:
+    * folder : str
+  '''
   dataset_filelist = {'audio': [], 'features': [], 'transcript': []}
 
   for fname in os.listdir(folder):
@@ -37,7 +42,7 @@ def get_list_files(folder):
   return dataset_filelist
 
 
-def preprocess_audio_data(folder, dct_type=2, extract_type='mfcc'):
+def preprocess_audio_data(folder, dct_type=2, extract_type='mfcc', win_size=0.025):
   '''
   Preprocess audio data from given folder.
   It will calls get_list_files to retrieves all .flac files from given folder then
@@ -47,7 +52,8 @@ def preprocess_audio_data(folder, dct_type=2, extract_type='mfcc'):
   Params:
     * folder : str
     * dct_type (optional) : int
-    * extract_type (optional) : str
+    * extract_type (optional) : str, possible values = mfcc/log_spectrogram/filterbank/raw
+    * win_size (optional) : float, default to 0.025ms
   '''
   print(f'Preprocess audio files in folder: {folder}')
   extract_types = ['mfcc', 'log_spectrogram', 'filterbank']
@@ -60,8 +66,8 @@ def preprocess_audio_data(folder, dct_type=2, extract_type='mfcc'):
 
   for filename in tqdm(filelist['audio']):
     signal, sample_rate = librosa.load(filename, sr=16000)
-    hop_length = int(0.010*sample_rate)
-    n_fft = int(0.025*sample_rate)
+    hop_length = int(0.010 * sample_rate)
+    n_fft = int(win_size * sample_rate)
 
     if extract_type == 'mfcc':
       # by default librosa mfcc have -> n_fft = 2048 | hop_length = 512
@@ -79,6 +85,12 @@ def preprocess_audio_data(folder, dct_type=2, extract_type='mfcc'):
       # features = logfbank(signal, nfilt=80, samplerate=16000, winlen=0.025, winstep=0.01)
       features = librosa.feature.melspectrogram(y=signal, sr=sample_rate, n_mels=80, n_fft=n_fft, hop_length=hop_length)
       features = np.log(features + 1e-6)
+    else:
+      # raw cutting
+      window = int(win_size * sample_rate)
+      features = np.split(signal, list(range(window, len(signal), window)))
+      features[-1] = np.concatenate((features[-1], np.zeros(window - len(features[-1]))), 0)
+      features = np.array(features)
 
     np.save(filename.replace('.flac', '.features.npy'), features)
 
