@@ -111,7 +111,8 @@ def pretrain_transformer_parrot(settings):
                       dropout=settings['dropout'],
                       device=metadata.device).to(metadata.device)
   
-  train_model(model, metadata, max_epochs=settings['max_epochs'], eval_step=settings['eval_step'], save_path=settings['save_path'])
+  train_model(model, metadata, max_epochs=settings['max_epochs'], train_score_step=settings['train_score_step'],
+              eval_step=settings['eval_step'], save_path=settings['save_path'])
 
 
 if __name__ == "__main__":
@@ -150,7 +151,8 @@ if __name__ == "__main__":
 
   argparser.add_argument('--lr', default=1e-4, type=float)
   argparser.add_argument('--save_path', default='pretraining/', type=str)
-  argparser.add_argument('--eval_step', default=10, type=int)
+  argparser.add_argument('--eval_step', default=50, type=int)
+  argparser.add_argument('--train_score_step', default=10, type=int)
   argparser.add_argument('--max_epochs', default=500, type=int)
   args = argparser.parse_args()
 
@@ -161,8 +163,8 @@ if __name__ == "__main__":
   global plotter
   plotter = u.VisdomPlotter(env_name='Pretrainer Plots')
 
-  if not os.path.isdir(settings['save_model']):
-    os.mkdir(settings['save_model'])
+  if not os.path.isdir(settings['save_path']):
+    os.mkdir(settings['save_path'])
 
   rep = input('Start Transformer Parrot Pretraining? (y or n): ')
   if rep == 'y':
