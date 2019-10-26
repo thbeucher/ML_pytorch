@@ -56,7 +56,7 @@ def preprocess_audio_data(folder, dct_type=2, extract_type='mfcc', win_size=0.02
     * win_size (optional) : float, default to 0.025ms
   '''
   print(f'Preprocess audio files in folder: {folder}')
-  extract_types = ['mfcc', 'log_spectrogram', 'filterbank']
+  extract_types = ['mfcc', 'log_spectrogram', 'filterbank', 'raw']
 
   assert extract_type in extract_types, f'extract_type must be one of the following: {extract_types}'
 
