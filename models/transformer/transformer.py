@@ -1,9 +1,15 @@
+import os
+import sys
 import torch
 import utils as u
 import torch.nn as nn
 
 from encoder import TransformerEncoder
 from decoder import TransformerDecoder
+from embedder import PositionalEmbedder
+
+sys.path.append(os.path.abspath(__file__).replace('models/transformer/transformer.py', ''))
+import utils as u
 
 
 class Transformer(nn.Module):
@@ -20,48 +26,57 @@ class Transformer(nn.Module):
                decoder_embedder=None,
                encoder_embedding_dim=80,
                decoder_embedding_dim=100,
-               dec_emb_size=None,
-               dropout=0.1,
                max_enc_in_seq_len=900,
                max_dec_in_seq_len=600,
+               encoder_reduce_dim=False,
+               decoder_reduce_dim=False,
                apply_softmax=False,
-               conv=False,
-               pad_idx=2):
+               scaling=True,
+               pad_idx=2,
+               dropout=0.1,
+               device=None):
     '''
     Params:
       * n_encoder_blocks : int
-      * n_decoder-blocks : int
+      * n_decoder_blocks : int
       * d_model : int
       * d_keys : int
       * d_values : int
       * n_heads : int
       * d_ff : int
       * output_size : int
-      * encoder_embedding_dim (optional) : int
-      * decoder_embedding_dim (optional) : int
       * encoder_embedder (optional) : nn.Embedding
       * decoder_embedder (optional) : nn.Embedding
-      * dropout (optional) : float 0 <= dropout <= 1
-      * max_enc_in_seq_len (optional) : int
-      * max_dec_in_seq_len (optional) : int
-      * encoder_embedding_size : int
-      * decoder_embedding_size : int
+      * encoder_embedding_dim (optional) : int, default to 80
+      * decoder_embedding_dim (optional) : int, default to 100
+      * max_enc_in_seq_len (optional) : int, default to 900
+      * max_dec_in_seq_len (optional) : int, default to 600
+      * encoder_reduce_dim (optional) : Boolean, default to False
+      * decoder_reduce_dim (optional) : Boolean, default to False
+      * apply_softmax (optional) : Boolean, default to False
+      * scaling (optional) : Boolean, default to True
+      * pad_idx (optional) : int, default to 2
+      * dropout (optional) : float, default to 0.1
+      * device (optional) : torch.device
     '''
     super().__init__()
-    self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') if device is None else device
     self.apply_softmax = apply_softmax
 
-    self.conv = conv
+    self.encoder_reduce_dim = encoder_reduce_dim
     self.pad_idx = pad_idx
 
     self.encoder_embedder = encoder_embedder
     self.decoder_embedder = decoder_embedder
 
     if encoder_embedder is None:
-      self.encoder_embedder = u.EncoderEmbedder(max_enc_in_seq_len, encoder_embedding_dim, d_model, conv=conv)
+      self.encoder_embedder = PositionalEmbedder(max_enc_in_seq_len, encoder_embedding_dim, d_model, scaling=scaling,
+                                                 reduce_dim=encoder_reduce_dim, dropout=dropout, device=device)
 
     if decoder_embedder is None:
-      self.decoder_embedder = u.DecoderEmbedder(max_dec_in_seq_len, decoder_embedding_dim, d_model, output_size)
+      self.decoder_embedder = PositionalEmbedder(max_dec_in_seq_len, decoder_embedding_dim, d_model, scaling=scaling,
+                                                 reduce_dim=decoder_reduce_dim, dropout=dropout, device=device,
+                                                 output_size=output_size)
 
     self.encoder = TransformerEncoder(n_encoder_blocks, d_model, d_keys, d_values, n_heads, d_ff, dropout=dropout)
     self.decoder = TransformerDecoder(n_decoder_blocks, d_model, d_keys, d_values, n_heads, d_ff, dropout=dropout)
@@ -77,7 +92,7 @@ class Transformer(nn.Module):
   def forward(self, enc_in, dec_in, padding_mask=None):
     enc_in, dec_in = self.embed_input(enc_in, dec_in)
 
-    if self.conv:
+    if self.encoder_reduce_dim:
       padding_mask = u.create_padding_mask(enc_in, self.pad_idx)
 
     enc_out = self.encoder(enc_in, padding_mask=padding_mask)
