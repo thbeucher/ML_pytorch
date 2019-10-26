@@ -737,13 +737,11 @@ class Metadata(object):
 
 
 if __name__ == '__main__':
-  settings = u.load_json('settings.json') if os.path.isfile('settings.json') else {'train_folder': None, 'test_folder': None}
-
   argparser = argparse.ArgumentParser(prog='data.py', description='data utils')
   argparser.add_argument('--dct_type', default=2, type=int)
   argparser.add_argument('--extract_type', default='mfcc', type=str)
-  argparser.add_argument('--train_folder', default=settings['train_folder'], type=str)
-  argparser.add_argument('--test_folder', default=settings['test_folder'], type=str)
+  argparser.add_argument('--train_folder', default='../../datasets/openslr/LibriSpeech/train-clean-100/', type=str)
+  argparser.add_argument('--test_folder', default='../../datasets/openslr/LibriSpeech/test-clean/', type=str)
   args = argparser.parse_args()
 
   rep = input('Preprocess audio data? (y or n): ')
