@@ -154,6 +154,8 @@ if __name__ == "__main__":
   argparser.add_argument('--max_epochs', default=500, type=int)
   args = argparser.parse_args()
 
+  logging.basicConfig(stream=sys.stdout, level=logging.INFO)
+
   settings = u.populate_configuration(settings, vars(args))
 
   global plotter

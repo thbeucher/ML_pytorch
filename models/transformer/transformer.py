@@ -4,6 +4,8 @@ import torch
 import utils as u
 import torch.nn as nn
 
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
 from encoder import TransformerEncoder
 from decoder import TransformerDecoder
 from embedder import PositionalEmbedder
