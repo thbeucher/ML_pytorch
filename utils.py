@@ -625,6 +625,7 @@ class CrossEntropyLoss(nn.Module):
     Params:
       * pad_idx : int
     '''
+    super().__init__()
     self.pad_idx = pad_idx
     self.cross_entropy = nn.CrossEntropyLoss(ignore_index=pad_idx)
   
@@ -667,6 +668,7 @@ class AttentionLoss(nn.Module):
       * device (optional) : torch.device, defaul to None
       * decay_step (optional) : float, default to 0.01
     '''
+    super().__init__()
     self.pad_idx = pad_idx
     self.device = device if device is not None else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     self.kld = nn.KLDivLoss(reduction='sum')
