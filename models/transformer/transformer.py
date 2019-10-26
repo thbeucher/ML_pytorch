@@ -83,8 +83,8 @@ class Transformer(nn.Module):
     self.encoder = TransformerEncoder(n_encoder_blocks, d_model, d_keys, d_values, n_heads, d_ff, dropout=dropout)
     self.decoder = TransformerDecoder(n_decoder_blocks, d_model, d_keys, d_values, n_heads, d_ff, dropout=dropout)
 
-    self.encoder_input_projection = nn.Linear(self.encoder_embedder.embedding_dim, d_model)
-    self.decoder_input_projection = nn.Linear(self.decoder_embedder.embedding_dim, d_model)
+    self.encoder_input_projection = nn.Linear(self.encoder_embedder.embedding_size, d_model)
+    self.decoder_input_projection = nn.Linear(self.decoder_embedder.embedding_size, d_model)
 
     self.output_projection = nn.Linear(d_model, output_size)
 
