@@ -20,6 +20,7 @@ class PositionalEmbedder(nn.Module):
       * embedding_size : int
       * d_model : int
     '''
+    super().__init__()
     self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') if device is None else device
     self.max_seq_len = max_seq_len
     self.embedding_size = embedding_size
