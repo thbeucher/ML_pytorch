@@ -159,7 +159,7 @@ if __name__ == "__main__":
   settings = u.populate_configuration(settings, vars(args))
 
   global plotter
-  plotter = u.VisdomLinePlotter(env_name='Pretrainer Plots')
+  plotter = u.VisdomPlotter(env_name='Pretrainer Plots')
 
   if not os.path.isdir(settings['save_model']):
     os.mkdir(settings['save_model'])
