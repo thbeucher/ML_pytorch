@@ -49,7 +49,7 @@ def train_model(model, metadata, max_epochs=500, train_score_step=10, eval_step=
       val_word_acc, val_sentence_acc = eval_model(model, metadata)
 
       if val_word_acc > val_word_acc_memory:
-        u.save_checkpoint(model, optimizer, save_path)
+        u.save_checkpoint(model, optimizer, save_path + 'parrot_transformer.pt')
         logging.info(f'Save model with validation word accuracy = {val_word_acc} | sentence accuracy = {val_sentence_acc}')
         val_word_acc_memory = val_word_acc
 

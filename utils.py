@@ -119,7 +119,7 @@ def create_futur_mask(x):
     * torch.tensor
   '''
   batch_size, seq_len = x.size(0), x.size(1)
-  return torch.triu(torch.ones(batch_size, seq_len, seq_len), diagonal=1).byte()
+  return torch.triu(torch.ones(batch_size, seq_len, seq_len), diagonal=1) == 0
 
 
 def save_checkpoint(model, optimizer, save_path):
