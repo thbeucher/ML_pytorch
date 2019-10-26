@@ -22,7 +22,7 @@ def train_model(model, metadata, max_epochs=500, train_score_step=10, eval_step=
 
   val_word_acc, val_word_acc_memory, val_sentence_acc = 0, 0, 0
 
-  for epoch in tqdm(max_epochs):
+  for epoch in tqdm(range(max_epochs)):
     for _, dec_in, _ in metadata.train_data_loader:
       dec_in = dec_in.to(metadata.device)
 
