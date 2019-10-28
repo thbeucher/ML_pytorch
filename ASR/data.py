@@ -1,3 +1,4 @@
+import io
 import os
 import sys
 import torch
@@ -5,8 +6,11 @@ import librosa
 import argparse
 import numpy as np
 import pickle as pk
+import seaborn as sns
+import matplotlib.pyplot as plt
 
 from tqdm import tqdm
+from PIL import Image
 from scipy.signal import stft
 from collections import defaultdict, namedtuple
 from torch.utils.data import Dataset, DataLoader
@@ -734,6 +738,57 @@ class Metadata(object):
                                                        subset=self.subset,
                                                        filename=self.ngram_metadata,
                                                        create_mask=self.create_mask)
+
+
+def plot_attention(data, show=True, cbar=True, verbose=True):
+  '''
+  Plots attention
+
+  Params:
+    * data : dictionary that must contain following keys:
+                - pad, eos, target, enc_in, i2v, attention
+  '''
+  att = data['attention']
+
+  enc_in_pad = np.sum(data['enc_in'] == np.ones(80) * 2, axis=-1).tolist()
+  enc_in_seq_len = enc_in_pad.index(80) if 80 in enc_in_pad else len(enc_in_pad)
+
+  dec_in = [el for el in data['target'][1:] if el != data['pad'] and el != data['eos']]
+  dec_in_seq_len = len(dec_in)
+
+  v2i = {v: i for i, v in enumerate(data['i2v'])}
+  space_idx = [i for i, el in enumerate(dec_in) if el == v2i[' ']]
+  
+  if len(space_idx) == 0:
+    return
+    
+  sentence0 = ''.join([data['i2v'][el] for el in dec_in])
+
+  if verbose:
+    print('target sentence -> ', sentence0)
+    print('number of words -> ', len(sentence0.split()))
+
+  att = data['attention'][:dec_in_seq_len, :enc_in_seq_len]
+
+  att_word = [att[:space_idx[0]].mean(0)]
+  att_word += [att[space_idx[i]+1:space_idx[i+1]].mean(0) for i in range(len(space_idx) - 1)]
+  att_word += [att[space_idx[-1]+1:].mean(0)]
+  att_word = np.stack(att_word)
+
+  ax = sns.heatmap(att_word, yticklabels=sentence0.split(), cbar=cbar)#, linewidths=0.005)
+  plt.xlabel('Audio signal')
+  plt.ylabel('Target sentence')
+  plt.title('Attention heatmap')
+  plt.tight_layout()
+
+  if show:
+    plt.show()
+  else:
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png')
+    buf.seek(0)
+    im = np.asarray(Image.open(buf))
+    return np.transpose(im, (2, 0, 1))
 
 
 if __name__ == '__main__':

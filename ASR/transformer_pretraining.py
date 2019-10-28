@@ -16,9 +16,8 @@ from models.transformer.transformer import Transformer
 from models.transformer.embedder import PositionalEmbedder
 
 
-def train_model(model, metadata, max_epochs=500, train_score_step=10, eval_step=50, save_path=''):
+def train_model(model, metadata, max_epochs=50, train_score_step=2, eval_step=10, save_path=''):
   optimizer = opt.RAdam(model.parameters(), lr=settings['lr'])
-  loss = u.CrossEntropyLoss(metadata.pad_idx)
 
   val_word_acc, val_word_acc_memory, val_sentence_acc = 0, 0, 0
 
@@ -30,7 +29,7 @@ def train_model(model, metadata, max_epochs=500, train_score_step=10, eval_step=
 
       optimizer.zero_grad()
 
-      current_loss = loss(preds.view(-1, preds.shape[-1]), dec_in.view(-1))
+      current_loss = metadata.loss(preds.view(-1, preds.shape[-1]), dec_in.view(-1))
       current_loss.backward()
 
       optimizer.step()
@@ -131,7 +130,7 @@ if __name__ == "__main__":
   argparser.add_argument('--percent', default=0.2, type=float)
   argparser.add_argument('--size_limits', default=False, type=ast.literal_eval)
   argparser.add_argument('--create_mask', default=True, type=ast.literal_eval)
-  argparser.add_argument('--loss', default='attention', type=str)
+  argparser.add_argument('--loss', default='cross_entropy', type=str)
 
   argparser.add_argument('--n_encoder_blocks', default=2, type=int)
   argparser.add_argument('--n_decoder_blocks', default=2, type=int)
@@ -154,9 +153,12 @@ if __name__ == "__main__":
   argparser.add_argument('--eval_step', default=10, type=int)
   argparser.add_argument('--train_score_step', default=2, type=int)
   argparser.add_argument('--max_epochs', default=50, type=int)
+
+  argparser.add_argument('--logfile', default='_transformer_pretraining_logs.txt', type=str)
   args = argparser.parse_args()
 
-  logging.basicConfig(stream=sys.stdout, level=logging.INFO)
+  # logging.basicConfig(stream=sys.stdout, level=logging.INFO)
+  logging.basicConfig(filename=args.logfile, filemode='a', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
   settings = u.populate_configuration(settings, vars(args))
 
