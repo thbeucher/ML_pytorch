@@ -181,7 +181,7 @@ if __name__ == "__main__":
   argparser.add_argument('--create_mask', default=True, type=ast.literal_eval)
   argparser.add_argument('--loss', default='attention', type=str)
 
-  argparser.add_argument('--enc_input_dim', default=80, type=int)
+  argparser.add_argument('--enc_input_dim', default=400, type=int)
   argparser.add_argument('--dec_input_dim', default=100, type=int)
   argparser.add_argument('--enc_max_seq_len', default=1100, type=int)
   argparser.add_argument('--dec_max_seq_len', default=600, type=int)
@@ -212,5 +212,8 @@ if __name__ == "__main__":
 
   global plotter
   plotter = u.VisdomPlotter(env_name='ConvNet Experiments')
+
+  if not os.path.isdir(settings['save_path']):
+    os.mkdir(settings['save_path'])
 
   launch_experiment(settings)
