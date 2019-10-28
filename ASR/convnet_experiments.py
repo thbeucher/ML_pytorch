@@ -122,7 +122,7 @@ def eval_model(model, metadata, settings, epoch, only_loss=True):
 def launch_experiment(settings):
   metadata = d.Metadata(train_folder=settings['train_folder'], test_folder=settings['test_folder'],
                         train_metadata=settings['train_metadata'], test_metadata=settings['test_metadata'],
-                        ngram_metadata=settings['ngram_metadata'], vocab=settings['vocab'], decay_step=settings['loss_decay'],
+                        ngram_metadata=settings['ngram_metadata'], vocab=settings['vocab'], decay_step=settings['decay_step'],
                         batch_size=settings['batch_size'], create_mask=False, subset=settings['subset'], percent=settings['percent'],
                         size_limits=settings['size_limits'], loss=settings['loss'])
 
