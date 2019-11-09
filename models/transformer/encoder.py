@@ -7,7 +7,7 @@ from attention import MultiHeadAttention
 
 class GatedEncoderBlock(nn.Module):
   '''Modify Architecture according to paper https://arxiv.org/pdf/1910.06764.pdf'''
-  def __init__(self, d_model, d_keys, d_values, n_heads, d_ff, dropout=0.1, act_fn='relu'):
+  def __init__(self, d_model, d_keys, d_values, n_heads, d_ff, dropout=0.1, act_fn='relu', mode='gru'):
     super().__init__()
     self.attention_head = MultiHeadAttention(d_model, d_keys, d_values, n_heads, dropout=dropout)
 
@@ -22,13 +22,50 @@ class GatedEncoderBlock(nn.Module):
 
     self.relu = nn.ReLU(inplace=True)
 
-    self.linear_gate1 = nn.Linear(d_model, d_model)
-    self.linear_gate2 = nn.Linear(d_model, d_model)
+    if mode == 'output':
+      self.linear_gate1 = nn.Linear(d_model, d_model)
+      self.linear_gate2 = nn.Linear(d_model, d_model)
+
+      self.gate_pos = {0: self.linear_gate1, 1: self.linear_gate2}
+      self.gate = self._gated_output_connection
+    else:
+      self.reset_att_w = nn.Linear(d_model, d_model, bias=False)
+      self.reset_x_w = nn.Linear(d_model, d_model, bias=False)
+
+      self.update_att_w = nn.Linear(d_model, d_model, bias=False)
+      self.update_x = nn.Linear(d_model, d_model)
+
+      self.memory_att_w = nn.Linear(d_model, d_model, bias=False)
+      self.memory_rx = nn.Linear(d_model, d_model, bias=False)
+
+      self.reset_att_w2 = nn.Linear(d_model, d_model, bias=False)
+      self.reset_x_w2 = nn.Linear(d_model, d_model, bias=False)
+
+      self.update_att_w2 = nn.Linear(d_model, d_model, bias=False)
+      self.update_x2 = nn.Linear(d_model, d_model)
+
+      self.memory_att_w2 = nn.Linear(d_model, d_model, bias=False)
+      self.memory_rx2 = nn.Linear(d_model, d_model, bias=False)
+
+      self.gate_pos = {0: {'reset_att': self.reset_att_w, 'reset_x': self.reset_x_w,
+                           'update_att': self.update_att_w, 'update_x': self.update_x,
+                           'memory_att': self.memory_att_w, 'memory_rx': self.memory_rx},
+                       1: {'reset_att': self.reset_att_w2, 'reset_x': self.reset_x_w2,
+                           'update_att': self.update_att_w2, 'update_x': self.update_x2,
+                           'memory_att': self.memory_att_w2, 'memory_rx': self.memory_rx2}}
+
+      self.gate = self._gru_like_gating
 
     self.dropout = nn.Dropout(dropout)
   
-  def _gru_like_gating(self, x, y):
-    pass
+  def _gru_like_gating(self, x, y, n=0):
+    reset_gate = torch.sigmoid(self.gate_pos[n]['reset_att'](y) + self.gate_pos[n]['reset_x'](x))
+    update_gate = torch.sigmoid(self.gate_pos[n]['update_att'](y) + self.gate_pos[n]['update_x'](x))
+    memory_gate = torch.tanh(self.gate_pos[n]['memory_att'](y) + self.gate_pos[n]['memory_rx'](reset_gate * x))
+    return (1 - update_gate) * x + update_gate * memory_gate
+  
+  def _gated_output_connection(self, x, y, n=0):
+    return x + torch.sigmoid(self.gate_pos[n](x)) * y
   
   def forward(self, x, padding_mask=None):
     # normalize before multi-head attention
@@ -36,13 +73,13 @@ class GatedEncoderBlock(nn.Module):
     # compute attention
     attention = self.attention_head(x_norm, x_norm, x_norm, mask=padding_mask)
     # apply gated output connection
-    x = x + torch.sigmoid(self.linear_gate1(x)) * self.relu(attention)
+    x = self.gate(x, self.relu(attention))
     # normalize before feed-forward
     x_norm = self.layer_norm2(x)
     # apply feed-forward
     pos = self.feed_forward(x_norm)
     # apply gated output connection
-    x = x + torch.sigmoid(self.linear_gate2(x)) * self.relu(pos)
+    x = self.gate(x, self.relu(pos), n=1)
     return x
 
 
