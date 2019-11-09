@@ -36,7 +36,7 @@ class GatedEncoderBlock(nn.Module):
     # compute attention
     attention = self.attention_head(x_norm, x_norm, x_norm, mask=padding_mask)
     # apply gated output connection
-    x = x + nn.functional.sigmoid(self.linear_gate1(x)) * self.relu(attention)
+    x = x + torch.sigmoid(self.linear_gate1(x)) * self.relu(attention)
     # normalize before feed-forward
     x_norm = self.layer_norm2(x)
     # apply feed-forward
