@@ -1,3 +1,4 @@
+import torch
 import utils as u
 import torch.nn as nn
 
@@ -41,7 +42,7 @@ class GatedEncoderBlock(nn.Module):
     # apply feed-forward
     pos = self.feed_forward(x_norm)
     # apply gated output connection
-    x = x + nn.functional.sigmoid(self.linear_gate2(x)) * self.relu(pos)
+    x = x + torch.sigmoid(self.linear_gate2(x)) * self.relu(pos)
     return x
 
 
