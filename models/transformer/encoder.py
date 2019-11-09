@@ -23,37 +23,15 @@ class GatedEncoderBlock(nn.Module):
     self.relu = nn.ReLU(inplace=True)
 
     if mode == 'output':
-      self.linear_gate1 = nn.Linear(d_model, d_model)
-      self.linear_gate2 = nn.Linear(d_model, d_model)
-
-      self.gate_pos = {0: self.linear_gate1, 1: self.linear_gate2}
+      self.gate_pos = {0: nn.Linear(d_model, d_model), 1: nn.Linear(d_model, d_model)}
       self.gate = self._gated_output_connection
     else:
-      self.reset_att_w = nn.Linear(d_model, d_model, bias=False)
-      self.reset_x_w = nn.Linear(d_model, d_model, bias=False)
-
-      self.update_att_w = nn.Linear(d_model, d_model, bias=False)
-      self.update_x = nn.Linear(d_model, d_model)
-
-      self.memory_att_w = nn.Linear(d_model, d_model, bias=False)
-      self.memory_rx = nn.Linear(d_model, d_model, bias=False)
-
-      self.reset_att_w2 = nn.Linear(d_model, d_model, bias=False)
-      self.reset_x_w2 = nn.Linear(d_model, d_model, bias=False)
-
-      self.update_att_w2 = nn.Linear(d_model, d_model, bias=False)
-      self.update_x2 = nn.Linear(d_model, d_model)
-
-      self.memory_att_w2 = nn.Linear(d_model, d_model, bias=False)
-      self.memory_rx2 = nn.Linear(d_model, d_model, bias=False)
-
-      self.gate_pos = {0: {'reset_att': self.reset_att_w, 'reset_x': self.reset_x_w,
-                           'update_att': self.update_att_w, 'update_x': self.update_x,
-                           'memory_att': self.memory_att_w, 'memory_rx': self.memory_rx},
-                       1: {'reset_att': self.reset_att_w2, 'reset_x': self.reset_x_w2,
-                           'update_att': self.update_att_w2, 'update_x': self.update_x2,
-                           'memory_att': self.memory_att_w2, 'memory_rx': self.memory_rx2}}
-
+      self.gate_pos = {0: {'reset_att': nn.Linear(d_model, d_model, bias=False), 'reset_x': nn.Linear(d_model, d_model, bias=False),
+                           'update_att': nn.Linear(d_model, d_model, bias=False), 'update_x': nn.Linear(d_model, d_model),
+                           'memory_att': nn.Linear(d_model, d_model, bias=False), 'memory_rx': nn.Linear(d_model, d_model, bias=False)},
+                       1: {'reset_att': nn.Linear(d_model, d_model, bias=False), 'reset_x': nn.Linear(d_model, d_model, bias=False),
+                           'update_att': nn.Linear(d_model, d_model, bias=False), 'update_x': nn.Linear(d_model, d_model),
+                           'memory_att': nn.Linear(d_model, d_model, bias=False), 'memory_rx': nn.Linear(d_model, d_model, bias=False)}}
       self.gate = self._gru_like_gating
 
     self.dropout = nn.Dropout(dropout)
