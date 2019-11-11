@@ -7,7 +7,7 @@ from attention import MultiHeadAttention
 
 class GatedEncoderBlock(nn.Module):
   '''Modify Architecture according to paper https://arxiv.org/pdf/1910.06764.pdf'''
-  def __init__(self, d_model, d_keys, d_values, n_heads, d_ff, dropout=0.1, act_fn='relu', mode='gru'):
+  def __init__(self, d_model, d_keys, d_values, n_heads, d_ff, dropout=0.1, act_fn='relu', mode='output'):
     super().__init__()
     self.attention_head = MultiHeadAttention(d_model, d_keys, d_values, n_heads, dropout=dropout)
 
@@ -22,13 +22,7 @@ class GatedEncoderBlock(nn.Module):
 
     self.relu = nn.ReLU(inplace=True)
 
-    if mode == 'output':
-      self.linear_gate1 = nn.Linear(d_model, d_model)
-      self.linear_gate2 = nn.Linear(d_model, d_model)
-
-      self.gate_pos = {0: self.linear_gate1, 1: self.linear_gate2}
-      self.gate = self._gated_output_connection
-    else:
+    if mode == 'gru':
       self.reset_att_w = nn.Linear(d_model, d_model, bias=False)
       self.reset_x_w = nn.Linear(d_model, d_model, bias=False)
 
@@ -53,8 +47,13 @@ class GatedEncoderBlock(nn.Module):
                        1: {'reset_att': self.reset_att_w2, 'reset_x': self.reset_x_w2,
                            'update_att': self.update_att_w2, 'update_x': self.update_x2,
                            'memory_att': self.memory_att_w2, 'memory_rx': self.memory_rx2}}
-
       self.gate = self._gru_like_gating
+    else:
+      self.linear_gate1 = nn.Linear(d_model, d_model)
+      self.linear_gate2 = nn.Linear(d_model, d_model)
+
+      self.gate_pos = {0: self.linear_gate1, 1: self.linear_gate2}
+      self.gate = self._gated_output_connection
 
     self.dropout = nn.Dropout(dropout)
   
