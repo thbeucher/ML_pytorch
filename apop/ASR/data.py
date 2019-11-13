@@ -17,7 +17,6 @@ from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
 # from python_speech_features.base import logfbank
 
-sys.path.append(os.path.abspath(__file__).replace('ASR/data.py', ''))
 import utils as u
 
 

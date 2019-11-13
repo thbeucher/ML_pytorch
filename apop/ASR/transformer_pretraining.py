@@ -9,7 +9,6 @@ from tqdm import tqdm
 
 import data as d
 
-sys.path.append(os.path.abspath(__file__).replace('ASR/transformer_pretraining.py', ''))
 import utils as u
 import optimizer as opt
 from models.transformer.transformer import Transformer

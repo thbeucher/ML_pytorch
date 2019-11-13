@@ -9,7 +9,6 @@ from tqdm import tqdm
 
 import data as d
 
-sys.path.append(os.path.abspath(__file__).replace('ASR/convnet_experiments.py', ''))
 import utils as u
 import optimizer as opt
 import models.conv_seqseq as css

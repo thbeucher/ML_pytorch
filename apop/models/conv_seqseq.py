@@ -4,7 +4,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-sys.path.append(os.path.abspath(__file__).replace('models/conv_seqseq.py', ''))
 import utils as u
 
 ############################################################################################################
