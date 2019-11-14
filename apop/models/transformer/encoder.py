@@ -47,7 +47,7 @@ class GatedEncoderBlock(nn.Module):
                        1: {'reset_att': self.reset_att_w2, 'reset_x': self.reset_x_w2,
                            'update_att': self.update_att_w2, 'update_x': self.update_x2,
                            'memory_att': self.memory_att_w2, 'memory_rx': self.memory_rx2}}
-      self.gate = self._gru_like_gating
+      self.gate = self._gated_gru
     elif mode == 'sigmoid_tanh':
       self.att_gate1 = nn.Linear(d_model, d_model)
       self.att_tanh1 = nn.Linear(d_model, d_model, bias=False)
@@ -63,17 +63,17 @@ class GatedEncoderBlock(nn.Module):
       self.x_gate2 = nn.Linear(d_model, d_model)
 
       self.gate_pos = {0: self.x_gate1, 1: self.x_gate2}
-      self.gate = self._gated_highway if mode == 'highway' else self._gated_output_connection
+      self.gate = self._gated_highway if mode == 'highway' else self._gated_output
 
     self.dropout = nn.Dropout(dropout)
   
-  def _gru_like_gating(self, x, y, n=0):
+  def _gated_gru(self, x, y, n=0):
     reset_gate = torch.sigmoid(self.gate_pos[n]['reset_att'](y) + self.gate_pos[n]['reset_x'](x))
     update_gate = torch.sigmoid(self.gate_pos[n]['update_att'](y) + self.gate_pos[n]['update_x'](x))
     memory_gate = torch.tanh(self.gate_pos[n]['memory_att'](y) + self.gate_pos[n]['memory_rx'](reset_gate * x))
     return (1 - update_gate) * x + update_gate * memory_gate
   
-  def _gated_output_connection(self, x, y, n=0):
+  def _gated_output(self, x, y, n=0):
     return x + torch.sigmoid(self.gate_pos[n](x)) * y
   
   def _gated_highway(self, x, y, n=0):
