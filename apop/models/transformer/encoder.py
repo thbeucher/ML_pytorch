@@ -63,7 +63,7 @@ class GatedEncoderBlock(nn.Module):
       self.x_gate2 = nn.Linear(d_model, d_model)
 
       self.gate_pos = {0: self.x_gate1, 1: self.x_gate2}
-      self.gate = self._gated_output_connection
+      self.gate = self._gated_highway if mode == 'highway' else self._gated_output_connection
 
     self.dropout = nn.Dropout(dropout)
   
