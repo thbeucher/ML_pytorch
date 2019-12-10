@@ -17,7 +17,11 @@ from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils.rnn import pad_sequence
 # from python_speech_features.base import logfbank
 
-import utils as u
+try:
+  import utils as u
+except:
+  sys.path.append(os.path.abspath(__file__).replace('ASR/data.py', ''))
+  import utils as u
 
 
 def get_list_files(folder):
@@ -748,9 +752,10 @@ def plot_attention(data, show=True, cbar=True, verbose=True):
                 - pad, eos, target, enc_in, i2v, attention
   '''
   att = data['attention']
+  n_feats = data['enc_in'].shape[-1]
 
-  enc_in_pad = np.sum(data['enc_in'] == np.ones(80) * 2, axis=-1).tolist()
-  enc_in_seq_len = enc_in_pad.index(80) if 80 in enc_in_pad else len(enc_in_pad)
+  enc_in_pad = np.sum(data['enc_in'] == np.ones(n_feats) * 2, axis=-1).tolist()
+  enc_in_seq_len = enc_in_pad.index(n_feats) if n_feats in enc_in_pad else len(enc_in_pad)
 
   dec_in = [el for el in data['target'][1:] if el != data['pad'] and el != data['eos']]
   dec_in_seq_len = len(dec_in)

@@ -166,8 +166,8 @@ if __name__ == "__main__":
   settings = u.load_json('settings.json') if os.path.isfile('settings.json') else {}
 
   argparser = argparse.ArgumentParser(prog='transformer_pretraining.py', description='Pretrain Transformer')
-  argparser.add_argument('--train_folder', default='../../datasets/openslr/LibriSpeech/train-clean-100/', type=str)
-  argparser.add_argument('--test_folder', default='../../datasets/openslr/LibriSpeech/test-clean/', type=str)
+  argparser.add_argument('--train_folder', default='../../../datasets/openslr/LibriSpeech/train-clean-100/', type=str)
+  argparser.add_argument('--test_folder', default='../../../datasets/openslr/LibriSpeech/test-clean/', type=str)
   argparser.add_argument('--train_metadata', default='metadata_train-clean-100.pk', type=str)
   argparser.add_argument('--test_metadata', default='metadata_test-clean.pk', type=str)
   argparser.add_argument('--ngram_metadata', default='metadata_custom_precoding.pk', type=str)
@@ -182,7 +182,7 @@ if __name__ == "__main__":
 
   argparser.add_argument('--enc_input_dim', default=400, type=int)
   argparser.add_argument('--dec_input_dim', default=100, type=int)
-  argparser.add_argument('--enc_max_seq_len', default=1100, type=int)
+  argparser.add_argument('--enc_max_seq_len', default=1500, type=int)
   argparser.add_argument('--dec_max_seq_len', default=600, type=int)
   argparser.add_argument('--enc_layers', default=10, type=int)
   argparser.add_argument('--dec_layers', default=10, type=int)
@@ -197,7 +197,7 @@ if __name__ == "__main__":
   argparser.add_argument('--lr', default=1e-4, type=float)
   argparser.add_argument('--smoothing_epsilon', default=0.1, type=float)
   argparser.add_argument('--save_path', default='convnet/', type=str)
-  argparser.add_argument('--plot_attention', default=True, type=ast.literal_eval)
+  argparser.add_argument('--plot_attention', default=False, type=ast.literal_eval)
   argparser.add_argument('--eval_step', default=10, type=int)
   argparser.add_argument('--max_epochs', default=500, type=int)
 
