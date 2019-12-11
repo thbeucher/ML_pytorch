@@ -93,7 +93,7 @@ def eval_model(model, metadata, settings, epoch, only_loss=True):
 
 
 def launch_experiment(settings):
-  u.dump_dict(settings)
+  u.dump_dict(settings, 'CONVNET EXPERIMENT PARAMETERS')
 
   metadata = d.Metadata(train_folder=settings['train_folder'], test_folder=settings['test_folder'],
                         train_metadata=settings['train_metadata'], test_metadata=settings['test_metadata'],
