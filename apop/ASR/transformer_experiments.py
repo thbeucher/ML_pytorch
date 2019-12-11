@@ -133,7 +133,7 @@ if __name__ == "__main__":
   argparser.add_argument('--percent', default=0.2, type=float)
   argparser.add_argument('--size_limits', default=False, type=ast.literal_eval)
   argparser.add_argument('--create_mask', default=True, type=ast.literal_eval)
-  argparser.add_argument('--loss', default='attention', type=str)
+  argparser.add_argument('--loss', default='cross_entropy', type=str)
 
   argparser.add_argument('--d_model', default=256, type=int)
   argparser.add_argument('--d_keys', default=64, type=int)
