@@ -28,8 +28,8 @@ class Transformer(nn.Module):
                decoder_embedder=None,
                encoder_embedding_dim=80,
                decoder_embedding_dim=100,
-               max_enc_in_seq_len=900,
-               max_dec_in_seq_len=600,
+               enc_max_seq_len=900,
+               dec_max_seq_len=600,
                encoder_reduce_dim=False,
                decoder_reduce_dim=False,
                apply_softmax=False,
@@ -51,8 +51,8 @@ class Transformer(nn.Module):
       * decoder_embedder (optional) : nn.Embedding
       * encoder_embedding_dim (optional) : int, default to 80
       * decoder_embedding_dim (optional) : int, default to 100
-      * max_enc_in_seq_len (optional) : int, default to 900
-      * max_dec_in_seq_len (optional) : int, default to 600
+      * enc_max_seq_len (optional) : int, default to 900
+      * dec_max_seq_len (optional) : int, default to 600
       * encoder_reduce_dim (optional) : Boolean, default to False
       * decoder_reduce_dim (optional) : Boolean, default to False
       * apply_softmax (optional) : Boolean, default to False
@@ -72,11 +72,11 @@ class Transformer(nn.Module):
     self.decoder_embedder = decoder_embedder
 
     if encoder_embedder is None:
-      self.encoder_embedder = PositionalEmbedder(max_enc_in_seq_len, encoder_embedding_dim, d_model, scaling=scaling,
+      self.encoder_embedder = PositionalEmbedder(enc_max_seq_len, encoder_embedding_dim, d_model, scaling=scaling,
                                                  reduce_dim=encoder_reduce_dim, dropout=dropout, device=device)
 
     if decoder_embedder is None:
-      self.decoder_embedder = PositionalEmbedder(max_dec_in_seq_len, decoder_embedding_dim, d_model, scaling=scaling,
+      self.decoder_embedder = PositionalEmbedder(dec_max_seq_len, decoder_embedding_dim, d_model, scaling=scaling,
                                                  reduce_dim=decoder_reduce_dim, dropout=dropout, device=device,
                                                  output_size=output_size)
 
