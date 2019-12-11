@@ -14,8 +14,8 @@ from models.transformer.embedder import PositionalEmbedder
 
 
 def instanciate_model(settings, metadata):
-  encoder_embedder = u.PositionalEmbedder(settings['enc_max_seq_len'], settings['encoder_embedding_dim'], settings['d_model'])
-  decoder_embedder = u.PositionalEmbedder(settings['dec_max_seq_len'], settings['decoder_embedding_dim'], settings['d_model'],
+  encoder_embedder = PositionalEmbedder(settings['enc_max_seq_len'], settings['encoder_embedding_dim'], settings['d_model'])
+  decoder_embedder = PositionalEmbedder(settings['dec_max_seq_len'], settings['decoder_embedding_dim'], settings['d_model'],
                                           output_size=metadata.output_size)
 
   model = Transformer(settings['n_encoder_blocks'], settings['n_decoder_blocks'], settings['d_model'], settings['d_keys'],
