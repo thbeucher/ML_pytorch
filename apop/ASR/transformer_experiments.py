@@ -66,7 +66,7 @@ def eval_model(model, metadata, settings, epoch, only_loss=True):
                                    epsilon=settings['smoothing_epsilon']).item()
       
       if not only_loss:
-        preds, _ = model.greedy_decoding(enc_in, metadata.sos_idx, metadata.eos_idx, max_seq_len=dec_in.shape[1])
+        preds = model.greedy_decoding(enc_in, metadata.sos_idx, metadata.eos_idx, max_seq_len=dec_in.shape[1])
         true_labels += dec_in[:, 1:].tolist()
         pred_labels += preds.tolist()
   
@@ -100,8 +100,6 @@ def launch_experiment(settings):
 
   for epoch in tqdm(range(settings['max_epochs'])):
     epoch_losses = train_pass(model, optimizer, metadata, settings)
-
-    metadata.loss.step(epoch)  # annealing kld loss if args.loss = 'both'
 
     plotter.line_plot('loss', 'train', 'Loss', epoch, epoch_losses)
 
@@ -140,7 +138,7 @@ if __name__ == "__main__":
   argparser.add_argument('--d_values', default=64, type=int)
   argparser.add_argument('--enc_max_seq_len', default=1500, type=int)
   argparser.add_argument('--dec_max_seq_len', default=600, type=int)
-  argparser.add_argument('--encoder_embedding_dim', default=80, type=int)
+  argparser.add_argument('--encoder_embedding_dim', default=400, type=int)
   argparser.add_argument('--decoder_embedding_dim', default=100, type=int)
   argparser.add_argument('--n_encoder_blocks', default=8, type=int)
   argparser.add_argument('--n_decoder_blocks', default=4, type=int)

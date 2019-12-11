@@ -409,7 +409,7 @@ class CustomCollator(object):
 
   def __call__(self, batch):
     encoder_inputs, decoder_inputs = zip(*batch)
-    encoder_input_batch = pad_sequence(encoder_inputs, batch_first=True, padding_value=self.pad_idx)
+    encoder_input_batch = pad_sequence(encoder_inputs, batch_first=True, padding_value=self.pad_idx).float()
     decoder_input_batch = pad_sequence(decoder_inputs, batch_first=True, padding_value=self.pad_idx)
 
     if self.create_mask:
