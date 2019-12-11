@@ -842,3 +842,29 @@ def add_args_from_settings(argparser, settings_file='settings.json'):
 
   for arg, info in settings.items():
     argparser.add_argument(f'--{arg}', default=converter[info['type']](info['default']), type=converter[info['type']])
+
+
+def model_scores(epoch, pred_labels, true_labels, metadata, plotter, partial_dump=True, n_dumps=50, visdom_plotting=True, logging_dump=True):
+  pred_labels = metadata.SM.remove_queue(pred_labels, stop_idx=metadata.eos_idx)
+  true_labels = metadata.SM.remove_queue(true_labels, stop_idx=metadata.eos_idx)
+
+  true_sentences, pred_sentences = metadata.SM.reconstruct_sentences(true_labels, pred_labels, metadata.idx_2_vocab, metadata.pad_idx)
+
+  _, eval_word_acc, eval_sentence_acc, awer = metadata.SM.compute_scores(true_sentences, pred_sentences, strategy='other')
+
+  if visdom_plotting:
+    plotter.line_plot('word accuracy', 'test', 'Word Accuracy', epoch, eval_word_acc)
+    plotter.line_plot('sentence accuracy', 'test', 'Sentence Accuracy', epoch, eval_sentence_acc)
+    plotter.line_plot('word error rate', 'test', 'Word Error Rate', epoch, awer)
+
+  if logging_dump:
+    if partial_dump:
+      to_dump = [f'\nNEW EPOCH {epoch}:\n'] + [f'TRUE: {t}\nPRED: {p}\n' for t, p in zip(true_sentences[:n_dumps], pred_sentences[:n_dumps])]
+    else:
+      to_dump = [f'\nNEW EPOCH {epoch}:\n'] + [f'TRUE: {t}\nPRED: {p}\n' for t, p in zip(true_sentences, pred_sentences)]
+
+    logging.info('\n'.join(to_dump))
+    logging.info(f'TEST Word accuracy = {eval_word_acc:.3f} | Sentence accuracy = {eval_sentence_acc:.3f}')
+    logging.info(f'TEST WER = {awer:.3f}')
+
+  return eval_word_acc, eval_sentence_acc, awer
