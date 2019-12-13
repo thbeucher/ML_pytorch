@@ -15,7 +15,8 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 
 from visdom import Visdom
-from collections import Counter
+from PIL import Image, ImageDraw, ImageFont
+from collections import Counter, OrderedDict
 
 
 class GELU(nn.Module):
@@ -868,3 +869,106 @@ def model_scores(epoch, pred_labels, true_labels, metadata, plotter, partial_dum
     logging.info(f'TEST WER = {awer:.3f}')
 
   return eval_word_acc, eval_sentence_acc, awer
+
+
+def text_to_image(text='Hello World', fname='hello_world.png', size=12, color=(255, 255, 0), bg='blue'):
+  fnt = ImageFont.truetype('../../../Downloads/arial.ttf', size)
+
+  image = Image.new(mode='RGB', size=(size * len(text) // 2 + size, 2 * size), color=bg)
+  draw = ImageDraw.Draw(image)
+
+  draw.text((size // 2, size // 2), text, font=fnt, fill=color)
+
+  image.save(fname)
+
+
+class AnalyseModelSize(object):
+  '''Modified from torchsummary library'''
+  def __init__(self, model, input_size, batch_size=-1, device='cuda'):
+    self.model = model
+    self.input_size = input_size
+    self.batch_size = batch_size
+    self.device = device
+
+  def register_hook(self, module):
+    def hook(module, input, output):
+      class_name = str(module.__class__).split(".")[-1].split("'")[0]
+      module_idx = len(self.summary)
+
+      m_key = "%s-%i" % (class_name, module_idx + 1)
+      self.summary[m_key] = OrderedDict()
+      self.summary[m_key]["input_shape"] = list(input[0].size())
+      self.summary[m_key]["input_shape"][0] = self.batch_size
+      if isinstance(output, (list, tuple)):
+        self.summary[m_key]["output_shape"] = [[-1] + list(o.size())[1:] for o in output]
+      else:
+        self.summary[m_key]["output_shape"] = list(output.size())
+        self.summary[m_key]["output_shape"][0] = self.batch_size
+
+      params = 0
+      if hasattr(module, "weight") and hasattr(module.weight, "size"):
+        params += torch.prod(torch.LongTensor(list(module.weight.size())))
+        self.summary[m_key]["trainable"] = module.weight.requires_grad
+      if hasattr(module, "bias") and hasattr(module.bias, "size"):
+        params += torch.prod(torch.LongTensor(list(module.bias.size())))
+      self.summary[m_key]["nb_params"] = params
+    
+    if (not isinstance(module, nn.Sequential) and not isinstance(module, nn.ModuleList) and not (module == self.model)):
+      self.hooks.append(module.register_forward_hook(hook))
+  
+  def analyse(self):
+    device = self.device.lower()
+    assert device in ["cuda", "cpu"], "Input device is not valid, please specify 'cuda' or 'cpu'"
+
+    if device == "cuda" and torch.cuda.is_available():
+      dtype = torch.cuda.FloatTensor
+    else:
+      dtype = torch.FloatTensor
+
+    # multiple inputs to the network
+    if isinstance(self.input_size, tuple):
+      self.input_size = [self.input_size]
+
+    # batch_size of 2 for batchnorm
+    x = [torch.rand(2, *in_size).type(dtype) for in_size in self.input_size]
+    # print(type(x[0]))
+
+    # create properties
+    self.summary = OrderedDict()
+    self.hooks = []
+
+    # register hook
+    self.model.apply(self.register_hook)
+
+    # make a forward pass
+    # print(x.shape)
+    self.model(*x)
+
+    # remove these hooks
+    for h in self.hooks:
+      h.remove()
+
+    total_params = 0
+    total_output = 0
+    trainable_params = 0
+
+    for layer in self.summary:
+      # input_shape, output_shape, trainable, nb_params
+      total_params += self.summary[layer]["nb_params"]
+      total_output += np.prod(self.summary[layer]["output_shape"])
+
+      if "trainable" in self.summary[layer]:
+        if self.summary[layer]["trainable"] == True:
+          trainable_params += self.summary[layer]["nb_params"]
+    
+    # Gave in MB
+    total_input_size = abs(np.prod(self.input_size) * self.batch_size * 4. / (1024 ** 2.))
+    total_output_size = abs(2. * total_output * 4. / (1024 ** 2.))  # x2 for gradients
+    total_params_size = abs(total_params.numpy() * 4. / (1024 ** 2.))
+    total_size = total_params_size + total_output_size + total_input_size
+
+    results = {'total_params': total_params, 'trainable_params': trainable_params,
+               'non_trainable_params': total_params - trainable_params, 'input_size': total_input_size,
+               'forward_backward_size': total_output_size, 'params_size': total_params_size, 'total_size': total_size}
+    
+    return results
