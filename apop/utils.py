@@ -972,3 +972,38 @@ class AnalyseModelSize(object):
                'forward_backward_size': total_output_size, 'params_size': total_params_size, 'total_size': total_size}
     
     return results
+
+
+def save_tmp(fname, savetype='pk'):
+  '''
+  Decorator to use in order to save in a file the data returned by the function decorated.
+  To avoid computing each time the function is called.
+
+  Usage:
+    @save_tmp('_my_temporary_file.pk')
+    def my_function():
+      data = compute_my_data()
+      return data
+  '''
+  def decorator(function):
+    def inner(*args, **kwargs):
+      if os.path.isfile(fname):
+        if savetype == 'pk':
+          with open(fname, 'rb') as f:
+            to_return = pk.load(f)
+        else:
+          with open(fname, 'r') as f:
+            to_return = json.load(f)
+      else:
+        to_return = function(*args, **kwargs)
+
+        if savetype == 'pk':
+          with open(fname, 'wb') as f:
+            pk.dump(to_return, f)
+        else:
+          with open(fname, 'w') as f:
+            json.dump(to_return, f)
+      
+      return to_return
+    return inner
+  return decorator
