@@ -663,7 +663,8 @@ class Metadata(object):
                      batch_size=32,
                      size_limits=False,
                      create_mask=True,
-                     loss='attention'):
+                     loss='attention',
+                     device=None):
     '''
     The followings variable are available after instanciate this class:
       * train_folder                      * device
@@ -689,7 +690,7 @@ class Metadata(object):
     self.size_limits = size_limits
     self.create_mask = create_mask
 
-    self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu') if device is None else device
 
     self.load_metadata_vars()
 

@@ -11,9 +11,9 @@ import utils as u
 
 
 class DecoderBlock(nn.Module):
-  def __init__(self, d_model, d_keys, d_values, n_heads, d_ff, dropout=0.1):
+  def __init__(self, d_model, d_keys, d_values, n_heads, d_ff, dropout=0.1, device=None):
     super().__init__()
-    self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu") if device is None else device
     self.masked_attention_head = MultiHeadAttention(d_model, d_keys, d_values, n_heads, dropout=dropout)
     self.attention_head = MultiHeadAttention(d_model, d_keys, d_values, n_heads, dropout=dropout)
     self.feed_forward = nn.Sequential(
@@ -55,9 +55,10 @@ class DecoderBlock(nn.Module):
 
 
 class TransformerDecoder(nn.Module):
-  def __init__(self, n_blocks, d_model, d_keys, d_values, n_heads, d_ff, dropout=0.1):
+  def __init__(self, n_blocks, d_model, d_keys, d_values, n_heads, d_ff, dropout=0.1, device=None):
     super().__init__()
-    self.decoders = nn.ModuleList([DecoderBlock(d_model, d_keys, d_values, n_heads, d_ff, dropout=dropout) for _ in range(n_blocks)])
+    self.decoders = nn.ModuleList([DecoderBlock(d_model, d_keys, d_values, n_heads, d_ff, dropout=dropout, device=device)
+                                    for _ in range(n_blocks)])
         
   def forward(self, x, enc_out, padding_mask=None, save=False, aggregate=False):
     for decoder in self.decoders:

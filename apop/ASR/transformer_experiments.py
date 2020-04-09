@@ -14,14 +14,15 @@ from models.transformer.embedder import PositionalEmbedder
 
 
 def instanciate_model(settings, metadata):
-  encoder_embedder = PositionalEmbedder(settings['enc_max_seq_len'], settings['encoder_embedding_dim'], settings['d_model'])
+  encoder_embedder = PositionalEmbedder(settings['enc_max_seq_len'], settings['encoder_embedding_dim'], settings['d_model'],
+                                        device=metadata.device)
   decoder_embedder = PositionalEmbedder(settings['dec_max_seq_len'], settings['decoder_embedding_dim'], settings['d_model'],
-                                          output_size=metadata.output_size)
+                                        output_size=metadata.output_size, device=metadata.device)
 
   model = Transformer(settings['n_encoder_blocks'], settings['n_decoder_blocks'], settings['d_model'], settings['d_keys'],
                       settings['d_values'], settings['n_heads'], settings['d_ff'], metadata.output_size,
                       encoder_embedder=encoder_embedder, decoder_embedder=decoder_embedder, dropout=settings['dropout'],
-                      enc_max_seq_len=settings['enc_max_seq_len'], dec_max_seq_len=settings['dec_max_seq_len'])
+                      enc_max_seq_len=settings['enc_max_seq_len'], dec_max_seq_len=settings['dec_max_seq_len'], device=metadata.device)
 
   logging.info(f'The model has {u.count_trainable_parameters(model):,} trainable parameters')
   
@@ -90,7 +91,8 @@ def launch_experiment(settings):
                         train_metadata=settings['train_metadata'], test_metadata=settings['test_metadata'],
                         ngram_metadata=settings['ngram_metadata'], vocab=settings['vocab'], decay_step=settings['decay_step'],
                         batch_size=settings['batch_size'], create_mask=settings['create_mask'], subset=settings['subset'],
-                        percent=settings['percent'], size_limits=settings['size_limits'], loss=settings['loss'])
+                        percent=settings['percent'], size_limits=settings['size_limits'], loss=settings['loss'],
+                        device=torch.device(f"cuda:{settings['num_device']}"))
   
   model = instanciate_model(settings, metadata)
 
@@ -152,6 +154,7 @@ if __name__ == "__main__":
   argparser.add_argument('--plot_attention', default=False, type=ast.literal_eval)
   argparser.add_argument('--eval_step', default=10, type=int)
   argparser.add_argument('--max_epochs', default=500, type=int)
+  argparser.add_argument('--num_device', default=0, type=int)
 
   argparser.add_argument('--logfile', default='_transformer_experiments_logs.txt', type=str)
   args = argparser.parse_args()
@@ -162,7 +165,7 @@ if __name__ == "__main__":
   settings = u.populate_configuration(settings, vars(args))
 
   global plotter
-  plotter = u.VisdomPlotter(env_name='ConvNet Experiments')
+  plotter = u.VisdomPlotter(env_name='Transformer Experiments')
 
   if not os.path.isdir(settings['save_path']):
     os.makedirs(settings['save_path'])

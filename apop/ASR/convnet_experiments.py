@@ -18,7 +18,7 @@ def instanciate_model(enc_input_dim=80, dec_input_dim=100, enc_max_seq_len=1100,
                       enc_layers=10, dec_layers=10, enc_kernel_size=3, dec_kernel_size=3,
                       enc_dropout=0.25, dec_dropout=0.25, emb_dim=256, hid_dim=512, output_size=31,
                       reduce_dim=False, device=None, pad_idx=2):
-  device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') if device is None else device
+  device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu') if device is None else device
 
   enc_embedder = css.EncoderEmbedder(enc_input_dim, emb_dim, hid_dim, enc_max_seq_len, enc_dropout, device, reduce_dim=reduce_dim)
   dec_embedder = css.DecoderEmbedder(dec_input_dim, emb_dim, dec_max_seq_len, dec_dropout, device)
@@ -110,8 +110,8 @@ def launch_experiment(settings):
                             output_size=metadata.output_size, reduce_dim=settings['reduce_dim'], 
                             device=metadata.device, pad_idx=metadata.pad_idx)
 
-  if torch.cuda.device_count() > 1:
-    model = torch.nn.DataParallel(model)
+  # if torch.cuda.device_count() > 1:
+  #   model = torch.nn.DataParallel(model)
 
   logging.info(f'The model has {u.count_trainable_parameters(model):,} trainable parameters')
 

@@ -62,7 +62,7 @@ class Transformer(nn.Module):
       * device (optional) : torch.device
     '''
     super().__init__()
-    self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') if device is None else device
+    self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu') if device is None else device
     self.apply_softmax = apply_softmax
 
     self.encoder_reduce_dim = encoder_reduce_dim
@@ -81,7 +81,7 @@ class Transformer(nn.Module):
                                                  output_size=output_size)
 
     self.encoder = TransformerEncoder(n_encoder_blocks, d_model, d_keys, d_values, n_heads, d_ff, dropout=dropout)
-    self.decoder = TransformerDecoder(n_decoder_blocks, d_model, d_keys, d_values, n_heads, d_ff, dropout=dropout)
+    self.decoder = TransformerDecoder(n_decoder_blocks, d_model, d_keys, d_values, n_heads, d_ff, dropout=dropout, device=self.device)
 
     self.encoder_input_projection = nn.Linear(self.encoder_embedder.embedding_size, d_model)
     self.decoder_input_projection = nn.Linear(self.decoder_embedder.embedding_size, d_model)
