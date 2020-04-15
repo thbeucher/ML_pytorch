@@ -4,6 +4,8 @@ import sys
 import torch
 import logging
 import argparse
+import threading
+import torch.optim as optim
 
 from tqdm import tqdm
 
@@ -12,6 +14,19 @@ import data as d
 import utils as u
 import optimizer as opt
 import models.conv_seqseq as css
+
+
+def compute_plot_scores_async(epoch, metadata, plotter):
+  _, train_word_acc, train_sentence_acc, awer = metadata.SM.get_scores(metadata.SM.pred_labels,
+                                                                       metadata.SM.true_labels,
+                                                                       stop_idx=metadata.eos_idx,
+                                                                       strategy='other')
+
+  plotter.line_plot('word accuracy', 'train', 'Word Accuracy', epoch, train_word_acc)
+  plotter.line_plot('sentence accuracy', 'train', 'Sentence Accuracy', epoch, train_sentence_acc)
+  plotter.line_plot('word error rate', 'train', 'Word Error Rate', epoch, awer)
+
+  logging.info(f'EPOCH {epoch} : Train Word accuracy = {train_word_acc:.3f} | Sentence accuracy = {train_sentence_acc:.3f}')
 
 
 def instanciate_model(enc_input_dim=80, dec_input_dim=100, enc_max_seq_len=1100, dec_max_seq_len=600,
@@ -42,6 +57,9 @@ def train_pass(model, optimizer, metadata, settings):
                                   att, epsilon=settings['smoothing_epsilon'])
 
     current_loss.backward()
+
+    if settings['clip_grad']:
+      torch.nn.utils.clip_grad_norm_(model.parameters(), 0.1)
 
     optimizer.step()
 
@@ -115,12 +133,20 @@ def launch_experiment(settings):
 
   logging.info(f'The model has {u.count_trainable_parameters(model):,} trainable parameters')
 
-  optimizer = opt.RAdam(model.parameters(), lr=settings['lr'])
+  # optimizer = opt.RAdam(model.parameters(), lr=settings['lr'])
+  optimizer = optim.Adam(model.parameters(), lr=settings['lr'])
+  # optimizer = opt.AdamW(model.parameters(), lr=settings['lr'])
+
+  if settings['load_model']:
+    u.load_model(model, f"{settings['save_path']}convnet.pt", map_location=None, restore_only_similars=True)
 
   memory_word_acc = 0
 
   for epoch in tqdm(range(settings['max_epochs'])):
     epoch_losses = train_pass(model, optimizer, metadata, settings)
+
+    if epoch % settings['train_acc_step'] == 0: 
+      threading.Thread(target=compute_plot_scores_async, args=(epoch, metadata, plotter)).start()
 
     metadata.loss.step(epoch)  # annealing kld loss if args.loss = 'both'
 
@@ -139,6 +165,9 @@ def launch_experiment(settings):
   
 
 if __name__ == "__main__":
+  # With raw encoding of audio file -> Train = [981, 400] | Test = [1399, 400] -> [max_seq_len, n_feats]
+  # With mfcc encoding -> Train = [2453, 80] | Test = [3496, 80] -> by removing the longest 54 sequence, max_seq_len = 1700
+  # With log_spectrogram encoding -> Train = [2451, 257] | Test = [3494, 257]
   settings = u.load_json('settings.json') if os.path.isfile('settings.json') else {}
 
   argparser = argparse.ArgumentParser(prog='convnet_experiments.py', description='ConvNet Experiments')
@@ -158,7 +187,7 @@ if __name__ == "__main__":
 
   argparser.add_argument('--enc_input_dim', default=400, type=int)
   argparser.add_argument('--dec_input_dim', default=100, type=int)
-  argparser.add_argument('--enc_max_seq_len', default=1500, type=int)
+  argparser.add_argument('--enc_max_seq_len', default=1400, type=int)
   argparser.add_argument('--dec_max_seq_len', default=600, type=int)
   argparser.add_argument('--enc_layers', default=10, type=int)
   argparser.add_argument('--dec_layers', default=10, type=int)
@@ -176,6 +205,9 @@ if __name__ == "__main__":
   argparser.add_argument('--plot_attention', default=False, type=ast.literal_eval)
   argparser.add_argument('--eval_step', default=10, type=int)
   argparser.add_argument('--max_epochs', default=500, type=int)
+  argparser.add_argument('--train_acc_step', default=5, type=int)
+  argparser.add_argument('--load_model', default=False, type=ast.literal_eval)
+  argparser.add_argument('--clip_grad', default=False, type=ast.literal_eval)
 
   argparser.add_argument('--logfile', default='_convnet_experiments_logs.txt', type=str)
   args = argparser.parse_args()

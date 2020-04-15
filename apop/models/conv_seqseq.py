@@ -10,7 +10,7 @@ import utils as u
 ### Implementation of Convolutional Sequence to Sequence Learning (https://arxiv.org/pdf/1705.03122.pdf) ###
 ############################################################################################################
 class EncoderEmbedder(nn.Module):
-  def __init__(self, input_dim, emb_dim, hid_dim, max_seq_len, dropout, device, reduce_dim=False):
+  def __init__(self, input_dim, emb_dim, hid_dim, max_seq_len, dropout, device, reduce_dim=False, kernel=3, stride=2):
     super().__init__()
     self.device = device
     self.reduce_dim = reduce_dim
@@ -18,10 +18,11 @@ class EncoderEmbedder(nn.Module):
     self.positional_embedding = u.create_positional_embedding(max_seq_len, emb_dim, hid_dim)
 
     if reduce_dim:
-      self.conv = nn.Sequential(nn.Conv2d(1, 1, 3, stride=2),
+      self.conv = nn.Sequential(nn.Conv2d(1, 1, kernel, stride=stride),
                                 nn.ReLU(),
-                                nn.Conv2d(1, 1, 3, stride=2),
+                                nn.Conv2d(1, 1, kernel, stride=stride),
                                 nn.ReLU())
+      input_dim = ((input_dim - (kernel - 1) - 1) // stride + 1) // 2
 
     self.dropout = nn.Dropout(dropout)
 

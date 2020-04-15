@@ -91,7 +91,7 @@ def preprocess_audio_data(folder, dct_type=2, extract_type='mfcc', win_size=0.02
       #  80-dimensional log-Mel filterbank features, computed with a 25ms window and shifted every 10ms
       # features = logfbank(signal, nfilt=80, samplerate=16000, winlen=0.025, winstep=0.01)
       features = librosa.feature.melspectrogram(y=signal, sr=sample_rate, n_mels=80, n_fft=n_fft, hop_length=hop_length)
-      features = np.log(features + 1e-6)
+      features = np.log(features + 1e-6).T
     else:
       # raw cutting
       window = int(win_size * sample_rate)
@@ -284,7 +284,8 @@ class CustomDataset(Dataset):
   '''
   Currently, if you set size_limits to True, check value of enc_seq_len_max, argument of check_size_limits function 
   '''
-  def __init__(self, folder, metadata=None, save_metadata='metadata.pk', ordering=False, size_limits=False):
+  def __init__(self, folder, metadata=None, save_metadata='metadata.pk', ordering=False, size_limits=False,
+               size_limits_fname='_tmp_check_size_limits.pk'):
     '''
     Params:
       * folder : str, folder where the data are
@@ -295,7 +296,7 @@ class CustomDataset(Dataset):
     '''
     filelist = get_list_files(folder)
     self.metadata = load_metadata(save_metadata) if metadata is None else metadata
-    self.filelist = self.check_size_limits(filelist) if size_limits else filelist
+    self.filelist = self.check_size_limits(filelist, filename=size_limits_fname) if size_limits else filelist
     self.filelist = self.ordering_data(self.filelist, self.metadata) if ordering else self.filelist
   
   def ordering_data(self, filelist, metadata):
@@ -318,7 +319,7 @@ class CustomDataset(Dataset):
     filelist['features'] = ordered_filelist_feats
     return filelist
   
-  def check_size_limits(self, filelist, enc_seq_len_max=1600, filename='_tmp_check_size_limits.pk'):
+  def check_size_limits(self, filelist, enc_seq_len_max=1700, filename='_tmp_check_size_limits.pk'):
     '''
     Removes too big documents.
 
@@ -420,7 +421,7 @@ class CustomCollator(object):
 
 
 def get_dataset_generator(folder, metadata, batch_size, num_workers=4, ordering=False, shuffle=True, subset=False,
-                          percent=0.2, size_limits=False, create_mask=True):
+                          percent=0.2, size_limits=False, create_mask=True, size_limits_fname='_tmp_check_size_limits.pk'):
   '''
   Params:
     * folder : str, folder where data are
@@ -437,7 +438,7 @@ def get_dataset_generator(folder, metadata, batch_size, num_workers=4, ordering=
   Returns:
     * generator, instance of torch.utils.data.DataLoader
   '''
-  custom_dataset = CustomDataset(folder, metadata=metadata, ordering=ordering, size_limits=size_limits)
+  custom_dataset = CustomDataset(folder, metadata=metadata, ordering=ordering, size_limits=size_limits, size_limits_fname=size_limits_fname)
 
   if subset:
     custom_dataset = u.extract_subset(custom_dataset, percent=percent)
@@ -725,12 +726,15 @@ class Metadata(object):
                                                      subset=self.subset,
                                                      percent=self.percent,
                                                      size_limits=self.size_limits,
-                                                     create_mask=self.create_mask)
+                                                     create_mask=self.create_mask,
+                                                     size_limits_fname='_tmp_check_size_limits_train.pk')
       self.test_data_loader = get_dataset_generator(self.test_folder,
                                                     self.test_metadata,
                                                     self.batch_size,
                                                     subset=self.subset,
-                                                    create_mask=self.create_mask)
+                                                    create_mask=self.create_mask,
+                                                    size_limits=self.size_limits,
+                                                    size_limits_fname='_tmp_check_size_limits_test.pk')
     else:
       self.train_data_loader = get_dataset_generator_CP(batch_size=self.batch_size,
                                                         subset=self.subset,
@@ -800,8 +804,8 @@ if __name__ == '__main__':
   argparser = argparse.ArgumentParser(prog='data.py', description='data utils')
   argparser.add_argument('--dct_type', default=2, type=int)
   argparser.add_argument('--extract_type', default='mfcc', type=str)
-  argparser.add_argument('--train_folder', default='../../datasets/openslr/LibriSpeech/train-clean-100/', type=str)
-  argparser.add_argument('--test_folder', default='../../datasets/openslr/LibriSpeech/test-clean/', type=str)
+  argparser.add_argument('--train_folder', default='../../../datasets/openslr/LibriSpeech/train-clean-100/', type=str)
+  argparser.add_argument('--test_folder', default='../../../datasets/openslr/LibriSpeech/test-clean/', type=str)
   args = argparser.parse_args()
 
   rep = input('Preprocess audio data? (y or n): ')
