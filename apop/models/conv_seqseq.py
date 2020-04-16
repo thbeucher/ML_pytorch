@@ -466,7 +466,7 @@ class AttentionFeedback(nn.Module):
     p_attented_encoding = self.p_attention_emb2hid(p_attented_encoding)
     p_attented_encoding = (conved + p_attented_encoding.permute(0, 2, 1)) * self.scale
 
-    return F.softmax(attention + p_attention, dim=-1), attented_combined + p_attented_encoding
+    return p_attention, attented_combined + p_attented_encoding
 
 
 class Seq2SeqFeedback(nn.Module):
