@@ -469,7 +469,7 @@ class AttentionFeedback(nn.Module):
     return F.softmax(attention + p_attention, dim=-1), attented_combined + p_attented_encoding
 
 
-class Seq2SeqFeedBack():
+class Seq2SeqFeedback():
   def __init__(self, encoder, decoder, p_encoder, p_decoder, device):
     super().__init__()
     self.encoder = encoder
