@@ -1007,3 +1007,12 @@ def save_tmp(fname, savetype='pk'):
       return to_return
     return inner
   return decorator
+
+
+def l1_regularization(model, _lambda=1e-3):
+  L1_reg = torch.tensor(0., requires_grad=True)
+  for name, param in model.named_parameters():
+    if 'weight' in name:
+      L1_reg = L1_reg + torch.norm(param, 1)
+
+  return _lambda * L1_reg

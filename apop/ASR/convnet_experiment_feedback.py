@@ -67,6 +67,9 @@ def train_pass(model, optimizer, metadata, settings):
     
     current_loss += metadata.loss(f_preds.contiguous().view(-1, f_preds.shape[-1]), dec_in[:, 1:].contiguous().view(-1),
                                   f_att, epsilon=settings['smoothing_epsilon'])
+    
+    if settings['l1_reg'] > 0:
+      current_loss += u.l1_regularization(model, _lambda=settings['l1_reg'])
 
     current_loss.backward()
 
@@ -149,8 +152,10 @@ def launch_experiment(settings):
 
   logging.info(f'The model has {u.count_trainable_parameters(model):,} trainable parameters')
 
-  optimizer = optim.Adam(model.parameters(), lr=settings['lr'])
-  # optimizer = opt.AdamW(model.parameters(), lr=settings['lr'])
+  if settings['weight_decay'] == 0:
+    optimizer = optim.Adam(model.parameters(), lr=settings['lr'])
+  else:
+    optimizer = opt.AdamW(model.parameters(), lr=settings['lr'], weight_decay=settings['weight_decay'])
 
   if settings['load_model']:
     u.load_model(model, f"{settings['save_path']}convnet_feedback.pt", map_location=None, restore_only_similars=True)
@@ -229,6 +234,8 @@ if __name__ == "__main__":
   argparser.add_argument('--train_acc_step', default=5, type=int)
   argparser.add_argument('--load_model', default=False, type=ast.literal_eval)
   argparser.add_argument('--clip_grad', default=False, type=ast.literal_eval)
+  argparser.add_argument('--weight_decay', default=0., type=float)  # L2 regularization -> 0.01
+  argparser.add_argument('--l1_reg', default=0., type=float)  # L1 regularization -> 0.001
 
   argparser.add_argument('--logfile', default='_convnet_experiments_feedback_logs.txt', type=str)
   args = argparser.parse_args()
