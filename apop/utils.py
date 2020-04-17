@@ -1009,8 +1009,9 @@ def save_tmp(fname, savetype='pk'):
   return decorator
 
 
-def l1_regularization(model, _lambda=1e-3):
-  L1_reg = torch.tensor(0., requires_grad=True)
+def l1_regularization(model, _lambda=1e-3, device=None):
+  device = torch.device(f'cuda:0' if torch.cuda.is_available() else 'cpu') if device is None else device
+  L1_reg = torch.tensor(0., requires_grad=True).to(device)
   for name, param in model.named_parameters():
     if 'weight' in name:
       L1_reg = L1_reg + torch.norm(param, 1)

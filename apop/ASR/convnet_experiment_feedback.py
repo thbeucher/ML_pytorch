@@ -69,7 +69,7 @@ def train_pass(model, optimizer, metadata, settings):
                                   f_att, epsilon=settings['smoothing_epsilon'])
     
     if settings['l1_reg'] > 0:
-      current_loss += u.l1_regularization(model, _lambda=settings['l1_reg'])
+      current_loss += u.l1_regularization(model, _lambda=settings['l1_reg'], device=metadata.device)
 
     current_loss.backward()
 
