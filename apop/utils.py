@@ -10,11 +10,13 @@ import requests
 import itertools
 import numpy as np
 import pickle as pk
+import pandas as pd
 import torch.nn as nn
 import seaborn as sns
 import matplotlib.pyplot as plt
 
 from visdom import Visdom
+from tabulate import tabulate
 from PIL import Image, ImageDraw, ImageFont
 from collections import Counter, OrderedDict
 
@@ -1017,3 +1019,24 @@ def l1_regularization(model, _lambda=1e-3, device=None):
       L1_reg = L1_reg + torch.norm(param, 1)
 
   return _lambda * L1_reg
+
+
+def board_printing(data):
+  '''
+  Prints a results board like this:
+    +----+-------------------+---------+
+    |    | name              |    f1   |
+    |----+-------------------+---------+
+    |  0 | mon-premier-bot_6 |   0.773 |
+    |  1 | vox_13            |   0.685 |
+    |  2 | amel_13           |   0.81  |
+    |  3 | artebot_18        |   0.831 |
+    |  4 | anass-a_14        |   0.739 |
+    |  5 | zambot_14         |   0.705 |
+    +----+-------------------+---------+
+  
+  Params:
+    * data : dict like {key1: [], key2: [], ...}
+  '''
+  df = pd.DataFrame.from_dict(data)
+  print(tabulate(df, headers='keys', tablefmt='psql'))
