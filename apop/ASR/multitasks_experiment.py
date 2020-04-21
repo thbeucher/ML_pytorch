@@ -742,9 +742,9 @@ class Experiment1(object):
     eval_accuracy_memory = 0
     for epoch in tqdm(range(n_epochs)):
       epoch_loss, mpta, ota = self.train_pass()
-      logging.info(f'Epoch {epoch} | train_loss = {epoch_loss:.3f} | mean_preds_train_acc = {mpta:.3f} | overall_train_acc = {ota:.3f}')
+      logging.info(f'Epoch {epoch} | train_loss = {epoch_loss:.3f} | mean_preds_train_acc = {mpta} | overall_train_acc = {ota}')
       eval_loss, mpea, oea = self.evaluation(only_loss=False if epoch % eval_step == 0 else True)
-      logging.info(f'Epoch {epoch} | test_loss = {eval_loss:.3f} | mean_preds_eval_acc = {mpea:.3f} | overall_eval_acc = {oea:.3f}')
+      logging.info(f'Epoch {epoch} | test_loss = {eval_loss:.3f} | mean_preds_eval_acc = {mpea} | overall_eval_acc = {oea}')
 
       self.criterion.step(200 if self.decay_factor == 0 else epoch)
 
