@@ -66,7 +66,7 @@ import models.conv_seqseq as css
 
 
 class CustomDataset(Dataset):
-  def __init__(self, ids_to_audiofile, ids_to_encodedsources, signal_type='window-sliced '):
+  def __init__(self, ids_to_audiofile, ids_to_encodedsources, signal_type='window-sliced'):
     self.ids_to_audiofile = ids_to_audiofile
     self.ids_to_encodedsources = ids_to_encodedsources
     self.signal_type = signal_type
@@ -591,7 +591,7 @@ class Data(object):
     return Subset(dataset, subset)
   
   def get_dataset_generator(self, train=True, batch_size=32, num_workers=4, shuffle=True, subset=False, percent=0.2,
-                            pad_tok='<pad>', device=None):
+                            pad_tok='<pad>', device=None, signal_type='window-sliced'):
     '''
     Params:
       * train (optional) : bool, True to return training generator, False for testing generator
@@ -608,9 +608,9 @@ class Data(object):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') if device is None else device
 
     if train:
-      custom_dataset = CustomDataset(self.ids_to_audiofile_train, self.ids_to_encodedsources_train)
+      custom_dataset = CustomDataset(self.ids_to_audiofile_train, self.ids_to_encodedsources_train, signal_type=signal_type)
     else:
-      custom_dataset = CustomDataset(self.ids_to_audiofile_test, self.ids_to_encodedsources_test)
+      custom_dataset = CustomDataset(self.ids_to_audiofile_test, self.ids_to_encodedsources_test, signal_type=signal_type)
 
     if subset:
       custom_dataset = Data.extract_subset(custom_dataset, percent=percent)
@@ -668,7 +668,7 @@ def data_routine(train_folder = '../../../datasets/openslr/LibriSpeech/train-cle
 
 
 class Experiment1(object):
-  '''Encoder-Decoder convnet for syllables prediction, adam optimizer, cross-entropy loss, window-sliced'''
+  '''Encoder-Decoder convnet for syllables prediction, adam optimizer, CrossEntropy loss, window-sliced'''
   def __init__(self, device=None, logfile='_logs/_logs_experiment1.txt', lr=1e-4, smoothing_eps=0.1, dump_config=True, decay_factor=0):
     logging.basicConfig(filename=logfile, filemode='a', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -742,9 +742,9 @@ class Experiment1(object):
     eval_accuracy_memory = 0
     for epoch in tqdm(range(n_epochs)):
       epoch_loss, mpta, ota = self.train_pass()
-      logging.info(f'Epoch {epoch} | train_loss = {epoch_loss} | mean_preds_train_acc = {mpta} | overall_train_acc = {ota}')
+      logging.info(f'Epoch {epoch} | train_loss = {epoch_loss:.3f} | mean_preds_train_acc = {mpta:.3f} | overall_train_acc = {ota:.3f}')
       eval_loss, mpea, oea = self.evaluation(only_loss=False if epoch % eval_step == 0 else True)
-      logging.info(f'Epoch {epoch} | test_loss = {eval_loss} | mean_preds_eval_acc = {mpea} | overall_eval_acc = {oea}')
+      logging.info(f'Epoch {epoch} | test_loss = {eval_loss:.3f} | mean_preds_eval_acc = {mpea:.3f} | overall_eval_acc = {oea:.3f}')
 
       self.criterion.step(200 if self.decay_factor == 0 else epoch)
 
@@ -792,6 +792,20 @@ class Experiment2(Experiment1):
     logging.info(f'The model has {u.count_trainable_parameters(self.model):,} trainable parameters')
 
 
+class Experiment3(Experiment1):
+  '''Encoder-Decoder convnet for syllables prediction, adam optimizer, CrossEntropy loss, std-threshold-selected'''
+  def __init__(self, logfile='_logs/_logs_experiment3.txt', device=None, decay_factor=0):
+    super().__init__(dump_config=False, device=device)
+    [logging.root.removeHandler(handler) for handler in logging.root.handlers[:]]
+    logging.basicConfig(filename=logfile, filemode='a', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+    u.dump_dict(self.convnet_config, 'ENCODER-DECODER PARAMETERS')
+    logging.info(f'The model has {u.count_trainable_parameters(self.model):,} trainable parameters')
+
+    self.train_data_loader = self.data.get_dataset_generator(signal_type='std-threshold-selected')
+    self.test_data_loader = self.data.get_dataset_generator(train=False, signal_type='std-threshold-selected')
+
+
 if __name__ == "__main__":
   rep = input('Perform Experiment1? (y or n): ')
   if rep == 'y':
@@ -801,5 +815,10 @@ if __name__ == "__main__":
   rep = input('Perform Experiment2? (y or n): ')
   if rep == 'y':
     exp = Experiment2()
+    exp.train()
+  
+  rep = input('Perform Experiment3? (y or n): ')
+  if rep == 'y':
+    exp = Experiment3()
     exp.train()
 
