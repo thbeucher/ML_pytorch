@@ -669,12 +669,14 @@ def data_routine(train_folder = '../../../datasets/openslr/LibriSpeech/train-cle
 
 class Experiment1(object):
   '''Encoder-Decoder convnet for syllables prediction, adam optimizer, CrossEntropy loss, window-sliced'''
-  def __init__(self, device=None, logfile='_logs/_logs_experiment1.txt', lr=1e-4, smoothing_eps=0.1, dump_config=True, decay_factor=0):
+  def __init__(self, device=None, logfile='_logs/_logs_experiment1.txt', lr=1e-4, smoothing_eps=0.1, dump_config=True, decay_factor=0,
+               save_name_model='convnet/convnet_experiment1.pt'):
     logging.basicConfig(filename=logfile, filemode='a', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
     self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') if device is None else device
     self.smoothing_eps = smoothing_eps
     self.decay_factor = decay_factor
+    self.save_name_model = save_name_model
 
     self.data = data_routine(encoding_fn=Data.syllables_encoding, metadata_file='_Data_metadata_syllables.pk', process_audio=False)
 
@@ -749,7 +751,7 @@ class Experiment1(object):
       self.criterion.step(200 if self.decay_factor == 0 else epoch)
 
       if oea is not None and oea > eval_accuracy_memory:
-        u.save_checkpoint(self.model, None, 'convnet/convnet_experiment1.pt')
+        u.save_checkpoint(self.model, None, self.save_name_model)
   
   @torch.no_grad()
   def evaluation(self, only_loss=True):
@@ -785,6 +787,7 @@ class Experiment2(Experiment1):
     [logging.root.removeHandler(handler) for handler in logging.root.handlers[:]]
     logging.basicConfig(filename=logfile, filemode='a', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+    self.save_name_model = 'convnet/convnet_experiment2.pt'
     self.decay_factor = decay_factor
     self.criterion = u.AttentionLoss(self.pad_idx, self.device, decay_step=0.01)
 
@@ -798,6 +801,8 @@ class Experiment3(Experiment1):
     super().__init__(dump_config=False, device=device)
     [logging.root.removeHandler(handler) for handler in logging.root.handlers[:]]
     logging.basicConfig(filename=logfile, filemode='a', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+    self.save_name_model = 'convnet/convnet_experiment3.pt'
 
     u.dump_dict(self.convnet_config, 'ENCODER-DECODER PARAMETERS')
     logging.info(f'The model has {u.count_trainable_parameters(self.model):,} trainable parameters')
