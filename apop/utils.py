@@ -664,7 +664,7 @@ class AttentionLoss(nn.Module):
   Loss usefull for Neural Network that use Attention Mechanism as it forces the network
   to learn to pay attention in a diagonal way which empirically show to speed up the training
   '''
-  def __init__(self, pad_idx, device=None, decay_step=0.01):
+  def __init__(self, pad_idx, device=None, decay_step=0.01, decay_factor=1):
     '''
     Params:
       * pad_idx : int
@@ -676,7 +676,7 @@ class AttentionLoss(nn.Module):
     self.device = device if device is not None else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     self.kld = nn.KLDivLoss(reduction='sum')
 
-    self.decay_factor = 1
+    self.decay_factor = decay_factor
     self.decay_step = decay_step
 
     self.cross_entropy = CrossEntropyLoss(pad_idx)

@@ -29,17 +29,25 @@ def compute_plot_scores_async(epoch, metadata, plotter):
   logging.info(f'EPOCH {epoch} : Train Word accuracy = {train_word_acc:.3f} | Sentence accuracy = {train_sentence_acc:.3f}')
 
 
-def instanciate_model(enc_input_dim=80, dec_input_dim=100, enc_max_seq_len=1100, dec_max_seq_len=600,
+def instanciate_model(settings, enc_input_dim=80, dec_input_dim=100, enc_max_seq_len=1100, dec_max_seq_len=600,
                       enc_layers=10, dec_layers=10, enc_kernel_size=3, dec_kernel_size=3,
                       enc_dropout=0.25, dec_dropout=0.25, emb_dim=256, hid_dim=512, output_size=31,
                       reduce_dim=False, device=None, pad_idx=2):
   device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu') if device is None else device
 
+  
   enc_embedder = css.EncoderEmbedder(enc_input_dim, emb_dim, hid_dim, enc_max_seq_len, enc_dropout, device, reduce_dim=reduce_dim)
   dec_embedder = css.DecoderEmbedder(dec_input_dim, emb_dim, dec_max_seq_len, dec_dropout, device)
 
-  enc = css.Encoder(emb_dim, hid_dim, enc_layers, enc_kernel_size, enc_dropout, device, embedder=enc_embedder)
-  dec = css.Decoder(output_size, emb_dim, hid_dim, dec_layers, dec_kernel_size, dec_dropout, pad_idx, device, embedder=dec_embedder)
+  if settings['relu']:
+    if settings['enc_mix_kernel']:
+      enc = css.EncoderMixKernelRelu(emb_dim, hid_dim, [4, 4, 4], [3, 5, 7], enc_dropout, device, embedder=enc_embedder)
+    else:
+      enc = css.EncoderRelu(emb_dim, hid_dim, enc_layers, enc_kernel_size, enc_dropout, device, embedder=enc_embedder)
+    dec = css.DecoderRelu(output_size, emb_dim, hid_dim, dec_layers, dec_kernel_size, dec_dropout, pad_idx, device, embedder=dec_embedder)
+  else:
+    enc = css.Encoder(emb_dim, hid_dim, enc_layers, enc_kernel_size, enc_dropout, device, embedder=enc_embedder)
+    dec = css.Decoder(output_size, emb_dim, hid_dim, dec_layers, dec_kernel_size, dec_dropout, pad_idx, device, embedder=dec_embedder)
 
   return css.Seq2Seq(enc, dec, device).to(device)
 
@@ -59,7 +67,7 @@ def train_pass(model, optimizer, metadata, settings):
     current_loss.backward()
 
     if settings['clip_grad']:
-      torch.nn.utils.clip_grad_norm_(model.parameters(), 0.1)
+      torch.nn.utils.clip_grad_norm_(model.parameters(), settings['clip_grad_val'])
 
     optimizer.step()
 
@@ -119,7 +127,7 @@ def launch_experiment(settings):
                         batch_size=settings['batch_size'], create_mask=settings['create_mask'], subset=settings['subset'],
                         percent=settings['percent'], size_limits=settings['size_limits'], loss=settings['loss'])
 
-  model = instanciate_model(enc_input_dim=settings['enc_input_dim'], dec_input_dim=settings['dec_input_dim'],
+  model = instanciate_model(settings, enc_input_dim=settings['enc_input_dim'], dec_input_dim=settings['dec_input_dim'],
                             enc_max_seq_len=settings['enc_max_seq_len'], dec_max_seq_len=settings['dec_max_seq_len'],
                             enc_layers=settings['enc_layers'], dec_layers=settings['dec_layers'],
                             enc_kernel_size=settings['enc_kernel_size'], dec_kernel_size=settings['dec_kernel_size'],
@@ -208,6 +216,10 @@ if __name__ == "__main__":
   argparser.add_argument('--train_acc_step', default=5, type=int)
   argparser.add_argument('--load_model', default=False, type=ast.literal_eval)
   argparser.add_argument('--clip_grad', default=False, type=ast.literal_eval)
+  argparser.add_argument('--clip_grad_val', default=0.1, type=float)
+
+  argparser.add_argument('--relu', default=False, type=ast.literal_eval)
+  argparser.add_argument('--enc_mix_kernel', default=False, type=ast.literal_eval)
 
   argparser.add_argument('--logfile', default='_convnet_experiments_logs.txt', type=str)
   args = argparser.parse_args()
