@@ -7,6 +7,7 @@ import torch.nn.functional as F
 import utils as u
 
 from collections import OrderedDict
+from transformer.attention import MultiHeadAttention
 
 ############################################################################################################
 ### Implementation of Convolutional Sequence to Sequence Learning (https://arxiv.org/pdf/1705.03122.pdf) ###
@@ -133,7 +134,7 @@ class EncoderBlock(nn.Module):
 
 class Decoder(nn.Module):
   def __init__(self, output_dim, emb_dim, hid_dim, n_layers, kernel_size, dropout, pad_idx, device, embedder=None, max_seq_len=100,
-               score_fn=F.softmax):
+               score_fn=F.softmax, scaling_energy=False, multi_head=False, d_keys_values=64):
     super().__init__()
     self.scale = torch.sqrt(torch.FloatTensor([0.5])).to(device)
     self.dropout = nn.Dropout(dropout)
@@ -141,8 +142,9 @@ class Decoder(nn.Module):
     self.embedder = DecoderEmbedder(output_dim, emb_dim, max_seq_len, dropout, device) if embedder is None else embedder
 
     self.emb2hid = nn.Linear(emb_dim, hid_dim)
-    self.decoders = nn.ModuleList([DecoderBlock(hid_dim, emb_dim, kernel_size, pad_idx, dropout, device, score_fn=score_fn)
-                                    for _ in range(n_layers)])
+    self.decoders = nn.ModuleList([DecoderBlock(hid_dim, emb_dim, kernel_size, pad_idx, dropout, device, score_fn=score_fn,
+                                                 scaling_energy=scaling_energy, multi_head=multi_head, d_keys_values=d_keys_values)
+                                                  for _ in range(n_layers)])
     self.hid2emb = nn.Linear(hid_dim, emb_dim)
 
     self.out = nn.Linear(emb_dim, output_dim)
@@ -168,7 +170,8 @@ class Decoder(nn.Module):
 
 
 class DecoderBlock(nn.Module):
-  def __init__(self, hid_dim, emb_dim, kernel_size, pad_idx, dropout, device, score_fn=F.softmax):
+  def __init__(self, hid_dim, emb_dim, kernel_size, pad_idx, dropout, device, score_fn=F.softmax, scaling_energy=False,
+               multi_head=False, d_keys_values=64):
     super().__init__()
     self.scale = torch.sqrt(torch.FloatTensor([0.5])).to(device)
     self.dropout = nn.Dropout(dropout)
@@ -179,7 +182,8 @@ class DecoderBlock(nn.Module):
 
     self.conv = nn.Conv1d(in_channels=hid_dim, out_channels=2 * hid_dim, kernel_size=kernel_size)
 
-    self.attention = Attention(hid_dim, emb_dim, device, score_fn=score_fn)
+    self.attention = Attention(hid_dim, emb_dim, device, score_fn=score_fn, scaling_energy=scaling_energy,
+                               multi_head=multi_head, d_keys_values=d_keys_values, dropout=dropout)
   
   def forward(self, embedded, conv_in, encoder_conved, encoder_combined):
     conv_in = self.dropout(conv_in)  # [batch_size, hid_dim, seq_len]
@@ -193,13 +197,19 @@ class DecoderBlock(nn.Module):
 
 
 class Attention(nn.Module):
-  def __init__(self, hid_dim, emb_dim, device, score_fn=F.softmax):
+  def __init__(self, hid_dim, emb_dim, device, score_fn=F.softmax, scaling_energy=False, multi_head=False, d_keys_values=64, dropout=0.):
     super().__init__()
     self.score_fn = score_fn
     self.scale = torch.sqrt(torch.FloatTensor([0.5])).to(device)
+    self.multi_head = multi_head
+
+    self.scaling_energy = torch.sqrt(torch.Tensor([emb_dim])) if scaling_energy else 1
 
     self.attention_hid2emb = nn.Linear(hid_dim, emb_dim)
     self.attention_emb2hid = nn.Linear(emb_dim, hid_dim)
+
+    if multi_head:
+      self.multi_head_att = MultiHeadAttention(emb_dim, d_keys_values, d_keys_values, emb_dim//d_keys_values, dropout=dropout)
   
   def forward(self, embedded, conved, encoder_conved, encoder_combined):
     '''
@@ -211,10 +221,16 @@ class Attention(nn.Module):
     '''
     conved_emb = self.attention_hid2emb(conved.permute(0, 2, 1))  # [batch_size, dec_seq_len, emb_dim]
     combined = (embedded + conved_emb) * self.scale
-    energy = combined.matmul(encoder_conved.permute(0, 2, 1))  # [batch_size, dec_seq_len, enc_seq_len]
-    attention = self.score_fn(energy, dim=2)
-    attented_encoding = attention.matmul(encoder_combined)  # [batch_size, dec_seq_len, emb_dim]
-    # attented_encoding = attention.matmul(encoder_conved + encoder_combined)  # [batch_size, dec_seq_len, emb_dim]
+
+    if self.multi_head:
+      attented_encoding = self.multi_head_att(combined, encoder_conved, encoder_combined)
+      attention = self.multi_head_att.attention.energy.sum(1).softmax(-1)  # energy = [batch_size, n_heads, dec_seq_len, enc_seq_len]
+    else:
+      energy = combined.matmul(encoder_conved.permute(0, 2, 1)) / self.scaling_energy  # [batch_size, dec_seq_len, enc_seq_len]
+      attention = self.score_fn(energy, dim=2)
+      attented_encoding = attention.matmul(encoder_combined)  # [batch_size, dec_seq_len, emb_dim]
+      # attented_encoding = attention.matmul(encoder_conved + encoder_combined)  # [batch_size, dec_seq_len, emb_dim]
+
     attented_encoding = self.attention_emb2hid(attented_encoding)  # [batch_size, dec_seq_len, hid_dim]
     attented_combined = (conved + attented_encoding.permute(0, 2, 1)) * self.scale  # [batch_size, hid_dim, dec_seq_len]
     return attention, attented_combined

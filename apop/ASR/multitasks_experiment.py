@@ -693,7 +693,8 @@ class Experiment1(object):
   '''Encoder-Decoder Convnet for syllables prediction, adam optimizer, CrossEntropy loss, window-sliced'''
   def __init__(self, device=None, logfile='_logs/_logs_experiment1.txt', lr=1e-4, smoothing_eps=0.1, dump_config=True, decay_factor=0,
                save_name_model='convnet/convnet_experiment1.pt', encoding_fn=Data.syllables_encoding,
-               metadata_file='_Data_metadata_syllables.pk', score_fn=torch.softmax, signal_type='window-sliced'):
+               metadata_file='_Data_metadata_syllables.pk', score_fn=torch.softmax, signal_type='window-sliced',
+               multi_head=False, d_keys_values=64):
     logging.basicConfig(filename=logfile, filemode='a', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
     self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') if device is None else device
@@ -711,7 +712,8 @@ class Experiment1(object):
                            'dec_input_dim': len(self.data.idx_to_tokens), 'dec_max_seq_len': self.data.max_source_len,
                            'output_size': len(self.data.idx_to_tokens), 'pad_idx': self.pad_idx, 'score_fn': score_fn,
                            'enc_layers': 10, 'dec_layers': 10, 'enc_kernel_size': 3, 'dec_kernel_size': 3, 'enc_dropout': 0.25,
-                           'dec_dropout': 0.25, 'emb_dim': 256, 'hid_dim': 512, 'reduce_dim': False}
+                           'dec_dropout': 0.25, 'emb_dim': 256, 'hid_dim': 512, 'reduce_dim': False,
+                           'multi_head': multi_head, 'd_keys_values': d_keys_values}
     self.model = self.convnet_instanciation(**self.convnet_config)
 
     if dump_config:
@@ -727,13 +729,14 @@ class Experiment1(object):
   
   def convnet_instanciation(self, enc_input_dim=400, enc_max_seq_len=1400, dec_input_dim=31, dec_max_seq_len=600, output_size=31,
                             enc_layers=10, dec_layers=10, enc_kernel_size=3, dec_kernel_size=3, enc_dropout=0.25,
-                            dec_dropout=0.25, emb_dim=256, hid_dim=512, reduce_dim=False, pad_idx=2, score_fn=torch.softmax):
+                            dec_dropout=0.25, emb_dim=256, hid_dim=512, reduce_dim=False, pad_idx=2, score_fn=torch.softmax,
+                            multi_head=False, d_keys_values=64):
     enc_embedder = css.EncoderEmbedder(enc_input_dim, emb_dim, hid_dim, enc_max_seq_len, enc_dropout, self.device, reduce_dim=reduce_dim)
     dec_embedder = css.DecoderEmbedder(dec_input_dim, emb_dim, dec_max_seq_len, dec_dropout, self.device)
 
     enc = css.Encoder(emb_dim, hid_dim, enc_layers, enc_kernel_size, enc_dropout, self.device, embedder=enc_embedder)
     dec = css.Decoder(output_size, emb_dim, hid_dim, dec_layers, dec_kernel_size, dec_dropout, pad_idx, self.device,
-                      embedder=dec_embedder, score_fn=score_fn)
+                      embedder=dec_embedder, score_fn=score_fn, multi_head=multi_head, d_keys_values=d_keys_values)
 
     return css.Seq2Seq(enc, dec, self.device).to(self.device)
   
@@ -892,7 +895,7 @@ class Experiment4(object):
     
     return losses / len(data_loader), mean_preds_acc, overall_acc
   
-  def train_pass_accumulate(self, data_loader, accumulate_step=5):
+  def train_pass_accumulate(self, data_loader, accumulate_step=10):
     losses = 0
     targets, predictions = [], []
     self.optimizer.zero_grad()
@@ -932,7 +935,8 @@ class Experiment4(object):
         current_identities.append(self.identities_train.pop(0))
         current_data_loader = self.data.get_dataset_generator(create_enc_mask=True, readers=current_identities)
 
-      epoch_loss, mpta, ota = self.train_pass_accumulate(current_data_loader)
+      # epoch_loss, mpta, ota = self.train_pass_accumulate(current_data_loader)
+      epoch_loss, mpta, ota = self.train_pass(current_data_loader)
       logging.info(f'Epoch {epoch} | train_loss = {epoch_loss:.3f} | mean_preds_train_acc = {mpta} | overall_train_acc = {ota}')
       eval_loss, mpea, oea = self.evaluation(only_loss=False if epoch % eval_step == 0 else True)
       logging.info(f'Epoch {epoch} | test_loss = {eval_loss:.3f} | mean_preds_eval_acc = {mpea} | overall_eval_acc = {oea}')
@@ -995,6 +999,23 @@ class Experiment6(Experiment1):
     super().__init__(logfile=logfile, save_name_model=save_name_model, score_fn=score_fn)
 
 
+class Experiment7(Experiment1):
+  '''Encoder-Decoder Convnet for syllables prediction, adam optimizer, CrossEntropy loss, window-sliced, MultiHeadAttention'''
+  def __init__(self, device=None, logfile='_logs/_logs_experiment7.txt', lr=1e-4, smoothing_eps=0.1, dump_config=True, decay_factor=0,
+               save_name_model='convnet/convnet_experiment7.pt', encoding_fn=Data.phonemes_encoding,
+               metadata_file='_Data_metadata_syllables.pk', multi_head=True, d_keys_values=64):
+    super().__init__(logfile=logfile, save_name_model=save_name_model, multi_head=multi_head, d_keys_values=d_keys_values)
+
+
+class Experiment8(Experiment1):
+  '''Encoder-Decoder Convnet for syllables prediction, adam optimizer, Attention-CrossEntropy loss, window-sliced, MultiHeadAttention'''
+  def __init__(self, device=None, logfile='_logs/_logs_experiment7.txt', lr=1e-4, smoothing_eps=0.1, dump_config=True, decay_factor=1,
+               save_name_model='convnet/convnet_experiment7.pt', encoding_fn=Data.phonemes_encoding,
+               metadata_file='_Data_metadata_syllables.pk', multi_head=True, d_keys_values=64):
+    super().__init__(logfile=logfile, save_name_model=save_name_model, multi_head=multi_head, d_keys_values=d_keys_values,
+                     decay_factor=decay_factor)
+
+
 if __name__ == "__main__":
   rep = input('Perform Experiment1? (y or n): ')
   if rep == 'y':
@@ -1024,4 +1045,14 @@ if __name__ == "__main__":
   rep = input('Perform Experiment6? (y or n): ')
   if rep == 'y':
     exp = Experiment6()
+    exp.train()
+  
+  rep = input('Perform Experiment7? (y or n): ')
+  if rep == 'y':
+    exp = Experiment7()
+    exp.train()
+  
+  rep = input('Perform Experiment8? (y or n): ')
+  if rep == 'y':
+    exp = Experiment8()
     exp.train()

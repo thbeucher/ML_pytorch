@@ -14,6 +14,7 @@ class ScaledDotProductAttention(nn.Module):
 
     self.keys = None
     self.attention = None
+    self.energy = None
 
   def forward(self, queries, keys, values, mask=None, save=False, aggregate=False):
     '''
@@ -48,8 +49,8 @@ class ScaledDotProductAttention(nn.Module):
     if mask is not None:
       attention = attention.masked_fill(mask, -1e10)
 
-    attention = self.softmax(attention)
-    attention = self.dropout(attention)
+    self.energy = self.softmax(attention)
+    attention = self.dropout(self.energy)
     return attention.matmul(values)
   
   def reset_memory(self):
