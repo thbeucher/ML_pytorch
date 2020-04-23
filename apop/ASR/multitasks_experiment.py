@@ -689,6 +689,7 @@ def data_routine(train_folder = '../../../datasets/openslr/LibriSpeech/train-cle
   return data
 
 
+## STATUS = FAILURE
 class Experiment1(object):
   '''Encoder-Decoder Convnet for syllables prediction, adam optimizer, CrossEntropy loss, window-sliced'''
   def __init__(self, device=None, logfile='_logs/_logs_experiment1.txt', lr=1e-4, smoothing_eps=0.1, dump_config=True, decay_factor=0,

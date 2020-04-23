@@ -7,7 +7,7 @@ import torch.nn.functional as F
 import utils as u
 
 from collections import OrderedDict
-from transformer.attention import MultiHeadAttention
+from models.transformer.attention import MultiHeadAttention
 
 ############################################################################################################
 ### Implementation of Convolutional Sequence to Sequence Learning (https://arxiv.org/pdf/1705.03122.pdf) ###
