@@ -72,10 +72,19 @@ from models.transformer.embedder import PositionalEmbedder
 
 
 class CustomDataset(Dataset):
-  def __init__(self, ids_to_audiofile, ids_to_encodedsources, signal_type='window-sliced', readers=[]):
+  def __init__(self, ids_to_audiofile, ids_to_encodedsources, signal_type='window-sliced', readers=[],
+               process_audio_on_the_fly=False, process_file_fn=None, **kwargs):
+    '''
+    Params:
+      * process_audio_on_the_fly : bool, if True, process_file_fn must be given
+      * kwargs : used to pass argument to process_file_fn
+    '''
     self.ids_to_audiofile = ids_to_audiofile
     self.ids_to_encodedsources = ids_to_encodedsources
     self.signal_type = signal_type
+    self.process_audio_on_the_fly = process_audio_on_the_fly
+    self.process_file_fn = process_file_fn
+    self.process_file_fn_args = kwargs
 
     self.identities = list(sorted(ids_to_audiofile.keys()))
 
@@ -88,7 +97,10 @@ class CustomDataset(Dataset):
   def __getitem__(self, idx):
     identity = self.identities[idx]
 
-    signal = np.load(self.ids_to_audiofile[identity])
+    if self.process_audio_on_the_fly:
+      signal = self.process_file_fn(self.ids_to_audiofile[identity], **self.process_file_fn_args)
+    else:
+      signal = np.load(self.ids_to_audiofile[identity])
 
     if self.signal_type == 'std-threshold-selected':
       signal = Data.get_std_threshold_selected_signal(signal)
@@ -347,6 +359,7 @@ class Data(object):
     '''
     list_files_fn = Data.get_openslr_files if list_files_fn is None else list_files_fn
     process_file_fn = Data.read_and_slice_signal if process_file_fn is None else process_file_fn
+    slice_fn = Data.syllables_encoding if slice_fn is None else slice_fn
 
     ids_to_audiofile = {}
     for filename in tqdm(list_files_fn(folder)['audio']):
@@ -609,8 +622,24 @@ class Data(object):
     subset = random.sample(list(range(len(dataset))), num_samples)
     return Subset(dataset, subset)
   
+  @staticmethod
+  def get_seq_len_n_feat(folder, list_files_fn=None, process_file_fn=None, slice_fn=None, **kwargs):
+    list_files_fn = Data.get_openslr_files if list_files_fn is None else list_files_fn
+    process_file_fn = Data.read_and_slice_signal if process_file_fn is None else process_file_fn
+    slice_fn = Data.syllables_encoding if slice_fn is None else slice_fn
+
+    max_seq_len = 0
+    for filename in tqdm(list_files_fn(folder)['audio']):
+      features = process_file_fn(filename, slice_fn=slice_fn, **kwargs)
+      seq_len, n_feats = features.shape
+      max_seq_len = max(max_seq_len, seq_len)
+    
+    return max_seq_len, n_feats
+
+
   def get_dataset_generator(self, train=True, batch_size=32, num_workers=4, shuffle=True, subset=False, percent=0.2,
-                            pad_tok='<pad>', device=None, signal_type='window-sliced', create_enc_mask=False, readers=[]):
+                            pad_tok='<pad>', device=None, signal_type='window-sliced', create_enc_mask=False, readers=[],
+                            process_audio_on_the_fly=False, list_files_fn=None, folder=None, process_file_fn=None, **kwargs):
     '''
     Params:
       * train (optional) : bool, True to return training generator, False for testing generator
@@ -620,18 +649,26 @@ class Data(object):
       * subset (optional) : bool
       * percent (optional) : float
       * pad_tok (optional) : str
+      * kwargs : used to pass argument to process_file_fn
 
     Returns:
       * DataLoader : torch.utils.data.DataLoader
     '''
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') if device is None else device
+    list_files_fn = Data.get_openslr_files if list_files_fn is None else list_files_fn
+    process_file_fn = Data.read_and_slice_signal if process_file_fn is None else process_file_fn
 
-    if train:
-      custom_dataset = CustomDataset(self.ids_to_audiofile_train, self.ids_to_encodedsources_train, signal_type=signal_type,
-                                     readers=readers)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') if device is None else device
+    folder = '../../../datasets/openslr/LibriSpeech/train-clean-100/' if train else '../../../datasets/openslr/LibriSpeech/test-clean/'
+
+    if process_audio_on_the_fly:
+      ids_to_audiofile = {f.split('/')[-1].split('.')[0]: f for f in list_files_fn(folder)['audio']}
     else:
-      custom_dataset = CustomDataset(self.ids_to_audiofile_test, self.ids_to_encodedsources_test, signal_type=signal_type,
-                                     readers=readers)
+      ids_to_audiofile = self.ids_to_audiofile_train if train else self.ids_to_audiofile_test
+    
+    ids_to_sources = self.ids_to_encodedsources_train if train else self.ids_to_encodedsources_test
+
+    custom_dataset = CustomDataset(ids_to_audiofile, ids_to_sources, signal_type=signal_type, readers=readers,
+                                   process_audio_on_the_fly=process_audio_on_the_fly, process_file_fn=process_file_fn, **kwargs)
 
     if subset:
       custom_dataset = Data.extract_subset(custom_dataset, percent=percent)
@@ -812,7 +849,6 @@ class Experiment2(Experiment1):
   '''Encoder-Decoder Convnet for syllables prediction, adam optimizer, Attention-CrossEntropy loss, window-sliced'''
   def __init__(self, logfile='_logs/_logs_experiment2.txt', device=None, decay_factor=1, save_name_model='convnet/convnet_experiment2.pt'):
     super().__init__(save_name_model=save_name_model, decay_factor=decay_factor, logfile=logfile)
-    # [logging.root.removeHandler(handler) for handler in logging.root.handlers[:]]
 
 
 ## STATUS = FAILURE
@@ -823,6 +859,7 @@ class Experiment3(Experiment1):
     super().__init__(save_name_model=save_name_model, logfile=logfile, signal_type=signal_type)
 
 
+## STATUS = FAILURE
 class Experiment4(object):
   '''Encoder-Decoder Transformer for syllables prediction, Radam optimizer, CrossEntropy loss, window-sliced'''
   def __init__(self, device=None, logfile='_logs/_logs_experiment4.txt', lr=1e-4, smoothing_eps=0.1, dump_config=True,
@@ -992,6 +1029,7 @@ class Experiment5(Experiment1):
     super().__init__(logfile=logfile, save_name_model=save_name_model, encoding_fn=encoding_fn, metadata_file=metadata_file)
 
 
+## STATUS = FAILURE
 class Experiment6(Experiment1):
   '''Encoder-Decoder Convnet for syllables prediction, adam optimizer, CrossEntropy loss, window-sliced, sigmoid score_fn'''
   def __init__(self, device=None, logfile='_logs/_logs_experiment6.txt', lr=1e-4, smoothing_eps=0.1, dump_config=True, decay_factor=0,
@@ -1010,11 +1048,48 @@ class Experiment7(Experiment1):
 
 class Experiment8(Experiment1):
   '''Encoder-Decoder Convnet for syllables prediction, adam optimizer, Attention-CrossEntropy loss, window-sliced, MultiHeadAttention'''
-  def __init__(self, device=None, logfile='_logs/_logs_experiment7.txt', lr=1e-4, smoothing_eps=0.1, dump_config=True, decay_factor=1,
-               save_name_model='convnet/convnet_experiment7.pt', encoding_fn=Data.phonemes_encoding,
+  def __init__(self, device=None, logfile='_logs/_logs_experiment8.txt', lr=1e-4, smoothing_eps=0.1, dump_config=True, decay_factor=1,
+               save_name_model='convnet/convnet_experiment8.pt', encoding_fn=Data.phonemes_encoding,
                metadata_file='_Data_metadata_syllables.pk', multi_head=True, d_keys_values=64):
     super().__init__(logfile=logfile, save_name_model=save_name_model, multi_head=multi_head, d_keys_values=d_keys_values,
                      decay_factor=decay_factor)
+
+
+class Experiment9(Experiment1):
+  '''Encoder-Decoder Convnet for syllables prediction, adam optimizer, Attention-CrossEntropy loss, window-sliced=0.128'''
+  def __init__(self, logfile='_logs/_logs_experiment9.txt', device=None, decay_factor=1, save_name_model='convnet/convnet_experiment9.pt',
+               window_size=0.128, score_fn=torch.softmax, multi_head=False, d_keys_values=64):
+    super().__init__(save_name_model=save_name_model, decay_factor=decay_factor, logfile=logfile, dump_config=False)
+    # [logging.root.removeHandler(handler) for handler in logging.root.handlers[:]]
+
+    train_folder = '../../../datasets/openslr/LibriSpeech/train-clean-100/'
+    test_folder = '../../../datasets/openslr/LibriSpeech/test-clean/'
+    tmp_data = '_tmp_data_experiment9.pk'
+
+    if not os.path.isfile(tmp_data):
+      train_sl, n_feats = Data.get_seq_len_n_feat(train_folder, window_size=window_size)
+      test_sl, n_feats = Data.get_seq_len_n_feat(test_folder, window_size=window_size)
+      max_audio_seq_len = max(train_sl, test_sl)
+
+      with open(tmp_data, 'wb') as f:
+        pk.dump([max_audio_seq_len, n_feats], f)
+    else:
+      with open(tmp_data, 'rb') as f:
+        max_audio_seq_len, n_feats = pk.load(f)
+
+    self.convnet_config = {'enc_input_dim': n_feats, 'enc_max_seq_len': max_audio_seq_len,
+                           'dec_input_dim': len(self.data.idx_to_tokens), 'dec_max_seq_len': self.data.max_source_len,
+                           'output_size': len(self.data.idx_to_tokens), 'pad_idx': self.pad_idx, 'score_fn': score_fn,
+                           'enc_layers': 10, 'dec_layers': 10, 'enc_kernel_size': 3, 'dec_kernel_size': 3, 'enc_dropout': 0.25,
+                           'dec_dropout': 0.25, 'emb_dim': 256, 'hid_dim': 512, 'reduce_dim': False,
+                           'multi_head': multi_head, 'd_keys_values': d_keys_values}
+    self.model = self.convnet_instanciation(**self.convnet_config)
+
+    u.dump_dict(self.convnet_config, 'ENCODER-DECODER PARAMETERS')
+    logging.info(f'The model has {u.count_trainable_parameters(self.model):,} trainable parameters')
+    
+    self.train_data_loader = self.data.get_dataset_generator(process_audio_on_the_fly=True, window_size=window_size)
+    self.test_data_loader = self.data.get_dataset_generator(train=False, process_audio_on_the_fly=True, window_size=window_size)
 
 
 if __name__ == "__main__":
@@ -1056,4 +1131,9 @@ if __name__ == "__main__":
   rep = input('Perform Experiment8? (y or n): ')
   if rep == 'y':
     exp = Experiment8()
+    exp.train()
+  
+  rep = input('Perform Experiment9? (y or n): ')
+  if rep == 'y':
+    exp = Experiment9()
     exp.train()

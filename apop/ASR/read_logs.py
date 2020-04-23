@@ -77,8 +77,10 @@ def compare_all(folder, read_from_new):
     if not '.txt' in fname:
       continue
 
-    name = fname.replace('_logs_', '').replace('.txt', '')
-    name = name.replace('_convnet_experiments_', '').replace('.txt', '')  # READ _OLD_LOGS/
+    if read_from_new:
+      name = fname.replace('_logs_', '').replace('.txt', '')
+    else:
+      name = fname.replace('_convnet_experiments_', '').replace('.txt', '')  # READ _OLD_LOGS/
     print(f'Reading results from {name}')
 
     train_epoch_acc, test_epoch_acc = get_train_test_epoch_acc(f'{folder}{fname}', read_from_new)
