@@ -176,6 +176,7 @@ if __name__ == "__main__":
   # With raw encoding of audio file -> Train = [981, 400] | Test = [1399, 400] -> [max_seq_len, n_feats]
   # With mfcc encoding -> Train = [2453, 80] | Test = [3496, 80] -> by removing the longest 54 sequence, max_seq_len = 1700
   # With log_spectrogram encoding -> Train = [2451, 257] | Test = [3494, 257]
+  # With mfcc encoding with default n_fft & hop_length -> Train = [767, 80] | Test = [1093, 80]
   settings = u.load_json('settings.json') if os.path.isfile('settings.json') else {}
 
   argparser = argparse.ArgumentParser(prog='convnet_experiments.py', description='ConvNet Experiments')

@@ -13,7 +13,8 @@ class PositionalEmbedder(nn.Module):
     * add a positional information to an embedding -> leave output_size to 0
     * embed given sequence of words/chars then add a positional information -> provide output_size = vocabulary_size
   '''
-  def __init__(self, max_seq_len, embedding_size, d_model, output_size=0, reduce_dim=False, scaling=True, dropout=0.1, device=None):
+  def __init__(self, max_seq_len, embedding_size, d_model, output_size=0, reduce_dim=False, scaling=True, dropout=0.1, device=None,
+               kernel=3, stride=2):
     '''
     Params:
       * max_seq_len : int
@@ -29,16 +30,17 @@ class PositionalEmbedder(nn.Module):
     self.output_size = output_size
     self.scaling = scaling
 
-    self.positional_embedding = u.create_positional_embedding(max_seq_len, embedding_size, d_model)
+    if reduce_dim:
+      self.reducer = nn.Sequential(nn.Conv2d(1, 1, kernel, stride=stride),
+                                   nn.ReLU(),
+                                   nn.Conv2d(1, 1, kernel, stride=stride),
+                                   nn.ReLU())
+      self.embedding_size = ((self.embedding_size - (kernel - 1) - 1) // stride + 1) // 2
+
+    self.positional_embedding = u.create_positional_embedding(max_seq_len, self.embedding_size, d_model)
 
     if output_size > 0:
-      self.word_embedder = nn.Embedding(output_size, embedding_size)
-
-    if reduce_dim:
-      self.reducer = nn.Sequential(nn.Conv2d(1, 1, 3, stride=2),
-                                   nn.ReLU(),
-                                   nn.Conv2d(1, 1, 3, stride=2),
-                                   nn.ReLU())
+      self.word_embedder = nn.Embedding(output_size, self.embedding_size)
     
     self.dropout = nn.Dropout(dropout)
     self.scale = torch.sqrt(torch.FloatTensor([d_model])).to(self.device) if self.scaling else 1

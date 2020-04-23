@@ -1040,3 +1040,7 @@ def board_printing(data):
   '''
   df = pd.DataFrame.from_dict(data)
   print(tabulate(df, headers='keys', tablefmt='psql'))
+
+
+def sigmoid_energy(mytensor, dim=-1):
+  return mytensor.sigmoid() / mytensor.sigmoid().sum(dim, keepdim=True)

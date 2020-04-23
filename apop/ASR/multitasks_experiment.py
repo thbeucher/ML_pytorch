@@ -31,6 +31,9 @@
 ##                            + Decoder for speech-to-text, phonemes predictions
 ##                            + Decoder for speech-to-text, syllables predictions
 
+## 11. Language-Model like training on audio signals (ELECTRA?)
+## 12. speech-to-text, increase number of training sample, train speaker per speaker
+
 ## sentence -> words -> phonemes -> syllables
 ## from g2p_en import G2p; import re
 ## g2p = G2p()
@@ -58,20 +61,26 @@ from g2p_en import G2p
 from scipy.signal import stft
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset, DataLoader, Subset
-from sklearn.metrics import precision_recall_fscore_support
 
 sys.path.append(os.path.abspath(__file__).replace('ASR/multitasks_experiment.py', ''))
 import utils as u
 import models.conv_seqseq as css
 
+from optimizer import RAdam
+from models.transformer.transformer import Transformer
+from models.transformer.embedder import PositionalEmbedder
+
 
 class CustomDataset(Dataset):
-  def __init__(self, ids_to_audiofile, ids_to_encodedsources, signal_type='window-sliced'):
+  def __init__(self, ids_to_audiofile, ids_to_encodedsources, signal_type='window-sliced', readers=[]):
     self.ids_to_audiofile = ids_to_audiofile
     self.ids_to_encodedsources = ids_to_encodedsources
     self.signal_type = signal_type
 
     self.identities = list(sorted(ids_to_audiofile.keys()))
+
+    if len(readers) > 0:
+      self.identities = [i for i in self.identities if i.split('-')[0] in readers]
 
   def __len__(self):
     return len(self.identities)
@@ -90,16 +99,22 @@ class CustomDataset(Dataset):
 
 
 class CustomCollator(object):
-  def __init__(self, max_signal_len, max_source_len, enc_pad_val, dec_pad_val):
+  def __init__(self, max_signal_len, max_source_len, enc_pad_val, dec_pad_val, create_enc_mask=False):
     self.max_signal_len = max_signal_len
     self.max_source_len = max_source_len
     self.enc_pad_val = enc_pad_val
     self.dec_pad_val = dec_pad_val
+    self.create_enc_mask = create_enc_mask
 
   def __call__(self, batch):
     encoder_inputs, decoder_inputs = zip(*batch)
     encoder_input_batch = pad_sequence(encoder_inputs, batch_first=True, padding_value=self.enc_pad_val).float()
     decoder_input_batch = pad_sequence(decoder_inputs, batch_first=True, padding_value=self.dec_pad_val)
+
+    if self.create_enc_mask:
+      padding_mask_batch = u.create_padding_mask(encoder_input_batch, self.enc_pad_val)
+      return encoder_input_batch, decoder_input_batch, padding_mask_batch
+
     return encoder_input_batch, decoder_input_batch
 
 
@@ -486,7 +501,7 @@ class Data(object):
       idx_to_letters = [sos_tok, eos_tok, pad_tok] + letters
       letters_to_idx = {l: i for i, l in enumerate(idx_to_letters)}
 
-    sources_encoded = [[letters_to_idx[sos_tok]] + [letters_to_idx[l] for l in s] + [letters_to_idx[eos_tok]] for s in sources]
+    sources_encoded = [[letters_to_idx[sos_tok]] + [letters_to_idx[l] for l in s] + [letters_to_idx[eos_tok]] for s in tqdm(sources)]
     return sources_encoded, idx_to_letters, letters_to_idx
   
   @staticmethod
@@ -506,7 +521,7 @@ class Data(object):
       sources_encoded, idx_to_phonemes, phonemes_to_idx : list of list of int, list of str, dict
     '''
     g2p = G2p()
-    converted_sources = [g2p(s.lower()) for s in sources]
+    converted_sources = [g2p(s.lower()) for s in tqdm(sources)]
 
     if idx_to_phonemes is None or phonemes_to_idx is None:
       phonemes = list(sorted(set([p for s in converted_sources for p in s])))
@@ -580,6 +595,10 @@ class Data(object):
     self.ids_to_encodedsources_test = {ids_test[i]: s for i, s in enumerate(sources_encoded[len(sources_train):])}
   
   @staticmethod
+  def get_readers(ids_to_something):
+    return list(sorted(set([r.split('-')[0] for r in ids_to_something.keys()])))
+
+  @staticmethod
   def extract_subset(dataset, percent=0.2):
     '''
     Params:
@@ -591,7 +610,7 @@ class Data(object):
     return Subset(dataset, subset)
   
   def get_dataset_generator(self, train=True, batch_size=32, num_workers=4, shuffle=True, subset=False, percent=0.2,
-                            pad_tok='<pad>', device=None, signal_type='window-sliced'):
+                            pad_tok='<pad>', device=None, signal_type='window-sliced', create_enc_mask=False, readers=[]):
     '''
     Params:
       * train (optional) : bool, True to return training generator, False for testing generator
@@ -608,14 +627,17 @@ class Data(object):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') if device is None else device
 
     if train:
-      custom_dataset = CustomDataset(self.ids_to_audiofile_train, self.ids_to_encodedsources_train, signal_type=signal_type)
+      custom_dataset = CustomDataset(self.ids_to_audiofile_train, self.ids_to_encodedsources_train, signal_type=signal_type,
+                                     readers=readers)
     else:
-      custom_dataset = CustomDataset(self.ids_to_audiofile_test, self.ids_to_encodedsources_test, signal_type=signal_type)
+      custom_dataset = CustomDataset(self.ids_to_audiofile_test, self.ids_to_encodedsources_test, signal_type=signal_type,
+                                     readers=readers)
 
     if subset:
       custom_dataset = Data.extract_subset(custom_dataset, percent=percent)
       
-    custom_collator = CustomCollator(self.max_signal_len, self.max_source_len, 0, self.tokens_to_idx[pad_tok])
+    custom_collator = CustomCollator(self.max_signal_len, self.max_source_len, 0, self.tokens_to_idx[pad_tok],
+                                     create_enc_mask=create_enc_mask)
     
     return DataLoader(custom_dataset, batch_size=batch_size, num_workers=num_workers, collate_fn=custom_collator, shuffle=shuffle)
   
@@ -668,9 +690,10 @@ def data_routine(train_folder = '../../../datasets/openslr/LibriSpeech/train-cle
 
 
 class Experiment1(object):
-  '''Encoder-Decoder convnet for syllables prediction, adam optimizer, CrossEntropy loss, window-sliced'''
+  '''Encoder-Decoder Convnet for syllables prediction, adam optimizer, CrossEntropy loss, window-sliced'''
   def __init__(self, device=None, logfile='_logs/_logs_experiment1.txt', lr=1e-4, smoothing_eps=0.1, dump_config=True, decay_factor=0,
-               save_name_model='convnet/convnet_experiment1.pt'):
+               save_name_model='convnet/convnet_experiment1.pt', encoding_fn=Data.syllables_encoding,
+               metadata_file='_Data_metadata_syllables.pk', score_fn=torch.softmax, signal_type='window-sliced'):
     logging.basicConfig(filename=logfile, filemode='a', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
     self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') if device is None else device
@@ -678,7 +701,7 @@ class Experiment1(object):
     self.decay_factor = decay_factor
     self.save_name_model = save_name_model
 
-    self.data = data_routine(encoding_fn=Data.syllables_encoding, metadata_file='_Data_metadata_syllables.pk', process_audio=False)
+    self.data = data_routine(encoding_fn=encoding_fn, metadata_file=metadata_file, process_audio=False)
 
     self.sos_idx = self.data.tokens_to_idx['<sos>']
     self.eos_idx = self.data.tokens_to_idx['<eos>']
@@ -686,7 +709,7 @@ class Experiment1(object):
 
     self.convnet_config = {'enc_input_dim': self.data.n_signal_feats, 'enc_max_seq_len': self.data.max_signal_len,
                            'dec_input_dim': len(self.data.idx_to_tokens), 'dec_max_seq_len': self.data.max_source_len,
-                           'output_size': len(self.data.idx_to_tokens), 'pad_idx': self.pad_idx,
+                           'output_size': len(self.data.idx_to_tokens), 'pad_idx': self.pad_idx, 'score_fn': score_fn,
                            'enc_layers': 10, 'dec_layers': 10, 'enc_kernel_size': 3, 'dec_kernel_size': 3, 'enc_dropout': 0.25,
                            'dec_dropout': 0.25, 'emb_dim': 256, 'hid_dim': 512, 'reduce_dim': False}
     self.model = self.convnet_instanciation(**self.convnet_config)
@@ -699,17 +722,18 @@ class Experiment1(object):
 
     self.criterion = u.AttentionLoss(self.pad_idx, self.device, decay_step=0.01, decay_factor=self.decay_factor)
 
-    self.train_data_loader = self.data.get_dataset_generator()
-    self.test_data_loader = self.data.get_dataset_generator(train=False)
+    self.train_data_loader = self.data.get_dataset_generator(signal_type=signal_type)
+    self.test_data_loader = self.data.get_dataset_generator(train=False, signal_type=signal_type)
   
-  def convnet_instanciation(self, enc_input_dim=400, enc_max_seq_len=1400, dec_input_dim=31, dec_max_seq_len=600,
+  def convnet_instanciation(self, enc_input_dim=400, enc_max_seq_len=1400, dec_input_dim=31, dec_max_seq_len=600, output_size=31,
                             enc_layers=10, dec_layers=10, enc_kernel_size=3, dec_kernel_size=3, enc_dropout=0.25,
-                            dec_dropout=0.25, emb_dim=256, hid_dim=512, reduce_dim=False, pad_idx=2, output_size=31):
+                            dec_dropout=0.25, emb_dim=256, hid_dim=512, reduce_dim=False, pad_idx=2, score_fn=torch.softmax):
     enc_embedder = css.EncoderEmbedder(enc_input_dim, emb_dim, hid_dim, enc_max_seq_len, enc_dropout, self.device, reduce_dim=reduce_dim)
     dec_embedder = css.DecoderEmbedder(dec_input_dim, emb_dim, dec_max_seq_len, dec_dropout, self.device)
 
     enc = css.Encoder(emb_dim, hid_dim, enc_layers, enc_kernel_size, enc_dropout, self.device, embedder=enc_embedder)
-    dec = css.Decoder(output_size, emb_dim, hid_dim, dec_layers, dec_kernel_size, dec_dropout, pad_idx, self.device, embedder=dec_embedder)
+    dec = css.Decoder(output_size, emb_dim, hid_dim, dec_layers, dec_kernel_size, dec_dropout, pad_idx, self.device,
+                      embedder=dec_embedder, score_fn=score_fn)
 
     return css.Seq2Seq(enc, dec, self.device).to(self.device)
   
@@ -739,7 +763,7 @@ class Experiment1(object):
     
     return losses / len(self.train_data_loader), mean_preds_acc, overall_acc
   
-  def train(self, batch_size=32, n_epochs=500, eval_step=5):
+  def train(self, n_epochs=500, eval_step=5):
     print('Start Training...')
     eval_accuracy_memory = 0
     for epoch in tqdm(range(n_epochs)):
@@ -781,34 +805,194 @@ class Experiment1(object):
 
 
 class Experiment2(Experiment1):
-  '''Encoder-Decoder convnet for syllables prediction, adam optimizer, Attention-CrossEntropy loss, window-sliced'''
-  def __init__(self, logfile='_logs/_logs_experiment2.txt', device=None, decay_factor=1):
-    super().__init__(dump_config=False, device=device)
-    [logging.root.removeHandler(handler) for handler in logging.root.handlers[:]]
-    logging.basicConfig(filename=logfile, filemode='a', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-    self.save_name_model = 'convnet/convnet_experiment2.pt'
-    self.decay_factor = decay_factor
-    self.criterion = u.AttentionLoss(self.pad_idx, self.device, decay_step=0.01)
-
-    u.dump_dict(self.convnet_config, 'ENCODER-DECODER PARAMETERS')
-    logging.info(f'The model has {u.count_trainable_parameters(self.model):,} trainable parameters')
+  '''Encoder-Decoder Convnet for syllables prediction, adam optimizer, Attention-CrossEntropy loss, window-sliced'''
+  def __init__(self, logfile='_logs/_logs_experiment2.txt', device=None, decay_factor=1, save_name_model='convnet/convnet_experiment2.pt'):
+    super().__init__(save_name_model=save_name_model, decay_factor=decay_factor, logfile=logfile)
+    # [logging.root.removeHandler(handler) for handler in logging.root.handlers[:]]
 
 
+## STATUS = FAILURE
 class Experiment3(Experiment1):
-  '''Encoder-Decoder convnet for syllables prediction, adam optimizer, CrossEntropy loss, std-threshold-selected'''
-  def __init__(self, logfile='_logs/_logs_experiment3.txt', device=None, decay_factor=0):
-    super().__init__(dump_config=False, device=device)
-    [logging.root.removeHandler(handler) for handler in logging.root.handlers[:]]
+  '''Encoder-Decoder Convnet for syllables prediction, adam optimizer, CrossEntropy loss, std-threshold-selected'''
+  def __init__(self, logfile='_logs/_logs_experiment3.txt', device=None, decay_factor=0, save_name_model='convnet/convnet_experiment3.pt',
+               signal_type='std-threshold-selected'):
+    super().__init__(save_name_model=save_name_model, logfile=logfile, signal_type=signal_type)
+
+
+class Experiment4(object):
+  '''Encoder-Decoder Transformer for syllables prediction, Radam optimizer, CrossEntropy loss, window-sliced'''
+  def __init__(self, device=None, logfile='_logs/_logs_experiment4.txt', lr=1e-4, smoothing_eps=0.1, dump_config=True,
+               save_name_model='transformer/transformer_experiment4.pt', enc_reduce_dim=True):
     logging.basicConfig(filename=logfile, filemode='a', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-    self.save_name_model = 'convnet/convnet_experiment3.pt'
+    self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') if device is None else device
+    self.smoothing_eps = smoothing_eps
+    self.save_name_model = save_name_model
+    self.enc_reduce_dim = enc_reduce_dim
 
-    u.dump_dict(self.convnet_config, 'ENCODER-DECODER PARAMETERS')
-    logging.info(f'The model has {u.count_trainable_parameters(self.model):,} trainable parameters')
+    self.data = data_routine(encoding_fn=Data.syllables_encoding, metadata_file='_Data_metadata_syllables.pk', process_audio=False)
 
-    self.train_data_loader = self.data.get_dataset_generator(signal_type='std-threshold-selected')
-    self.test_data_loader = self.data.get_dataset_generator(train=False, signal_type='std-threshold-selected')
+    self.sos_idx = self.data.tokens_to_idx['<sos>']
+    self.eos_idx = self.data.tokens_to_idx['<eos>']
+    self.pad_idx = self.data.tokens_to_idx['<pad>']
+    self.identities_train = list(sorted(set([i.split('-')[0] for i in self.data.ids_to_audiofile_train])))
+
+    self.transformer_config = {'encoder_embedding_dim': self.data.n_signal_feats, 'enc_max_seq_len': self.data.max_signal_len,
+                               'decoder_embedding_dim': len(self.data.idx_to_tokens), 'dec_max_seq_len': self.data.max_source_len,
+                               'output_size': len(self.data.idx_to_tokens), 'n_encoder_blocks': 8, 'n_decoder_blocks': 6,
+                               'd_model': 384, 'd_keys': 64, 'd_values': 64, 'n_heads': 6, 'd_ff': 512, 'dropout': 0.}
+    self.model = self.transformer_instanciation(**self.transformer_config)
+
+    if dump_config:
+      u.dump_dict(self.transformer_config, 'ENCODER-DECODER PARAMETERS')
+      logging.info(f'The model has {u.count_trainable_parameters(self.model):,} trainable parameters')
+
+    self.optimizer = RAdam(self.model.parameters(), lr=lr)
+    self.criterion = u.CrossEntropyLoss(self.pad_idx)
+
+    self.train_data_loader = self.data.get_dataset_generator(create_enc_mask=True)
+    self.test_data_loader = self.data.get_dataset_generator(train=False, create_enc_mask=True)
+  
+  def transformer_instanciation(self, enc_max_seq_len=1400, encoder_embedding_dim=400, d_model=256, dec_max_seq_len=600,
+                                decoder_embedding_dim=31, output_size=31, n_encoder_blocks=8, n_decoder_blocks=6,
+                                d_keys=64, d_values=64, n_heads=4, d_ff=512, dropout=0.):
+    encoder_embedder = PositionalEmbedder(enc_max_seq_len, encoder_embedding_dim, d_model, device=self.device,
+                                          reduce_dim=self.enc_reduce_dim)
+    decoder_embedder = PositionalEmbedder(dec_max_seq_len, decoder_embedding_dim, d_model, output_size=output_size, device=self.device)
+
+    model = Transformer(n_encoder_blocks, n_decoder_blocks, d_model, d_keys, d_values, n_heads, d_ff, output_size,
+                        encoder_embedder=encoder_embedder, decoder_embedder=decoder_embedder, dropout=dropout,
+                        enc_max_seq_len=enc_max_seq_len, dec_max_seq_len=dec_max_seq_len, device=self.device,
+                        encoder_reduce_dim=self.enc_reduce_dim)
+    
+    return model.to(self.device)
+  
+  def train_pass(self, data_loader):
+    losses = 0
+    targets, predictions = [], []
+
+    for enc_in, dec_in, pad_mask in tqdm(data_loader):
+      enc_in, dec_in, pad_mask = enc_in.to(self.device), dec_in.to(self.device), pad_mask.to(self.device)
+      preds = self.model(enc_in, dec_in[:, :-1], padding_mask=pad_mask)
+
+      self.optimizer.zero_grad()
+
+      current_loss = self.criterion(preds.reshape(-1, preds.shape[-1]), dec_in[:, 1:].reshape(-1), epsilon=self.smoothing_eps)
+
+      current_loss.backward()
+
+      self.optimizer.step()
+
+      targets += dec_in[:, 1:].tolist()
+      predictions += preds.argmax(dim=-1).tolist()
+
+      losses += current_loss.item()
+    
+    mean_preds_acc, overall_acc = Data.compute_accuracy(targets, predictions, self.eos_idx)
+    
+    return losses / len(data_loader), mean_preds_acc, overall_acc
+  
+  def train_pass_accumulate(self, data_loader, accumulate_step=5):
+    losses = 0
+    targets, predictions = [], []
+    self.optimizer.zero_grad()
+
+    for i, (enc_in, dec_in, pad_mask) in enumerate(tqdm(data_loader)):
+      enc_in, dec_in, pad_mask = enc_in.to(self.device), dec_in.to(self.device), pad_mask.to(self.device)
+      preds = self.model(enc_in, dec_in[:, :-1], padding_mask=pad_mask)
+
+      current_loss = self.criterion(preds.reshape(-1, preds.shape[-1]), dec_in[:, 1:].reshape(-1), epsilon=self.smoothing_eps)
+
+      current_loss.backward()
+
+      targets += dec_in[:, 1:].tolist()
+      predictions += preds.argmax(dim=-1).tolist()
+
+      losses += current_loss.item()
+
+      if accumulate_step > 0:
+        if i % accumulate_step == 0:
+          self.optimizer.step()
+          self.optimizer.zero_grad()
+    
+    self.optimizer.step()
+
+    mean_preds_acc, overall_acc = Data.compute_accuracy(targets, predictions, self.eos_idx)
+    
+    return losses / len(data_loader), mean_preds_acc, overall_acc
+  
+  def train_progressively(self, step=50, n_epochs=500, eval_step=10):
+    print('Start Training...')
+    eval_accuracy_memory = 0
+    current_identities = [self.identities_train.pop(0)]
+    current_data_loader = self.data.get_dataset_generator(create_enc_mask=True, readers=current_identities)
+
+    for epoch in tqdm(range(n_epochs)):
+      if epoch > 0 and epoch % step == 0 and len(self.identities_train) > 0:
+        current_identities.append(self.identities_train.pop(0))
+        current_data_loader = self.data.get_dataset_generator(create_enc_mask=True, readers=current_identities)
+
+      epoch_loss, mpta, ota = self.train_pass_accumulate(current_data_loader)
+      logging.info(f'Epoch {epoch} | train_loss = {epoch_loss:.3f} | mean_preds_train_acc = {mpta} | overall_train_acc = {ota}')
+      eval_loss, mpea, oea = self.evaluation(only_loss=False if epoch % eval_step == 0 else True)
+      logging.info(f'Epoch {epoch} | test_loss = {eval_loss:.3f} | mean_preds_eval_acc = {mpea} | overall_eval_acc = {oea}')
+
+      if oea is not None and oea > eval_accuracy_memory:
+        u.save_checkpoint(self.model, None, self.save_name_model)
+  
+  def train(self, n_epochs=500, eval_step=2):
+    print('Start Training...')
+    eval_accuracy_memory = 0
+    for epoch in tqdm(range(n_epochs)):
+      # epoch_loss, mpta, ota = self.train_pass(self.train_data_loader)
+      epoch_loss, mpta, ota = self.train_pass_accumulate(self.train_data_loader)
+      logging.info(f'Epoch {epoch} | train_loss = {epoch_loss:.3f} | mean_preds_train_acc = {mpta} | overall_train_acc = {ota}')
+      eval_loss, mpea, oea = self.evaluation(only_loss=False if epoch % eval_step == 0 else True)
+      logging.info(f'Epoch {epoch} | test_loss = {eval_loss:.3f} | mean_preds_eval_acc = {mpea} | overall_eval_acc = {oea}')
+
+      if oea is not None and oea > eval_accuracy_memory:
+        u.save_checkpoint(self.model, None, self.save_name_model)
+
+  @torch.no_grad()
+  def evaluation(self, only_loss=True):
+    losses, mean_preds_acc, overall_acc = 0, None, None
+    targets, predictions = [], []
+
+    self.model.eval()
+
+    for enc_in, dec_in, pad_mask in tqdm(self.test_data_loader):
+      enc_in, dec_in, pad_mask = enc_in.to(self.device), dec_in.to(self.device), pad_mask.to(self.device)
+      preds = self.model(enc_in, dec_in[:, :-1], padding_mask=pad_mask)
+
+      losses += self.criterion(preds.reshape(-1, preds.shape[-1]), dec_in[:, 1:].reshape(-1), epsilon=self.smoothing_eps).item()
+      
+      if not only_loss:
+        preds = self.model.greedy_decoding(enc_in, self.eos_idx, self.pad_idx, max_seq_len=dec_in.shape[1])
+        targets += dec_in[:, 1:].tolist()
+        predictions += preds.tolist()
+    
+    self.model.train()
+
+    if not only_loss:
+      mean_preds_acc, overall_acc = Data.compute_accuracy(targets, predictions, self.eos_idx)
+
+    return losses / len(self.test_data_loader), mean_preds_acc, overall_acc
+
+
+class Experiment5(Experiment1):
+  '''Encoder-Decoder Convnet for phonemes prediction, adam optimizer, CrossEntropy loss, window-sliced'''
+  def __init__(self, device=None, logfile='_logs/_logs_experiment5.txt', lr=1e-4, smoothing_eps=0.1, dump_config=True, decay_factor=0,
+               save_name_model='convnet/convnet_experiment5.pt', encoding_fn=Data.phonemes_encoding,
+               metadata_file='_Data_metadata_phonemes.pk'):
+    super().__init__(logfile=logfile, save_name_model=save_name_model, encoding_fn=encoding_fn, metadata_file=metadata_file)
+
+
+class Experiment6(Experiment1):
+  '''Encoder-Decoder Convnet for syllables prediction, adam optimizer, CrossEntropy loss, window-sliced, sigmoid score_fn'''
+  def __init__(self, device=None, logfile='_logs/_logs_experiment6.txt', lr=1e-4, smoothing_eps=0.1, dump_config=True, decay_factor=0,
+               save_name_model='convnet/convnet_experiment6.pt', encoding_fn=Data.phonemes_encoding,
+               metadata_file='_Data_metadata_syllables.pk', score_fn=u.sigmoid_energy):
+    super().__init__(logfile=logfile, save_name_model=save_name_model, score_fn=score_fn)
 
 
 if __name__ == "__main__":
@@ -826,4 +1010,18 @@ if __name__ == "__main__":
   if rep == 'y':
     exp = Experiment3()
     exp.train()
-
+  
+  rep = input('Perform Experiment4? (y or n): ')
+  if rep == 'y':
+    exp = Experiment4()
+    exp.train_progressively()
+  
+  rep = input('Perform Experiment5? (y or n): ')
+  if rep == 'y':
+    exp = Experiment5()
+    exp.train()
+  
+  rep = input('Perform Experiment6? (y or n): ')
+  if rep == 'y':
+    exp = Experiment6()
+    exp.train()
