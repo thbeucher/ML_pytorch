@@ -28,7 +28,7 @@ def get_train_test_epoch_acc(filename, read_from_new=True):
   
   if read_from_new:
     ## READ multitasks_experiment logs
-    train_lines = [el for el in data if 'train_' in el]
+    train_lines = [el for el in data if 'train_' in el and '_acc' in el]
     train_epoch_acc = [(int(el.split(' | ')[0].split('Epoch ')[-1]), round(float(el.split(' = ')[-1]), 3)) for el in train_lines]
     train_epoch_acc = train_epoch_acc[[i for i, (e, acc) in enumerate(train_epoch_acc) if e == 0][-1]:]
 

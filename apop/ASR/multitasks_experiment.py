@@ -843,7 +843,7 @@ class ConvnetExperiments(object):
     print('Start Training...')
     eval_accuracy_memory = 0
     for epoch in tqdm(range(self.n_epochs)):
-      epoch_loss, accs = self.train_pass()
+      epoch_loss, accs = self.train_pass(only_loss=False if epoch % self.eval_step == 0 else True)
       logging.info(f"Epoch {epoch} | train_loss = {epoch_loss:.3f} | {' | '.join([f'{k} = {v:.3f}' for k, v in accs.items()])}")
       eval_loss, accs = self.evaluation(only_loss=False if epoch % self.eval_step == 0 else True)
       logging.info(f"Epoch {epoch} | test_loss = {eval_loss:.3f} | {' | '.join([f'{k} = {v:.3f}' for k, v in accs.items()])}")
@@ -883,8 +883,8 @@ class ConvnetExperiments(object):
 
     return losses / len(self.test_data_loader), accs
   
-  def train_pass(self):
-    losses = 0
+  def train_pass(self, only_loss=True):
+    losses, accs = 0, {}
     targets, predictions = [], []
 
     for enc_in, dec_in in tqdm(self.train_data_loader):
@@ -904,8 +904,11 @@ class ConvnetExperiments(object):
 
       losses += current_loss.item()
     
-    return losses / len(self.train_data_loader), self.scorer(**{'targets': targets, 'predictions': predictions, 'eos_idx': self.eos_idx,
-                                                                'pad_idx': self.pad_idx, 'idx_to_tokens': self.data.idx_to_tokens})
+    if not only_loss:
+      accs = self.scorer(**{'targets': targets, 'predictions': predictions, 'eos_idx': self.eos_idx, 'pad_idx': self.pad_idx,
+                            'idx_to_tokens': self.data.idx_to_tokens})
+    
+    return losses / len(self.train_data_loader), accs
 
 
 ## STATUS = FAILURE
