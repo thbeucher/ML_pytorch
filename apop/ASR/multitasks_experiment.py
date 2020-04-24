@@ -846,7 +846,7 @@ class ConvnetExperiments(object):
       epoch_loss, accs = self.train_pass()
       logging.info(f"Epoch {epoch} | train_loss = {epoch_loss:.3f} | {' | '.join([f'{k} = {v:.3f}' for k, v in accs.items()])}")
       eval_loss, accs = self.evaluation(only_loss=False if epoch % self.eval_step == 0 else True)
-      logging.info(f"Epoch = {epoch} | test_loss = {eval_loss:.3f} | {' | '.join([f'{k} = {v:.3f}' for k, v in accs.items()])}")
+      logging.info(f"Epoch {epoch} | test_loss = {eval_loss:.3f} | {' | '.join([f'{k} = {v:.3f}' for k, v in accs.items()])}")
 
       oea = accs['preds_acc'] if 'preds_acc' in accs else accs.get('word_accuracy', None)
 
@@ -1003,7 +1003,7 @@ class Experiment11(object):
 
     self.set_data()
 
-    self.model = NaiveConvED()
+    self.model = NaiveConvED(n_feats=10).to(self.device)
     logging.info(f'The model has {u.count_trainable_parameters(self.model):,} trainable parameters')
 
     self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
@@ -1044,6 +1044,10 @@ class Experiment11(object):
 
     for enc_in, _ in tqdm(self.test_data_loader):
       enc_in = enc_in.to(self.device)
+
+      if enc_in.shape[1] % 2 == 1:
+        enc_in = enc_in[:, :-1]
+
       preds = self.model(enc_in)
 
       losses += self.criterion(preds, enc_in).item()
@@ -1057,6 +1061,10 @@ class Experiment11(object):
 
     for enc_in, _ in tqdm(self.train_data_loader):
       enc_in = enc_in.to(self.device)
+
+      if enc_in.shape[1] % 2 == 1:
+        enc_in = enc_in[:, :-1]
+
       preds = self.model(enc_in)
 
       self.optimizer.zero_grad()
