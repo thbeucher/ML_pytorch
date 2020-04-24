@@ -966,6 +966,7 @@ class Experiment8(ConvnetExperiments):
                      encoding_fn=encoding_fn, metadata_file=metadata_file)
 
 
+## STATUS = FAILURE
 class Experiment9(ConvnetExperiments):
   '''Encoder-Decoder Convnet for syllables prediction, adam optimizer, Attention-CrossEntropy loss, window-sliced=0.05'''
   def __init__(self, logfile='_logs/_logs_experiment9.txt', save_name_model='convnet/convnet_experiment9.pt',
@@ -983,6 +984,12 @@ class Experiment10(ConvnetExperiments):
 
 
 if __name__ == "__main__":
+  ## SEEDING FOR REPRODUCIBILITY
+  SEED = 42
+  torch.manual_seed(SEED)
+  np.random.seed(SEED)
+  random.seed(SEED)
+
   rep = input('Perform Experiment1? (y or n): ')
   if rep == 'y':
     exp = Experiment1()
