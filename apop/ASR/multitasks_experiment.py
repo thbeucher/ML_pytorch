@@ -1007,12 +1007,11 @@ class Experiment11(object):
     logging.info(f'The model has {u.count_trainable_parameters(self.model):,} trainable parameters')
 
     self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
-    self.criterion = torch.nn.MSELoss()
+    self.criterion = torch.nn.MSELoss(reduction='sum')
 
     self.train_data_loader = self.data.get_dataset_generator(batch_size=batch_size)
     self.test_data_loader = self.data.get_dataset_generator(train=False, batch_size=batch_size)
     
-  
   def set_data(self):
     self.data = Data()
 
@@ -1032,7 +1031,7 @@ class Experiment11(object):
       eval_loss = self.evaluation()
       logging.info(f"Epoch = {epoch} | test_loss = {eval_loss:.3f}")
 
-      if eval_loss_memory is None or eval_loss > eval_loss_memory:
+      if eval_loss_memory is None or eval_loss < eval_loss_memory:
         u.save_checkpoint(self.model, None, self.save_name_model)
         eval_loss_memory = eval_loss
   
