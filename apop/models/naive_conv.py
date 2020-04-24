@@ -70,7 +70,7 @@ class NaiveConvDecoder(nn.Module):
 
     out = self.relu(self.ct4(out))
     out = self.relu(self.ct5(out))
-    out = self.relu(self.ct6(out))
+    out = self.ct6(out)
     return out
 
 
