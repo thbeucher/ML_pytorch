@@ -68,6 +68,7 @@ import utils as u
 import models.conv_seqseq as css
 
 from optimizer import RAdam
+from models.naive_conv import NaiveConvED
 from models.transformer.transformer import Transformer
 from models.transformer.embedder import PositionalEmbedder
 
@@ -710,7 +711,7 @@ class Data(object):
       if target == pred:
         count_correct_sentences += 1
       
-      wers.append(compute_WER(target, pred))
+      wers.append(u.compute_WER(target, pred))
     
     character_accuracy = count_correct_characters / count_characters
     word_accuracy = count_correct_words / count_words
@@ -847,13 +848,14 @@ class ConvnetExperiments(object):
       eval_loss, accs = self.evaluation(only_loss=False if epoch % self.eval_step == 0 else True)
       logging.info(f"Epoch = {epoch} | test_loss = {eval_loss:.3f} | {' | '.join([f'{k} = {v:.3f}' for k, v in accs.items()])}")
 
-      oea = accs['preds_acc'] if 'preds_acc' in accs else accs['word_accuracy']
+      oea = accs['preds_acc'] if 'preds_acc' in accs else accs.get('word_accuracy', None)
 
       self.criterion.step(999 if self.decay_factor == 0 else epoch)
 
       if oea is not None and oea > eval_accuracy_memory:
         logging.info(f'Save model with eval_accuracy = {oea:.3f}')
         u.save_checkpoint(self.model, None, self.save_name_model)
+        eval_accuracy_memory = oea
   
   @torch.no_grad()
   def evaluation(self, only_loss=True):
@@ -983,6 +985,93 @@ class Experiment10(ConvnetExperiments):
                      n_fft=n_fft, hop_length=hop_length, scorer=scorer)
 
 
+class Experiment11(object):
+  def __init__(self, device=None, logfile='_logs/_logs_experiment11.txt', save_name_model='convnet/naive_convnet_experiment11.pt',
+               batch_size=32, lr=1e-4, metadata_file='_Data_metadata_letters.pk', n_epochs=500,
+               train_folder='../../../datasets/openslr/LibriSpeech/train-clean-100/',
+               test_folder='../../../datasets/openslr/LibriSpeech/test-clean/'):
+    logging.basicConfig(filename=logfile, filemode='a', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+    self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') if device is None else device
+    self.save_name_model = save_name_model
+    self.batch_size = batch_size
+    self.lr = lr
+    self.metadata_file = metadata_file
+    self.n_epochs = n_epochs
+    self.train_folder = train_folder
+    self.test_folder = test_folder
+
+    self.set_data()
+
+    self.model = NaiveConvED()
+    logging.info(f'The model has {u.count_trainable_parameters(self.model):,} trainable parameters')
+
+    self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
+    self.criterion = torch.nn.MSELoss()
+
+    self.train_data_loader = self.data.get_dataset_generator(batch_size=batch_size)
+    self.test_data_loader = self.data.get_dataset_generator(train=False, batch_size=batch_size)
+    
+  
+  def set_data(self):
+    self.data = Data()
+
+    if not os.path.isfile(self.metadata_file):
+      self.data.set_audio_metadata(self.train_folder, self.test_folder)
+      self.data.process_all_transcripts(self.train_folder, self.test_folder)
+      self.data.save_metadata(save_name=self.metadata_file)
+    else:
+      self.data.load_metadata(save_name=self.metadata_file)
+  
+  def train(self):
+    print('Start Training...')
+    eval_loss_memory = None
+    for epoch in tqdm(range(self.n_epochs)):
+      epoch_loss = self.train_pass()
+      logging.info(f"Epoch {epoch} | train_loss = {epoch_loss:.3f}")
+      eval_loss = self.evaluation()
+      logging.info(f"Epoch = {epoch} | test_loss = {eval_loss:.3f}")
+
+      if eval_loss_memory is None or eval_loss > eval_loss_memory:
+        u.save_checkpoint(self.model, None, self.save_name_model)
+        eval_loss_memory = eval_loss
+  
+  @torch.no_grad()
+  def evaluation(self):
+    losses = 0
+
+    self.model.eval()
+
+    for enc_in, _ in tqdm(self.test_data_loader):
+      enc_in = enc_in.to(self.device)
+      preds = self.model(enc_in)
+
+      losses += self.criterion(preds, enc_in).item()
+    
+    self.model.train()
+
+    return losses / len(self.test_data_loader)
+  
+  def train_pass(self):
+    losses = 0
+
+    for enc_in, _ in tqdm(self.train_data_loader):
+      enc_in = enc_in.to(self.device)
+      preds = self.model(enc_in)
+
+      self.optimizer.zero_grad()
+
+      current_loss = self.criterion(preds, enc_in)
+
+      current_loss.backward()
+
+      self.optimizer.step()
+
+      losses += current_loss.item()
+    
+    return losses / len(self.train_data_loader)
+
+
 if __name__ == "__main__":
   ## SEEDING FOR REPRODUCIBILITY
   SEED = 42
@@ -1033,6 +1122,11 @@ if __name__ == "__main__":
   rep = input('Perform Experiment10? (y or n): ')
   if rep == 'y':
     exp = Experiment10()
+    exp.train()
+  
+  rep = input('Perform Experiment11? (y or n): ')
+  if rep == 'y':
+    exp = Experiment11()
     exp.train()
 
 
