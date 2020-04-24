@@ -309,7 +309,7 @@ class Data(object):
     return librosa.feature.mfcc(y=signal, sr=sample_rate, dct_type=dct_type, n_mfcc=n_mfcc, hop_length=hop_length, n_fft=n_fft).T
   
   @staticmethod
-  def read_and_slice_signal(filename, slice_fn=None, sample_rate=16000, window_size=0.025):
+  def read_and_slice_signal(filename, slice_fn=None, **kwargs):
     '''
     Reads audio signal from given file then slice it into n chunks
 
@@ -324,8 +324,8 @@ class Data(object):
     '''
     slice_fn = Data.window_slicing_signal if slice_fn is None else slice_fn
 
-    signal, sample_rate = Data.read_audio_file(filename, sample_rate=sample_rate)
-    return Data.window_slicing_signal(signal, sample_rate=sample_rate, window_size=window_size)
+    signal, sample_rate = Data.read_audio_file(filename)
+    return slice_fn(signal, **kwargs)
   
   @staticmethod
   def get_std_threshold_selected_signal(signal, threshold=0.01):
@@ -645,7 +645,7 @@ class Data(object):
     return [joiner.join([idx_to_tokens[idx] for idx in s[1:s.index(pad_idx)-1 if pad_idx in s else -1]]) for s in sources_encoded]
   
   @staticmethod
-  def compute_accuracy(targets, predictions, eos_idx):
+  def compute_accuracy(targets=[], predictions=[], eos_idx=1, **kwargs):
     targets = [np.array(l[:l.index(eos_idx) + 1 if eos_idx in l else None]) for l in targets]
     predictions = [np.array(l[:l.index(eos_idx) + 1 if eos_idx in l else None]) for l in predictions]
 
@@ -661,22 +661,80 @@ class Data(object):
       n_correct_all += n_correct
       n_total_all += t_len
     
-    return np.mean(acc_per_preds), n_correct_all / n_total_all
+    return {'mean_preds_acc': np.mean(acc_per_preds), 'preds_acc': n_correct_all / n_total_all}
+  
+  @staticmethod
+  def compute_scores(targets=[], predictions=[], pad_idx=2, idx_to_tokens={}, joiner='', strategy='other', **kwargs):
+    '''
+    Params:
+      * targets : list of string
+      * predictions : list of string
+      * pad_idx : int
+      * idx_to_tokens : dict
+      * joiner (optional) : str
+      * strategy (optional) : str
+
+    Returns:
+      * character_accuracy : float
+      * word_accuracy : float
+      * sentence_accuracy : float
+      * mwer : float, mean word error rate
+    '''
+    targets_sentences = Data.reconstruct_sources(targets, idx_to_tokens, pad_idx, joiner=joiner)
+    predictions_sentences = Data.reconstruct_sources(predictions, idx_to_tokens, pad_idx, joiner=joiner)
+
+    count_correct_sentences = 0
+    count_correct_words, count_words = 0, 0
+    count_correct_characters, count_characters = 0, 0
+    wers = []
+
+    for target, pred in zip(targets_sentences, predictions_sentences):
+      count_characters += len(target)
+      count_correct_characters += sum([1 for t, p in zip(target, pred) if t == p])
+
+      if strategy == 'align':
+        space_idxs = [0] + [i for i, c in enumerate(target) if c == ' '] + [len(target)]
+        is_words_correct = [
+          target[space_idxs[i] + 1 : space_idxs[i+1]] == pred[space_idxs[i] + 1 : space_idxs[i+1]]
+          for i in range(len(space_idxs) - 1)
+        ]
+        count_words += len(is_words_correct)
+        count_correct_words += sum(is_words_correct)
+      else:
+        target_word_list = target.split(' ')
+        pred_word_list = pred.split(' ')
+
+        count_words += len(target_word_list)
+        count_correct_words += sum([1 for tw, pw in zip(target_word_list, pred_word_list) if tw == pw])
+
+      if target == pred:
+        count_correct_sentences += 1
+      
+      wers.append(compute_WER(target, pred))
+    
+    character_accuracy = count_correct_characters / count_characters
+    word_accuracy = count_correct_words / count_words
+    sentence_accuracy = count_correct_sentences / len(targets_sentences)
+
+    wer = np.mean(wers)
+
+    return {'character_accuracy': character_accuracy, 'sentence_accuracy': sentence_accuracy, 'wer': wer, 'word_accuracy': word_accuracy}
 
 
 class ConvnetExperiments(object):
-  def __init__(self, device=None, logfile='_logs/_logs_experiment.txt', save_name_model='convnet/convnet_experiment.pt',
-               metadata_file='_Data_metadata.pk', dump_config=True, encoding_fn=Data.letters_encoding, score_fn=F.softmax,
+  def __init__(self, device=None, logfile='_logs/_logs_experiment.txt', save_name_model='convnet/convnet_experiment.pt', readers=[],
+               metadata_file='_Data_metadata_letters.pk', dump_config=True, encoding_fn=Data.letters_encoding, score_fn=F.softmax,
                list_files_fn=Data.get_openslr_files, process_file_fn=Data.read_and_slice_signal, signal_type='window-sliced',
                slice_fn=Data.window_slicing_signal, multi_head=False, d_keys_values=64, lr=1e-4, smoothing_eps=0.1, n_epochs=500,
-               batch_size=32, decay_factor=1, decay_step=0.01, window_size=0.025, create_enc_mask=False, readers=[],
+               batch_size=32, decay_factor=1, decay_step=0.01, create_enc_mask=False, eval_step=10, scorer=Data.compute_accuracy,
                train_folder='../../../datasets/openslr/LibriSpeech/train-clean-100/',
-               test_folder='../../../datasets/openslr/LibriSpeech/test-clean-/'):
+               test_folder='../../../datasets/openslr/LibriSpeech/test-clean/', **kwargs):
     '''
     Params:
       * device (optional) : torch.device
       * logfile (optional) : str, filename for logs dumping
       * save_name_model (optional) : str, filename of model saving
+      * readers (optional) : list of str
       * metadata_file (optional) : str, filename where metadata from Data are saved
       * dump_config (optional) : bool, True to dump convnet configuration to logging file
       * encoding_fn (optional) : function, handle text encoding
@@ -693,11 +751,12 @@ class ConvnetExperiments(object):
       * batch_size (optional) : int
       * decay_factor (optional) : int, 0 for cross-entropy loss only, 1 for Attention-CrossEntropy loss
       * decay_step (optional) : float, decreasing step of Attention loss
-      * window_size (optional) : float, slice size of audio signal
       * create_enc_mask (optional) : bool
-      * readers (optional) : list of str
+      * eval_step (optional) : int, computes accuracies on test set when (epoch % eval_step == 0)
+      * scorer (optional) : function, computes training and testing metrics
       * train_folder (optional) : str
-      * test_folder(optional) : str
+      * test_folder (optional) : str
+      * kwargs (optional) : arguments passed to process_file_fn
     '''
     # [logging.root.removeHandler(handler) for handler in logging.root.handlers[:]]
     logging.basicConfig(filename=logfile, filemode='a', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -705,6 +764,7 @@ class ConvnetExperiments(object):
     self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') if device is None else device
     self.logfile = logfile
     self.save_name_model = save_name_model
+    self.readers = readers
     self.metadata_file = metadata_file
     self.dump_config = dump_config
     self.encoding_fn = encoding_fn
@@ -721,11 +781,12 @@ class ConvnetExperiments(object):
     self.batch_size = batch_size
     self.decay_factor = decay_factor
     self.decay_step = decay_step
-    self.window_size = window_size
     self.create_enc_mask = create_enc_mask
-    self.readers = readers
+    self.eval_step = eval_step
+    self.scorer = scorer
     self.train_folder = train_folder
     self.test_folder = test_folder
+    self.process_file_fn_args = kwargs
 
     self.set_data()
     self.sos_idx = self.data.tokens_to_idx['<sos>']
@@ -749,17 +810,17 @@ class ConvnetExperiments(object):
 
     self.train_data_loader = self.data.get_dataset_generator(batch_size=batch_size, pad_idx=self.pad_idx, signal_type=signal_type,
                                                              create_enc_mask=create_enc_mask, readers=readers,
-                                                             process_file_fn=process_file_fn, window_size=window_size)
+                                                             process_file_fn=process_file_fn, **kwargs)
     self.test_data_loader = self.data.get_dataset_generator(train=False, batch_size=batch_size, pad_idx=self.pad_idx,
                                                             signal_type=signal_type, create_enc_mask=create_enc_mask, readers=readers,
-                                                            process_file_fn=process_file_fn, window_size=window_size)
+                                                            process_file_fn=process_file_fn, **kwargs)
   
   def set_data(self):
     self.data = Data()
 
     if not os.path.isfile(self.metadata_file):
       self.data.set_audio_metadata(self.train_folder, self.test_folder, list_files_fn=self.list_files_fn, slice_fn=self.slice_fn,
-                                   process_file_fn=self.process_file_fn, window_size=self.window_size)
+                                   process_file_fn=self.process_file_fn, **self.process_file_fn_args)
       self.data.process_all_transcripts(self.train_folder, self.test_folder, encoding_fn=self.encoding_fn)
       self.data.save_metadata(save_name=self.metadata_file)
     else:
@@ -781,10 +842,12 @@ class ConvnetExperiments(object):
     print('Start Training...')
     eval_accuracy_memory = 0
     for epoch in tqdm(range(self.n_epochs)):
-      epoch_loss, mpta, ota = self.train_pass()
-      logging.info(f'Epoch {epoch} | train_loss = {epoch_loss:.3f} | mean_preds_train_acc = {mpta} | overall_train_acc = {ota}')
-      eval_loss, mpea, oea = self.evaluation(only_loss=False if epoch % eval_step == 0 else True)
-      logging.info(f'Epoch {epoch} | test_loss = {eval_loss:.3f} | mean_preds_eval_acc = {mpea} | overall_eval_acc = {oea}')
+      epoch_loss, accs = self.train_pass()
+      logging.info(f"Epoch {epoch} | train_loss = {epoch_loss:.3f} | {' | '.join([f'{k} = {v:.3f}' for k, v in accs.items()])}")
+      eval_loss, accs = self.evaluation(only_loss=False if epoch % self.eval_step == 0 else True)
+      logging.info(f"Epoch = {epoch} | test_loss = {eval_loss:.3f} | {' | '.join([f'{k} = {v:.3f}' for k, v in accs.items()])}")
+
+      oea = accs['preds_acc'] if 'preds_acc' in accs else accs['word_accuracy']
 
       self.criterion.step(999 if self.decay_factor == 0 else epoch)
 
@@ -794,7 +857,7 @@ class ConvnetExperiments(object):
   
   @torch.no_grad()
   def evaluation(self, only_loss=True):
-    losses, mean_preds_acc, overall_acc = 0, None, None
+    losses, accs = 0, {}
     targets, predictions = [], []
 
     self.model.eval()
@@ -813,9 +876,10 @@ class ConvnetExperiments(object):
     self.model.train()
 
     if not only_loss:
-      mean_preds_acc, overall_acc = Data.compute_accuracy(targets, predictions, self.eos_idx)
+      accs = self.scorer(**{'targets': targets, 'predictions': predictions, 'eos_idx': self.eos_idx, 'pad_idx': self.pad_idx,
+                            'idx_to_tokens': self.data.idx_to_tokens})
 
-    return losses / len(self.test_data_loader), mean_preds_acc, overall_acc
+    return losses / len(self.test_data_loader), accs
   
   def train_pass(self):
     losses = 0
@@ -838,9 +902,8 @@ class ConvnetExperiments(object):
 
       losses += current_loss.item()
     
-    mean_preds_acc, overall_acc = Data.compute_accuracy(targets, predictions, self.eos_idx)
-    
-    return losses / len(self.train_data_loader), mean_preds_acc, overall_acc
+    return losses / len(self.train_data_loader), self.scorer(**{'targets': targets, 'predictions': predictions, 'eos_idx': self.eos_idx,
+                                                                'pad_idx': self.pad_idx, 'idx_to_tokens': self.data.idx_to_tokens})
 
 
 ## STATUS = FAILURE
@@ -900,7 +963,7 @@ class Experiment8(ConvnetExperiments):
   def __init__(self, logfile='_logs/_logs_experiment8.txt', save_name_model='convnet/convnet_experiment8.pt',
                encoding_fn=Data.syllables_encoding, metadata_file='_Data_metadata_syllables.pk', multi_head=True, d_keys_values=64):
     super().__init__(logfile=logfile, save_name_model=save_name_model, multi_head=multi_head, d_keys_values=d_keys_values,
-                     encoding_fn=encoding_fn=, metadata_file=metadata_file)
+                     encoding_fn=encoding_fn, metadata_file=metadata_file)
 
 
 class Experiment9(ConvnetExperiments):
@@ -909,6 +972,14 @@ class Experiment9(ConvnetExperiments):
                encoding_fn=Data.syllables_encoding, metadata_file='_Data_metadata_syllables.pk', window_size=0.05):
     super().__init__(logfile=logfile, save_name_model=save_name_model, encoding_fn=encoding_fn, metadata_file=metadata_file,
                      window_size=window_size)
+
+
+class Experiment10(ConvnetExperiments):
+  '''Encoder-Decoder Convnet for letters prediction, adam optimizer, Attention-CrossEntropy loss, mfcc, n_fft=2048, hop_length=512'''
+  def __init__(self, logfile='_logs/_logs_experiment10.txt', save_name_model='convnet/convnet_experiment10.pt', batch_size=8,
+               slice_fn=Data.mfcc_extraction, n_fft=2048, hop_length=512, scorer=Data.compute_scores):
+    super().__init__(logfile=logfile, save_name_model=save_name_model, slice_fn=slice_fn, batch_size=batch_size,
+                     n_fft=n_fft, hop_length=hop_length, scorer=scorer)
 
 
 if __name__ == "__main__":
@@ -950,6 +1021,11 @@ if __name__ == "__main__":
   rep = input('Perform Experiment9? (y or n): ')
   if rep == 'y':
     exp = Experiment9()
+    exp.train()
+  
+  rep = input('Perform Experiment10? (y or n): ')
+  if rep == 'y':
+    exp = Experiment10()
     exp.train()
 
 
