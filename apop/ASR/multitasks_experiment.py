@@ -786,7 +786,7 @@ class ConvnetExperiments(object):
     self.scorer = scorer
     self.train_folder = train_folder
     self.test_folder = test_folder
-    self.process_file_fn_args = kwargs
+    self.process_file_fn_args = {**kwargs, **{'slice_fn': slice_fn}}
 
     self.set_data()
     self.sos_idx = self.data.tokens_to_idx['<sos>']
@@ -810,10 +810,10 @@ class ConvnetExperiments(object):
 
     self.train_data_loader = self.data.get_dataset_generator(batch_size=batch_size, pad_idx=self.pad_idx, signal_type=signal_type,
                                                              create_enc_mask=create_enc_mask, readers=readers,
-                                                             process_file_fn=process_file_fn, **kwargs)
+                                                             process_file_fn=process_file_fn, **self.process_file_fn_args)
     self.test_data_loader = self.data.get_dataset_generator(train=False, batch_size=batch_size, pad_idx=self.pad_idx,
                                                             signal_type=signal_type, create_enc_mask=create_enc_mask, readers=readers,
-                                                            process_file_fn=process_file_fn, **kwargs)
+                                                            process_file_fn=process_file_fn, **self.process_file_fn_args)
   
   def set_data(self):
     self.data = Data()
