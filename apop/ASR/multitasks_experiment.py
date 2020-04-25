@@ -820,7 +820,7 @@ class ConvnetExperiments(object):
     self.data = Data()
 
     if not os.path.isfile(self.metadata_file):
-      self.data.set_audio_metadata(self.train_folder, self.test_folder, list_files_fn=self.list_files_fn, slice_fn=self.slice_fn,
+      self.data.set_audio_metadata(self.train_folder, self.test_folder, list_files_fn=self.list_files_fn,
                                    process_file_fn=self.process_file_fn, **self.process_file_fn_args)
       self.data.process_all_transcripts(self.train_folder, self.test_folder, encoding_fn=self.encoding_fn)
       self.data.save_metadata(save_name=self.metadata_file)
@@ -955,6 +955,7 @@ class Experiment6(ConvnetExperiments):
                      encoding_fn=encoding_fn, metadata_file=metadata_file)
 
 
+## STATUS = FAILURE
 class Experiment7(ConvnetExperiments):
   '''Encoder-Decoder Convnet for syllables prediction, adam optimizer, CrossEntropy loss, window-sliced, MultiHeadAttention'''
   def __init__(self, logfile='_logs/_logs_experiment7.txt', decay_factor=0, save_name_model='convnet/convnet_experiment7.pt',
@@ -983,12 +984,14 @@ class Experiment9(ConvnetExperiments):
 class Experiment10(ConvnetExperiments):
   '''Encoder-Decoder Convnet for letters prediction, adam optimizer, Attention-CrossEntropy loss, mfcc, n_fft=2048, hop_length=512'''
   def __init__(self, logfile='_logs/_logs_experiment10.txt', save_name_model='convnet/convnet_experiment10.pt', batch_size=8,
-               slice_fn=Data.mfcc_extraction, n_fft=2048, hop_length=512, scorer=Data.compute_scores):
+               slice_fn=Data.mfcc_extraction, n_fft=2048, hop_length=512, scorer=Data.compute_scores,
+               metadata_file='_Data_metadata_letters_mfcc0125.pk'):
     super().__init__(logfile=logfile, save_name_model=save_name_model, slice_fn=slice_fn, batch_size=batch_size,
-                     n_fft=n_fft, hop_length=hop_length, scorer=scorer)
+                     n_fft=n_fft, hop_length=hop_length, scorer=scorer, metadata_file=metadata_file)
 
 
 class Experiment11(object):
+  '''Conv-ConvTranspose to creates compressed representation by reconstruction task'''
   def __init__(self, device=None, logfile='_logs/_logs_experiment11.txt', save_name_model='convnet/naive_convnet_experiment11.pt',
                batch_size=32, lr=1e-4, metadata_file='_Data_metadata_letters.pk', n_epochs=500,
                train_folder='../../../datasets/openslr/LibriSpeech/train-clean-100/',
@@ -1082,6 +1085,22 @@ class Experiment11(object):
     return losses / len(self.train_data_loader)
 
 
+class Experiment12(ConvnetExperiments):
+  '''Convnet letters prediction, adam, Attention-CrossEntropy loss, mfcc, n_fft=2048, hop_length=512, MultiHead'''
+  def __init__(self, logfile='_logs/_logs_experiment12.txt', save_name_model='convnet/convnet_experiment12.pt', batch_size=8,
+               slice_fn=Data.mfcc_extraction, n_fft=2048, hop_length=512, scorer=Data.compute_scores, multi_head=True,
+               metadata_file='_Data_metadata_letters_mfcc0125.pk'):
+    super().__init__(logfile=logfile, save_name_model=save_name_model, slice_fn=slice_fn, batch_size=batch_size,
+                     n_fft=n_fft, hop_length=hop_length, scorer=scorer, multi_head=multi_head, metadata_file=metadata_file)
+
+
+class Experiment13(ConvnetExperiments):
+  '''Convnet letters prediction, adam, Attention-CrossEntropy loss, window-raw-sliced'''
+  def __init__(self, logfile='_logs/_logs_experiment13.txt', save_name_model='convnet/convnet_experiment13.pt', batch_size=8,
+               scorer=Data.compute_scores, metadata_file='_Data_metadata_letters_raw0025.pk'):
+    super().__init__(logfile=logfile, save_name_model=save_name_model, batch_size=batch_size, scorer=scorer, metadata_file=metadata_file)
+
+
 if __name__ == "__main__":
   ## SEEDING FOR REPRODUCIBILITY
   SEED = 42
@@ -1089,55 +1108,11 @@ if __name__ == "__main__":
   np.random.seed(SEED)
   random.seed(SEED)
 
-  rep = input('Perform Experiment1? (y or n): ')
-  if rep == 'y':
-    exp = Experiment1()
-    exp.train()
+  experiments = {k.replace('Experiment', ''): v for k, v in locals().items() if re.search(r'Experiment\d+', k) is not None}
   
-  rep = input('Perform Experiment2? (y or n): ')
-  if rep == 'y':
-    exp = Experiment2()
-    exp.train()
-  
-  rep = input('Perform Experiment3? (y or n): ')
-  if rep == 'y':
-    exp = Experiment3()
-    exp.train()
-  
-  rep = input('Perform Experiment5? (y or n): ')
-  if rep == 'y':
-    exp = Experiment5()
-    exp.train()
-  
-  rep = input('Perform Experiment6? (y or n): ')
-  if rep == 'y':
-    exp = Experiment6()
-    exp.train()
-  
-  rep = input('Perform Experiment7? (y or n): ')
-  if rep == 'y':
-    exp = Experiment7()
-    exp.train()
-  
-  rep = input('Perform Experiment8? (y or n): ')
-  if rep == 'y':
-    exp = Experiment8()
-    exp.train()
-  
-  rep = input('Perform Experiment9? (y or n): ')
-  if rep == 'y':
-    exp = Experiment9()
-    exp.train()
-  
-  rep = input('Perform Experiment10? (y or n): ')
-  if rep == 'y':
-    exp = Experiment10()
-    exp.train()
-  
-  rep = input('Perform Experiment11? (y or n): ')
-  if rep == 'y':
-    exp = Experiment11()
-    exp.train()
+  rep = input('Which Experiment do you want to start? (1-13): ')
+  exp = experiments[rep]()
+  exp.train()
 
 
 ## DEPRECATED OR UNUSED FN
