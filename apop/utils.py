@@ -1044,3 +1044,7 @@ def board_printing(data):
 
 def sigmoid_energy(mytensor, dim=-1):
   return mytensor.sigmoid() / mytensor.sigmoid().sum(dim, keepdim=True)
+
+
+def compute_out_conv(size_in, kernel=3, stride=1, padding=0, dilation=1):
+  return (size_in + 2 * padding - dilation * (kernel - 1) -1) // stride + 1

@@ -728,7 +728,7 @@ class ConvnetExperiments(object):
                list_files_fn=Data.get_openslr_files, process_file_fn=Data.read_and_slice_signal, signal_type='window-sliced',
                slice_fn=Data.window_slicing_signal, multi_head=False, d_keys_values=64, lr=1e-4, smoothing_eps=0.1, n_epochs=500,
                batch_size=32, decay_factor=1, decay_step=0.01, create_enc_mask=False, eval_step=10, scorer=Data.compute_accuracy,
-               train_folder='../../../datasets/openslr/LibriSpeech/train-clean-100/',
+               relu=False, train_folder='../../../datasets/openslr/LibriSpeech/train-clean-100/',
                test_folder='../../../datasets/openslr/LibriSpeech/test-clean/', **kwargs):
     '''
     Params:
@@ -755,6 +755,7 @@ class ConvnetExperiments(object):
       * create_enc_mask (optional) : bool
       * eval_step (optional) : int, computes accuracies on test set when (epoch % eval_step == 0)
       * scorer (optional) : function, computes training and testing metrics
+      * relu (optional) : bool, True to use ReLU version of ConvEncoder&Decoder
       * train_folder (optional) : str
       * test_folder (optional) : str
       * kwargs (optional) : arguments passed to process_file_fn
@@ -785,6 +786,7 @@ class ConvnetExperiments(object):
     self.create_enc_mask = create_enc_mask
     self.eval_step = eval_step
     self.scorer = scorer
+    self.relu = relu
     self.train_folder = train_folder
     self.test_folder = test_folder
     self.process_file_fn_args = {**kwargs, **{'slice_fn': slice_fn}}
@@ -833,9 +835,14 @@ class ConvnetExperiments(object):
     enc_embedder = css.EncoderEmbedder(enc_input_dim, emb_dim, hid_dim, enc_max_seq_len, enc_dropout, self.device, reduce_dim=reduce_dim)
     dec_embedder = css.DecoderEmbedder(dec_input_dim, emb_dim, dec_max_seq_len, dec_dropout, self.device)
 
-    enc = css.Encoder(emb_dim, hid_dim, enc_layers, enc_kernel_size, enc_dropout, self.device, embedder=enc_embedder)
-    dec = css.Decoder(output_size, emb_dim, hid_dim, dec_layers, dec_kernel_size, dec_dropout, pad_idx, self.device,
-                      embedder=dec_embedder, score_fn=score_fn, multi_head=multi_head, d_keys_values=d_keys_values)
+    if self.relu:
+      enc = css.EncoderRelu(emb_dim, hid_dim, enc_layers, enc_kernel_size, enc_dropout, self.device, embedder=enc_embedder)
+      dec = css.DecoderRelu(output_size, emb_dim, hid_dim, dec_layers, dec_kernel_size, dec_dropout, pad_idx, self.device,
+                            embedder=dec_embedder, score_fn=score_fn, multi_head=multi_head, d_keys_values=d_keys_values)
+    else:
+      enc = css.Encoder(emb_dim, hid_dim, enc_layers, enc_kernel_size, enc_dropout, self.device, embedder=enc_embedder)
+      dec = css.Decoder(output_size, emb_dim, hid_dim, dec_layers, dec_kernel_size, dec_dropout, pad_idx, self.device,
+                        embedder=dec_embedder, score_fn=score_fn, multi_head=multi_head, d_keys_values=d_keys_values)
 
     return css.Seq2Seq(enc, dec, self.device).to(self.device)
 
@@ -964,6 +971,7 @@ class Experiment7(ConvnetExperiments):
                      decay_factor=decay_factor, encoding_fn=encoding_fn, metadata_file=metadata_file)
 
 
+# STATUS = FAILURE
 class Experiment8(ConvnetExperiments):
   '''Encoder-Decoder Convnet for syllables prediction, adam optimizer, Attention-CrossEntropy loss, window-sliced, MultiHeadAttention'''
   def __init__(self, logfile='_logs/_logs_experiment8.txt', save_name_model='convnet/convnet_experiment8.pt',
@@ -993,7 +1001,7 @@ class Experiment10(ConvnetExperiments):
 class Experiment11(object):
   '''Conv-ConvTranspose to creates compressed representation by reconstruction task'''
   def __init__(self, device=None, logfile='_logs/_logs_experiment11.txt', save_name_model='convnet/naive_convnet_experiment11.pt',
-               batch_size=32, lr=1e-4, metadata_file='_Data_metadata_letters.pk', n_epochs=500,
+               batch_size=32, lr=1e-4, metadata_file='_Data_metadata_letters_raw0025.pk', n_epochs=500,
                train_folder='../../../datasets/openslr/LibriSpeech/train-clean-100/',
                test_folder='../../../datasets/openslr/LibriSpeech/test-clean/'):
     logging.basicConfig(filename=logfile, filemode='a', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -1101,6 +1109,15 @@ class Experiment13(ConvnetExperiments):
     super().__init__(logfile=logfile, save_name_model=save_name_model, batch_size=batch_size, scorer=scorer, metadata_file=metadata_file)
 
 
+class Experiment14(ConvnetExperiments):
+  '''Convnet letters prediction, adam, Attention-CrossEntropy loss, mfcc, n_fft=2048, hop_length=512, MultiHead, ReLU'''
+  def __init__(self, logfile='_logs/_logs_experiment14.txt', save_name_model='convnet/convnet_experiment14.pt', batch_size=8,
+               slice_fn=Data.mfcc_extraction, n_fft=2048, hop_length=512, scorer=Data.compute_scores, multi_head=True,
+               metadata_file='_Data_metadata_letters_mfcc0125.pk', relu=True):
+    super().__init__(logfile=logfile, save_name_model=save_name_model, slice_fn=slice_fn, batch_size=batch_size, relu=relu,
+                     n_fft=n_fft, hop_length=hop_length, scorer=scorer, multi_head=multi_head, metadata_file=metadata_file)
+
+
 if __name__ == "__main__":
   ## SEEDING FOR REPRODUCIBILITY
   SEED = 42
@@ -1110,7 +1127,7 @@ if __name__ == "__main__":
 
   experiments = {k.replace('Experiment', ''): v for k, v in locals().items() if re.search(r'Experiment\d+', k) is not None}
   
-  rep = input('Which Experiment do you want to start? (1-13): ')
+  rep = input('Which Experiment do you want to start? (1-14): ')
   exp = experiments[rep]()
   exp.train()
 

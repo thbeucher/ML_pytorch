@@ -1,8 +1,12 @@
 import torch.nn as nn
 
 
+def compute_out_conv(size_in, kernel=3, stride=1, padding=0, dilation=1):
+  return (size_in + 2 * padding - dilation * (kernel - 1) -1) // stride + 1
+
+
 class NaiveConvEncoder(nn.Module):
-  def __init__(self, n_feats=100):
+  def __init__(self, n_feats=100, in_size=400, out_size=80):
     super().__init__()
     self.relu = nn.ReLU(inplace=True)
 
@@ -21,6 +25,9 @@ class NaiveConvEncoder(nn.Module):
     # identity/residual
     self.c9 = nn.Conv2d(n_feats, n_feats, 3, padding=1)
     self.c10 = nn.Conv2d(n_feats, n_feats, 3, padding=1)
+
+    self.in_size = compute_out_conv(compute_out_conv(compute_out_conv(in_size))) // 2
+    self.final_proj = nn.Linear(self.in_size * n_feats, out_size)
   
   def forward(self, x):
     out = self.relu(self.c1(x))
@@ -43,13 +50,20 @@ class NaiveConvEncoder(nn.Module):
 
     out = self.relu(self.c9(out))
     out = self.relu(self.c10(out))
+
+    bs, _, sl, _ = out.shape
+    out = self.relu(self.final_proj(out.reshape(bs, 1, sl, -1)))
     return out, idx
 
 
 class NaiveConvDecoder(nn.Module):
-  def __init__(self, n_feats=100):
+  def __init__(self, n_feats=100, in_size=80, out_size=197):
     super().__init__()
+    self.n_feats = n_feats
+
     self.relu = nn.ReLU(inplace=True)
+
+    self.back_proj = nn.Linear(in_size, out_size * n_feats)
 
     self.mup = nn.MaxUnpool2d(2)
 
@@ -62,6 +76,9 @@ class NaiveConvDecoder(nn.Module):
     self.ct6 = nn.ConvTranspose2d(n_feats, 1, 7, padding=3)
   
   def forward(self, x, idx):
+    bs, _, sl, _ = x.shape
+    x = self.back_proj(x).reshape(bs, self.n_feats, sl, -1)
+
     out = self.mup(x, idx)
 
     out = self.relu(self.ct1(out))
@@ -75,10 +92,10 @@ class NaiveConvDecoder(nn.Module):
 
 
 class NaiveConvED(nn.Module):
-  def __init__(self, encoder=None, decoder=None, n_feats=100):
+  def __init__(self, encoder=None, decoder=None, n_feats=100, enc_in_size=400, enc_out_size=80):
     super().__init__()
-    self.encoder = NaiveConvEncoder(n_feats=n_feats) if encoder is None else encoder
-    self.decoder = NaiveConvDecoder(n_feats=n_feats) if decoder is None else decoder
+    self.encoder = NaiveConvEncoder(n_feats=n_feats, in_size=enc_in_size, out_size=enc_out_size) if encoder is None else encoder
+    self.decoder = NaiveConvDecoder(n_feats=n_feats, in_size=enc_out_size, out_size=self.encoder.in_size) if decoder is None else decoder
   
   def forward(self, x):  # x = [bs, seq_len, n_feats]
     out, idx = self.encoder(x.unsqueeze(1))
