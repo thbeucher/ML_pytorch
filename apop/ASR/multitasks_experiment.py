@@ -65,10 +65,10 @@ from torch.utils.data import Dataset, DataLoader, Subset
 
 sys.path.append(os.path.abspath(__file__).replace('ASR/multitasks_experiment.py', ''))
 import utils as u
+import models.naive_conv as nc
 import models.conv_seqseq as css
 
 from optimizer import RAdam
-from models.naive_conv import NaiveConvED
 from models.transformer.transformer import Transformer
 from models.transformer.embedder import PositionalEmbedder
 
@@ -599,14 +599,15 @@ class Data(object):
       seq_len, self.n_signal_feats = features.shape
       self.max_signal_len = max(self.max_signal_len, seq_len)
   
-  def get_dataset_generator(self, train=True, batch_size=32, num_workers=4, shuffle=True, subset=False, percent=0.2, pad_idx=2,
-                            signal_type='window-sliced', create_enc_mask=False, readers=[], process_file_fn=None, **kwargs):
+  def get_dataset_generator(self, train=True, batch_size=32, num_workers=4, shuffle=True, pin_memory=True, subset=False, percent=0.2,
+                            pad_idx=2, signal_type='window-sliced', create_enc_mask=False, readers=[], process_file_fn=None, **kwargs):
     '''
     Params:
       * train (optional) : bool, True to return training generator, False for testing generator
       * batch_size (optional) : int
       * num_workers (optional) : int
       * shuffle (optional) : bool
+      * pin_memory (optional) : bool
       * subset (optional) : bool
       * percent (optional) : float
       * pad_tok (optional) : str
@@ -632,7 +633,7 @@ class Data(object):
     custom_collator = CustomCollator(self.max_signal_len, self.max_source_len, 0, pad_idx, create_enc_mask=create_enc_mask)
     
     return DataLoader(custom_dataset, batch_size=batch_size, num_workers=num_workers, collate_fn=custom_collator, shuffle=shuffle,
-                      pin_memory=True)
+                      pin_memory=pin_memory)
 
   @staticmethod
   def reconstruct_sources(sources_encoded, idx_to_tokens, pad_idx, joiner=''):
@@ -729,7 +730,7 @@ class ConvnetExperiments(object):
                list_files_fn=Data.get_openslr_files, process_file_fn=Data.read_and_slice_signal, signal_type='window-sliced',
                slice_fn=Data.window_slicing_signal, multi_head=False, d_keys_values=64, lr=1e-4, smoothing_eps=0.1, n_epochs=500,
                batch_size=32, decay_factor=1, decay_step=0.01, create_enc_mask=False, eval_step=10, scorer=Data.compute_accuracy,
-               relu=False, train_folder='../../../datasets/openslr/LibriSpeech/train-clean-100/',
+               convnet_config={}, relu=False, pin_memory=True, train_folder='../../../datasets/openslr/LibriSpeech/train-clean-100/',
                test_folder='../../../datasets/openslr/LibriSpeech/test-clean/', **kwargs):
     '''
     Params:
@@ -756,7 +757,9 @@ class ConvnetExperiments(object):
       * create_enc_mask (optional) : bool
       * eval_step (optional) : int, computes accuracies on test set when (epoch % eval_step == 0)
       * scorer (optional) : function, computes training and testing metrics
+      * convnet_config (optional) : dict
       * relu (optional) : bool, True to use ReLU version of ConvEncoder&Decoder
+      * pin_memory (optional) : bool, passed to DataLoader
       * train_folder (optional) : str
       * test_folder (optional) : str
       * kwargs (optional) : arguments passed to process_file_fn
@@ -788,6 +791,7 @@ class ConvnetExperiments(object):
     self.eval_step = eval_step
     self.scorer = scorer
     self.relu = relu
+    self.pin_memory = pin_memory
     self.train_folder = train_folder
     self.test_folder = test_folder
     self.process_file_fn_args = {**kwargs, **{'slice_fn': slice_fn}}
@@ -803,6 +807,7 @@ class ConvnetExperiments(object):
                            'enc_layers': 10, 'dec_layers': 10, 'enc_kernel_size': 3, 'dec_kernel_size': 3, 'enc_dropout': 0.25,
                            'dec_dropout': 0.25, 'emb_dim': 256, 'hid_dim': 512, 'reduce_dim': False,
                            'multi_head': multi_head, 'd_keys_values': d_keys_values}
+    self.convnet_config = {**self.convnet_config, **convnet_config}
     self.model = self.instanciate_model(**self.convnet_config)
 
     if dump_config:
@@ -813,9 +818,9 @@ class ConvnetExperiments(object):
     self.criterion = u.AttentionLoss(self.pad_idx, self.device, decay_step=decay_step, decay_factor=decay_factor)
 
     self.train_data_loader = self.data.get_dataset_generator(batch_size=batch_size, pad_idx=self.pad_idx, signal_type=signal_type,
-                                                             create_enc_mask=create_enc_mask, readers=readers,
+                                                             create_enc_mask=create_enc_mask, readers=readers, pin_memory=pin_memory,
                                                              process_file_fn=process_file_fn, **self.process_file_fn_args)
-    self.test_data_loader = self.data.get_dataset_generator(train=False, batch_size=batch_size, pad_idx=self.pad_idx,
+    self.test_data_loader = self.data.get_dataset_generator(train=False, batch_size=batch_size, pad_idx=self.pad_idx, pin_memory=pin_memory,
                                                             signal_type=signal_type, create_enc_mask=create_enc_mask, readers=readers,
                                                             process_file_fn=process_file_fn, **self.process_file_fn_args)
   
@@ -832,9 +837,10 @@ class ConvnetExperiments(object):
   
   def instanciate_model(self, enc_input_dim=400, enc_max_seq_len=1400, dec_input_dim=31, dec_max_seq_len=600, output_size=31,
                         enc_layers=10, dec_layers=10, enc_kernel_size=3, dec_kernel_size=3, enc_dropout=0.25, dec_dropout=0.25,
-                        emb_dim=256, hid_dim=512, reduce_dim=False, pad_idx=2, score_fn=torch.softmax, multi_head=False, d_keys_values=64):
-    enc_embedder = css.EncoderEmbedder(enc_input_dim, emb_dim, hid_dim, enc_max_seq_len, enc_dropout, self.device, reduce_dim=reduce_dim)
-    dec_embedder = css.DecoderEmbedder(dec_input_dim, emb_dim, dec_max_seq_len, dec_dropout, self.device)
+                        emb_dim=256, hid_dim=512, reduce_dim=False, pad_idx=2, score_fn=torch.softmax, multi_head=False, d_keys_values=64,
+                        encoder_embedder=css.EncoderEmbedder, decoder_embedder=css.DecoderEmbedder):
+    enc_embedder = encoder_embedder(enc_input_dim, emb_dim, hid_dim, enc_max_seq_len, enc_dropout, self.device, reduce_dim=reduce_dim)
+    dec_embedder = decoder_embedder(dec_input_dim, emb_dim, dec_max_seq_len, dec_dropout, self.device)
 
     if self.relu:
       enc = css.EncoderRelu(emb_dim, hid_dim, enc_layers, enc_kernel_size, enc_dropout, self.device, embedder=enc_embedder)
@@ -997,6 +1003,7 @@ class Experiment10(ConvnetExperiments):
                metadata_file='_Data_metadata_letters_mfcc0125.pk'):
     super().__init__(logfile=logfile, save_name_model=save_name_model, slice_fn=slice_fn, batch_size=batch_size,
                      n_fft=n_fft, hop_length=hop_length, scorer=scorer, metadata_file=metadata_file)
+    
 
 
 class Experiment11(object):
@@ -1018,7 +1025,7 @@ class Experiment11(object):
 
     self.set_data()
 
-    self.model = NaiveConvED(n_feats=10).to(self.device)
+    self.model = nc.NaiveConvED(n_feats=10).to(self.device)
     logging.info(f'The model has {u.count_trainable_parameters(self.model):,} trainable parameters')
 
     self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
@@ -1103,6 +1110,7 @@ class Experiment12(ConvnetExperiments):
                      n_fft=n_fft, hop_length=hop_length, scorer=scorer, multi_head=multi_head, metadata_file=metadata_file)
 
 
+## STATUS = extremely slow convergence, wait only till epoch 100
 class Experiment13(ConvnetExperiments):
   '''Convnet letters prediction, adam, Attention-CrossEntropy loss, window-raw-sliced'''
   def __init__(self, logfile='_logs/_logs_experiment13.txt', save_name_model='convnet/convnet_experiment13.pt', batch_size=8,
@@ -1119,6 +1127,30 @@ class Experiment14(ConvnetExperiments):
                      n_fft=n_fft, hop_length=hop_length, scorer=scorer, multi_head=multi_head, metadata_file=metadata_file)
 
 
+class EncoderEmbedderNaiveConv(torch.nn.Module):
+  def __init__(self, enc_input_dim, emb_dim, hid_dim, enc_max_seq_len, enc_dropout, device, reduce_dim=False,
+               n_feats=10, in_size=400, out_size=80):
+    super().__init__()
+    self.naive_encoder = nc.NaiveConvEncoder(n_feats=n_feats, in_size=in_size, out_size=out_size)
+    self.projection = torch.nn.Linear(out_size, emb_dim)
+    self.relu = torch.nn.ReLU(inplace=True)
+  
+  def forward(self, x):
+    out, _ = self.naive_encoder(x.unsqueeze(1))
+    out = self.relu(self.projection(out.squeeze(1)))
+    return out
+
+
+class Experiment15(ConvnetExperiments):
+  '''Convnet letters prediction, adam, Attention-CrossEntropy loss, window-raw-sliced, EncoderEmbedder = NaiveConvEncoder'''
+  def __init__(self, logfile='_logs/_logs_experiment15.txt', save_name_model='convnet/convnet_experiment15.pt', batch_size=8,
+               metadata_file='_Data_metadata_letters_raw0025.pk'):
+    convnet_config = {'encoder_embedder': EncoderEmbedderNaiveConv, 'enc_layers': 2}
+    super().__init__(logfile=logfile, save_name_model=save_name_model, batch_size=batch_size, metadata_file=metadata_file,
+                    convnet_config=convnet_config)
+    nc.load_model_from_NaiveConvED(self.model.encoder.embedder.naive_encoder, 'convnet/naive_convnet_experiment11.pt')
+
+
 if __name__ == "__main__":
   ## SEEDING FOR REPRODUCIBILITY
   SEED = 42
@@ -1128,7 +1160,7 @@ if __name__ == "__main__":
 
   experiments = {k.replace('Experiment', ''): v for k, v in locals().items() if re.search(r'Experiment\d+', k) is not None}
   
-  rep = input('Which Experiment do you want to start? (1-14): ')
+  rep = input('Which Experiment do you want to start? (1-15): ')
   exp = experiments[rep]()
   exp.train()
 

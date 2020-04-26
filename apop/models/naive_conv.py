@@ -1,9 +1,25 @@
+import torch
 import torch.nn as nn
 
 
 def compute_out_conv(size_in, kernel=3, stride=1, padding=0, dilation=1):
   return (size_in + 2 * padding - dilation * (kernel - 1) -1) // stride + 1
 
+
+def load_model_from_NaiveConvED(model, filename):
+  checkpoint = torch.load(filename)
+  count_loaded = 0
+  model_state_dict = {}
+  for k1, v1 in model.state_dict().items():
+    k = [k2 for k2 in checkpoint['model_state_dict'] if k1 in k2]
+    if len(k) > 0:
+      model_state_dict[k1] = checkpoint['model_state_dict'][k[0]]
+      count_loaded += 1
+    else:
+      model_state_dict[k1] = v1
+  model.load_state_dict(model_state_dict)
+  print(f'{count_loaded}/{len(model.state_dict())} tensors loaded.')
+  
 
 class NaiveConvEncoder(nn.Module):
   def __init__(self, n_feats=100, in_size=400, out_size=80):
