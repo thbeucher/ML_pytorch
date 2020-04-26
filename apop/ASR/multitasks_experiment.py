@@ -631,7 +631,8 @@ class Data(object):
       
     custom_collator = CustomCollator(self.max_signal_len, self.max_source_len, 0, pad_idx, create_enc_mask=create_enc_mask)
     
-    return DataLoader(custom_dataset, batch_size=batch_size, num_workers=num_workers, collate_fn=custom_collator, shuffle=shuffle)
+    return DataLoader(custom_dataset, batch_size=batch_size, num_workers=num_workers, collate_fn=custom_collator, shuffle=shuffle,
+                      pin_memory=True)
 
   @staticmethod
   def reconstruct_sources(sources_encoded, idx_to_tokens, pad_idx, joiner=''):
