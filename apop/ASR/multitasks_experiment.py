@@ -240,6 +240,14 @@ class Data(object):
     return np.array(features)
   
   @staticmethod
+  def overlapping_window_slicing_signal(signal, sample_rate=16000, window_size=0.128, overlap_size=0.032):
+    window = int(window_size * sample_rate)
+    overlap = int(overlap_size * sample_rate)
+    windowed_signal = [signal[i:i+window] for i in range(0, len(signal), window - overlap)]
+    windowed_signal = [np.pad(s, (0, window - len(s)), mode='constant') for s in windowed_signal]
+    return np.array(windowed_signal)
+  
+  @staticmethod
   def filterbank_extraction(signal, sample_rate=16000, n_mels=80, n_fft=None, hop_length=None, window_size=0.025):
     '''
     Extracts filter-bank features from signal
@@ -1135,13 +1143,14 @@ class EncoderEmbedderNaiveConv(torch.nn.Module):
     self.projection = torch.nn.Linear(out_size, emb_dim)
     self.relu = torch.nn.ReLU(inplace=True)
   
-  def forward(self, x):
-    out, _ = self.naive_encoder(x.unsqueeze(1))
-    out = self.relu(self.projection(out.squeeze(1)))
+  def forward(self, x):  # x = [batch_size, seq_len, in_size]
+    out, _ = self.naive_encoder(x.unsqueeze(1))  # out = [batch_size, 1, new_seq_len, out_size]
+    out = self.relu(self.projection(out.squeeze(1)))  ## out = [batch_size, new_seq_len, emb_dim]
     return out
 
 
-class Experiment15(ConvnetExperiments):
+# STATUS = STOPPED, epoch 90, flat testing accuracy curve
+class Experiment15(ConvnetExperiments):  # epoch 160 of experiment11 NaiveConvEncoder
   '''Convnet letters prediction, adam, Attention-CrossEntropy loss, window-raw-sliced, EncoderEmbedder = NaiveConvEncoder'''
   def __init__(self, logfile='_logs/_logs_experiment15.txt', save_name_model='convnet/convnet_experiment15.pt', batch_size=8,
                metadata_file='_Data_metadata_letters_raw0025.pk'):
@@ -1149,6 +1158,49 @@ class Experiment15(ConvnetExperiments):
     super().__init__(logfile=logfile, save_name_model=save_name_model, batch_size=batch_size, metadata_file=metadata_file,
                     convnet_config=convnet_config)
     nc.load_model_from_NaiveConvED(self.model.encoder.embedder.naive_encoder, 'convnet/naive_convnet_experiment11.pt')
+
+
+class RawEncoder(torch.nn.Module):
+  '''
+  Fourier Transform is usualy used for spectral features extraction, as it's a linear transformation we use a FF to simulates it
+  then some Convolution to simulates various filters and maybe a log(relu()+eps), not forgetting positional encoding
+  '''
+  def __init__(self, input_dim, emb_dim, hid_dim, max_seq_len, dropout, device, reduce_dim=False,
+               n_filters=80, hop_length=512, pooling=2, seq_kernel=3):
+    super().__init__()
+    self.device = device
+    moving_len = hop_length // 2
+
+    self.fourier = torch.nn.Linear(input_dim, input_dim)
+    self.filtering = torch.nn.Conv2d(1, n_filters, (seq_kernel, hop_length), padding=(seq_kernel//2, moving_len), stride=(1, moving_len))
+    self.non_linearity = torch.nn.ReLU(inplace=True)
+    self.low_pass_filter = torch.nn.MaxPool1d(pooling)
+
+    out_size = u.compute_out_conv(input_dim, kernel=hop_length, stride=moving_len, padding=moving_len) * n_filters // pooling
+    self.projection = torch.nn.Linear(out_size, emb_dim)
+    self.positional_embedding = u.create_positional_embedding(max_seq_len, emb_dim, hid_dim)
+  
+  def forward(self, x):
+    batch_size, seq_len, _ = x.shape
+
+    out = self.fourier(x)
+    out = self.non_linearity(self.filtering(out.unsqueeze(1)))
+    out = self.low_pass_filter(out.permute(0, 2, 1, 3).reshape(batch_size, seq_len, -1))
+    out = self.projection(u.layer_normalization(out))
+
+    index_x = torch.LongTensor(range(seq_len)).unsqueeze(0).repeat(batch_size, 1).to(self.device)
+    pos_emb = self.positional_embedding(index_x).float()
+
+    return out + pos_emb
+
+
+class Experiment16(ConvnetExperiments):
+  '''Convnet, letters prediction, adam, Attention-CrossEntropy, MultiHead, window-raw-slice with win=0.125, RawEncoder'''
+  def __init__(self, logfile='_logs/_logs_experiment16.txt', save_name_model='convnet/convnet_experiment16.pt', batch_size=8,
+               metadata_file='_Data_metadata_letters_raw0128.pk', slice_fn=Data.overlapping_window_slicing_signal, multi_head=True):
+    convnet_config = {'encoder_embedder': RawEncoder}
+    super().__init__(logfile=logfile, save_name_model=save_name_model, metadata_file=metadata_file, slice_fn=slice_fn,
+                     batch_size=batch_size, convnet_config=convnet_config, multi_head=multi_head)
 
 
 if __name__ == "__main__":
@@ -1160,7 +1212,7 @@ if __name__ == "__main__":
 
   experiments = {k.replace('Experiment', ''): v for k, v in locals().items() if re.search(r'Experiment\d+', k) is not None}
   
-  rep = input('Which Experiment do you want to start? (1-15): ')
+  rep = input('Which Experiment do you want to start? (1-16): ')
   exp = experiments[rep]()
   exp.train()
 
