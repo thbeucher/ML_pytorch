@@ -48,6 +48,7 @@
 import os
 import re
 import sys
+import json
 import torch
 import random
 import logging
@@ -438,6 +439,18 @@ class Data(object):
     return mylist
   
   @staticmethod
+  def words_encoding(sources, sos_tok='<sos>', eos_tok='<eos>', pad_tok='<pad>', idx_to_words=None, words_to_idx=None):
+    sources = [s.lower() for s in sources]
+
+    if idx_to_words is None or words_to_idx is None:
+      words = list(sorted(set([w for s in sources for w in s.split(' ')])))
+      idx_to_words = [sos_tok, eos_tok, pad_tok] + words
+      words_to_idx = {l: i for i, l in enumerate(idx_to_words)}
+
+    sources_encoded = [[words_to_idx[sos_tok]] + [words_to_idx[w] for w in s.split(' ')] + [words_to_idx[eos_tok]] for s in tqdm(sources)]
+    return sources_encoded, idx_to_words, words_to_idx
+
+  @staticmethod
   def letters_encoding(sources, sos_tok='<sos>', eos_tok='<eos>', pad_tok='<pad>', idx_to_letters=None, letters_to_idx=None):
     '''
     Encodes given sources into numerical vectors
@@ -644,7 +657,7 @@ class Data(object):
                       pin_memory=pin_memory)
 
   @staticmethod
-  def reconstruct_sources(sources_encoded, idx_to_tokens, pad_idx, joiner=''):
+  def reconstruct_sources(sources_encoded, idx_to_tokens, eos_idx, joiner=''):
     '''
     Params:
       * sources_encoded : list of list of int
@@ -653,7 +666,7 @@ class Data(object):
     Returns:
       * sources : list of str
     '''
-    return [joiner.join([idx_to_tokens[idx] for idx in s[1:s.index(pad_idx)-1 if pad_idx in s else -1]]) for s in sources_encoded]
+    return [joiner.join([idx_to_tokens[idx] for idx in s[1:s.index(eos_idx) if eos_idx in s else -1]]) for s in sources_encoded]
   
   @staticmethod
   def compute_accuracy(targets=[], predictions=[], eos_idx=1, **kwargs):
@@ -675,12 +688,12 @@ class Data(object):
     return {'mean_preds_acc': np.mean(acc_per_preds), 'preds_acc': n_correct_all / n_total_all}
   
   @staticmethod
-  def compute_scores(targets=[], predictions=[], pad_idx=2, idx_to_tokens={}, joiner='', strategy='other', **kwargs):
+  def compute_scores(targets=[], predictions=[], eos_idx=1, idx_to_tokens={}, joiner='', strategy='other', **kwargs):
     '''
     Params:
       * targets : list of string
       * predictions : list of string
-      * pad_idx : int
+      * eos_idx : int
       * idx_to_tokens : dict
       * joiner (optional) : str
       * strategy (optional) : str
@@ -691,8 +704,8 @@ class Data(object):
       * sentence_accuracy : float
       * mwer : float, mean word error rate
     '''
-    targets_sentences = Data.reconstruct_sources(targets, idx_to_tokens, pad_idx, joiner=joiner)
-    predictions_sentences = Data.reconstruct_sources(predictions, idx_to_tokens, pad_idx, joiner=joiner)
+    targets_sentences = Data.reconstruct_sources(targets, idx_to_tokens, eos_idx, joiner=joiner)
+    predictions_sentences = Data.reconstruct_sources(predictions, idx_to_tokens, eos_idx, joiner=joiner)
 
     count_correct_sentences = 0
     count_correct_words, count_words = 0, 0
@@ -825,12 +838,7 @@ class ConvnetExperiments(object):
     self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
     self.criterion = u.AttentionLoss(self.pad_idx, self.device, decay_step=decay_step, decay_factor=decay_factor)
 
-    self.train_data_loader = self.data.get_dataset_generator(batch_size=batch_size, pad_idx=self.pad_idx, signal_type=signal_type,
-                                                             create_enc_mask=create_enc_mask, readers=readers, pin_memory=pin_memory,
-                                                             process_file_fn=process_file_fn, **self.process_file_fn_args)
-    self.test_data_loader = self.data.get_dataset_generator(train=False, batch_size=batch_size, pad_idx=self.pad_idx, pin_memory=pin_memory,
-                                                            signal_type=signal_type, create_enc_mask=create_enc_mask, readers=readers,
-                                                            process_file_fn=process_file_fn, **self.process_file_fn_args)
+    self.set_data_loader()
   
   def set_data(self):
     self.data = Data()
@@ -842,6 +850,16 @@ class ConvnetExperiments(object):
       self.data.save_metadata(save_name=self.metadata_file)
     else:
       self.data.load_metadata(save_name=self.metadata_file)
+  
+  def set_data_loader(self):
+    self.train_data_loader = self.data.get_dataset_generator(batch_size=self.batch_size, pad_idx=self.pad_idx,
+                                                             signal_type=self.signal_type, create_enc_mask=self.create_enc_mask,
+                                                             readers=self.readers, pin_memory=self.pin_memory,
+                                                             process_file_fn=self.process_file_fn, **self.process_file_fn_args)
+    self.test_data_loader = self.data.get_dataset_generator(train=False, batch_size=self.batch_size, pad_idx=self.pad_idx,
+                                                            pin_memory=self.pin_memory, signal_type=self.signal_type,
+                                                            create_enc_mask=self.create_enc_mask, readers=self.readers,
+                                                            process_file_fn=self.process_file_fn, **self.process_file_fn_args)
   
   def instanciate_model(self, enc_input_dim=400, enc_max_seq_len=1400, dec_input_dim=31, dec_max_seq_len=600, output_size=31,
                         enc_layers=10, dec_layers=10, enc_kernel_size=3, dec_kernel_size=3, enc_dropout=0.25, dec_dropout=0.25,
@@ -932,6 +950,24 @@ class ConvnetExperiments(object):
     
     return losses / len(self.train_data_loader), accs
 
+  @torch.no_grad()
+  def dump_predictions(self, save_name='_convnet_preds_results.json'):
+    u.load_model(self.model, self.save_name_model, restore_only_similars=True)
+    self.model.eval()
+
+    targets, predictions = [], []
+    for enc_in, dec_in in tqdm(self.test_data_loader):
+      enc_in, dec_in = enc_in.to(self.device), dec_in.to(self.device)
+      preds, _ = self.model.greedy_decoding(enc_in, self.sos_idx, self.eos_idx, max_seq_len=dec_in.shape[1])
+      targets += dec_in[:, 1:].tolist()
+      predictions += preds.tolist()
+    
+    targets_sentences = Data.reconstruct_sources(targets, self.data.idx_to_tokens, self.eos_idx, joiner='')
+    predictions_sentences = Data.reconstruct_sources(predictions, self.data.idx_to_tokens, self.eos_idx, joiner='')
+
+    with open(save_name, 'w') as f:
+      json.dump([{'target': t, 'prediction': p} for t, p in zip(targets_sentences, predictions_sentences)], f)
+
 
 ## STATUS = FAILURE
 class Experiment1(ConvnetExperiments):
@@ -1004,15 +1040,15 @@ class Experiment9(ConvnetExperiments):
                      window_size=window_size)
 
 
+## STATUS = GOOD, but slower convergence than experiment12&14
 class Experiment10(ConvnetExperiments):
   '''Encoder-Decoder Convnet for letters prediction, adam optimizer, Attention-CrossEntropy loss, mfcc, n_fft=2048, hop_length=512'''
   def __init__(self, logfile='_logs/_logs_experiment10.txt', save_name_model='convnet/convnet_experiment10.pt', batch_size=8,
                slice_fn=Data.mfcc_extraction, n_fft=2048, hop_length=512, scorer=Data.compute_scores,
-               metadata_file='_Data_metadata_letters_mfcc0125.pk'):
+               metadata_file='_Data_metadata_letters_mfcc0128.pk'):
     super().__init__(logfile=logfile, save_name_model=save_name_model, slice_fn=slice_fn, batch_size=batch_size,
                      n_fft=n_fft, hop_length=hop_length, scorer=scorer, metadata_file=metadata_file)
     
-
 
 class Experiment11(object):
   '''Conv-ConvTranspose to creates compressed representation by reconstruction task'''
@@ -1111,11 +1147,12 @@ class Experiment11(object):
 
 class Experiment12(ConvnetExperiments):
   '''Convnet letters prediction, adam, Attention-CrossEntropy loss, mfcc, n_fft=2048, hop_length=512, MultiHead'''
-  def __init__(self, logfile='_logs/_logs_experiment12.txt', save_name_model='convnet/convnet_experiment12.pt', batch_size=8,
+  def __init__(self, logfile='_logs/_logs_experiment12.txt', save_name_model='convnet/convnet_experiment12.pt', batch_size=32,
                slice_fn=Data.mfcc_extraction, n_fft=2048, hop_length=512, scorer=Data.compute_scores, multi_head=True,
-               metadata_file='_Data_metadata_letters_mfcc0125.pk'):
-    super().__init__(logfile=logfile, save_name_model=save_name_model, slice_fn=slice_fn, batch_size=batch_size,
+               metadata_file='_Data_metadata_letters_mfcc0128.pk', lr=1e-5):
+    super().__init__(logfile=logfile, save_name_model=save_name_model, slice_fn=slice_fn, batch_size=batch_size, lr=lr,
                      n_fft=n_fft, hop_length=hop_length, scorer=scorer, multi_head=multi_head, metadata_file=metadata_file)
+    u.load_model(self.model, save_name_model, restore_only_similars=True)
 
 
 ## STATUS = extremely slow convergence, wait only till epoch 100
@@ -1130,7 +1167,7 @@ class Experiment14(ConvnetExperiments):
   '''Convnet letters prediction, adam, Attention-CrossEntropy loss, mfcc, n_fft=2048, hop_length=512, MultiHead, ReLU'''
   def __init__(self, logfile='_logs/_logs_experiment14.txt', save_name_model='convnet/convnet_experiment14.pt', batch_size=8,
                slice_fn=Data.mfcc_extraction, n_fft=2048, hop_length=512, scorer=Data.compute_scores, multi_head=True,
-               metadata_file='_Data_metadata_letters_mfcc0125.pk', relu=True):
+               metadata_file='_Data_metadata_letters_mfcc0128.pk', relu=True):
     super().__init__(logfile=logfile, save_name_model=save_name_model, slice_fn=slice_fn, batch_size=batch_size, relu=relu,
                      n_fft=n_fft, hop_length=hop_length, scorer=scorer, multi_head=multi_head, metadata_file=metadata_file)
 
@@ -1160,7 +1197,7 @@ class Experiment15(ConvnetExperiments):  # epoch 160 of experiment11 NaiveConvEn
     nc.load_model_from_NaiveConvED(self.model.encoder.embedder.naive_encoder, 'convnet/naive_convnet_experiment11.pt')
 
 
-class RawEncoder(torch.nn.Module):
+class RawEmbedder(torch.nn.Module):
   '''
   Fourier Transform is usualy used for spectral features extraction, as it's a linear transformation we use a FF to simulates it
   then some Convolution to simulates various filters and maybe a log(relu()+eps), not forgetting positional encoding
@@ -1194,13 +1231,180 @@ class RawEncoder(torch.nn.Module):
     return out + pos_emb
 
 
+# STATUS = FAILURE
 class Experiment16(ConvnetExperiments):
-  '''Convnet, letters prediction, adam, Attention-CrossEntropy, MultiHead, window-raw-slice with win=0.125, RawEncoder'''
+  '''Convnet, letters prediction, adam, Attention-CrossEntropy, MultiHead, window-raw-slice with win=0.128, RawEmbedder'''
   def __init__(self, logfile='_logs/_logs_experiment16.txt', save_name_model='convnet/convnet_experiment16.pt', batch_size=8,
                metadata_file='_Data_metadata_letters_raw0128.pk', slice_fn=Data.overlapping_window_slicing_signal, multi_head=True):
-    convnet_config = {'encoder_embedder': RawEncoder}
+    convnet_config = {'encoder_embedder': RawEmbedder}
     super().__init__(logfile=logfile, save_name_model=save_name_model, metadata_file=metadata_file, slice_fn=slice_fn,
+                     convnet_config=convnet_config, multi_head=multi_head, batch_size=batch_size)
+
+
+class Experiment17(ConvnetExperiments):
+  '''Convnet, letters prediction, adam, Attention-CrossEntropy, MultiHead, window-raw-slice with win=0.128'''
+  def __init__(self, logfile='_logs/_logs_experiment17.txt', save_name_model='convnet/convnet_experiment17.pt', batch_size=8,
+               metadata_file='_Data_metadata_letters_raw0128.pk', slice_fn=Data.overlapping_window_slicing_signal, multi_head=True):
+    super().__init__(logfile=logfile, save_name_model=save_name_model, metadata_file=metadata_file, slice_fn=slice_fn,
+                     batch_size=batch_size, multi_head=multi_head)
+
+
+# STATUS = FAILURE
+class Experiment18(ConvnetExperiments):
+  '''Convnet, letters prediction, adam, Attention-CrossEntropy, MultiHead, window-raw-slice with win=0.025, overlap 0.1, RawEmbedder'''
+  def __init__(self, logfile='_logs/_logs_experiment18.txt', save_name_model='convnet/convnet_experiment18.pt', batch_size=8,
+               metadata_file='_Data_metadata_letters_raw0025_001.pk', slice_fn=Data.overlapping_window_slicing_signal, multi_head=True,
+               window_size=0.025, overlap_size=0.01):
+    convnet_config = {'encoder_embedder': RawEmbedder}
+    super().__init__(logfile=logfile, save_name_model=save_name_model, metadata_file=metadata_file, slice_fn=slice_fn,
+                     batch_size=batch_size, convnet_config=convnet_config, multi_head=multi_head, window_size=window_size,
+                     overlap_size=overlap_size)
+
+
+class Experiment19(ConvnetExperiments):
+  '''Convnet, letters prediction, adam, CrossEntropy, MultiHead, window-raw-slice with win=0.025, no-overlap, RawEmbedder'''
+  def __init__(self, logfile='_logs/_logs_experiment19.txt', save_name_model='convnet/convnet_experiment19.pt', batch_size=8,
+               metadata_file='_Data_metadata_letters_raw0025.pk', multi_head=True, decay_factor=0):
+    convnet_config = {'encoder_embedder': RawEmbedder}
+    super().__init__(logfile=logfile, save_name_model=save_name_model, metadata_file=metadata_file, decay_factor=decay_factor,
                      batch_size=batch_size, convnet_config=convnet_config, multi_head=multi_head)
+
+
+class RawEmbedder2(torch.nn.Module):
+  def __init__(self, input_dim, emb_dim, hid_dim, max_seq_len, dropout, device, reduce_dim=False,
+               n_filters=80, window=2048, hop_length=512, pooling=2):
+    super().__init__()
+    self.device = device
+
+    self.conv = torch.nn.Conv1d(1, n_filters, window, stride=hop_length)
+    self.non_linearity = torch.nn.ReLU(inplace=True)
+
+    self.projection = torch.nn.Linear(n_filters, emb_dim)
+    self.normalization = torch.nn.LayerNorm(emb_dim)
+    self.positional_embedding = u.create_positional_embedding(max_seq_len, emb_dim, hid_dim)
+  
+  def forward(self, x):
+    out = self.non_linearity(self.conv(x.unsqueeze(1)))
+    out = self.normalization(self.projection(out.permute(0, 2, 1)))
+
+    batch_size, seq_len, _ = out.shape
+    index_x = torch.LongTensor(range(seq_len)).unsqueeze(0).repeat(batch_size, 1).to(self.device)
+    pos_emb = self.positional_embedding(index_x).float()
+
+    return out + pos_emb
+
+
+class Experiment20(ConvnetExperiments):
+  '''Convnet, letters prediction, adam, Attention-CrossEntropy, MultiHead, no-slicing, RawEmbedder2'''
+  def __init__(self, logfile='_logs/_logs_experiment20.txt', save_name_model='convnet/convnet_experiment20.pt', batch_size=8,
+               metadata_file='_Data_metadata_letters_raw0025.pk', multi_head=True, slice_fn=lambda x: x):
+    convnet_config = {'encoder_embedder': RawEmbedder2}
+    super().__init__(logfile=logfile, save_name_model=save_name_model, metadata_file=metadata_file,
+                     batch_size=batch_size, convnet_config=convnet_config, multi_head=multi_head, slice_fn=slice_fn)
+
+
+class ScateringFilter(torch.nn.Module):
+  def __init__(self, n_feats=80, kernel=400, stride=160, norm_pooling=2, kernel_pooling=2, non_linearity='l2_pooling'):
+    super().__init__()
+    self.n_feats = n_feats
+    self.conv = torch.nn.Conv1d(1, n_feats, kernel)
+
+    if non_linearity == 'relu':
+      self.non_linearity = torch.nn.ReLU(inplace=True)
+    else:
+      self.non_linearity = torch.nn.LPPool1d(norm_pooling, kernel_pooling)
+
+    self.low_pass_filter = torch.nn.Conv1d(n_feats, n_feats, kernel, stride=stride)
+  
+  def forward(self, x):  # x = [batch_size, signal_len]
+    out = self.conv(x.unsqueeze(1))  # [batch_size, n_feats, new_signal_len]
+    out = self.non_linearity(out)  # [batch_size, n_feats, new_signal_len/kernel_pooling]
+    out = self.low_pass_filter(out)  # [batch_size, n_feats, new_len]
+    return torch.log(1 + torch.abs(out))  # log-compression
+
+
+class GammatonesFilter(torch.nn.Module):
+  def __init__(self, n_feats=40, kernel=400, kernel_pooling=400, stride=160, low_pass_filter='max_pool'):
+    super().__init__()
+    self.n_feats = n_feats
+    self.conv = torch.nn.Conv1d(1, n_feats, kernel)
+    self.non_linearity = torch.nn.ReLU(inplace=True)
+
+    if low_pass_filter == 'sq_hanning':
+      self.low_pass_filter = torch.nn.Conv1d(n_feats, n_feats, kernel, stride=stride)
+    else:
+      self.low_pass_filter = torch.nn.MaxPool1d(kernel_pooling)
+  
+  def forward(self, x):  # x = [batch_size, signal_len]
+    out = self.non_linearity(self.conv(x.unsqueeze(1)))  # [batch_size, n_feats, new_signal_len] 
+    out = self.low_pass_filter(out)  # [batch_size, n_feats, new_signal_len/kernel_pooling]
+    return torch.log(0.01 + torch.abs(out))  # log-compression
+
+
+class MixFilters(torch.nn.Module):
+  def __init__(self, n_feats_scatering=80, n_feats_gammatones=40, kernel=4, stride=2):
+    super().__init__()
+    self.scatering = ScateringFilter(n_feats=n_feats_scatering, non_linearity='relu')
+    self.gammatones = GammatonesFilter(n_feats=n_feats_gammatones, low_pass_filter='sq_hanning')
+    self.n_feats = n_feats_scatering + n_feats_gammatones 
+    self.reducer = torch.nn.Sequential(torch.nn.Conv1d(self.n_feats, self.n_feats, kernel, stride=stride),
+                                       torch.nn.ReLU(),
+                                       torch.nn.Conv1d(self.n_feats, self.n_feats, kernel, stride=stride),
+                                       torch.nn.ReLU())
+  
+  def forward(self, x):  # x = [batch_size, signal_len]
+    scatering_filters = self.scatering(x)
+    gammatones_filters = self.gammatones(x)
+    out = self.reducer(torch.cat((scatering_filters, gammatones_filters), axis=1))  # [batch_size, self.n_feats, seq_len]
+    return out.permute(0, 2, 1)
+
+
+class AudioEmbedder(torch.nn.Module):
+  def __init__(self, input_dim, emb_dim, hid_dim, max_seq_len, dropout, device, reduce_dim=False):
+    super().__init__()
+    self.device = device
+    self.filters = MixFilters()
+
+    self.projection = torch.nn.Linear(self.filters.n_feats, emb_dim)
+    self.normalization = torch.nn.LayerNorm(emb_dim)
+    self.positional_embedding = u.create_positional_embedding(max_seq_len, emb_dim, hid_dim)
+  
+  def forward(self, x):
+    out = self.filters(x)
+    out = self.normalization(self.projection(out))
+
+    batch_size, seq_len, _ = out.shape
+    index_x = torch.LongTensor(range(seq_len)).unsqueeze(0).repeat(batch_size, 1).to(self.device)
+    pos_emb = self.positional_embedding(index_x).float()
+
+    return out + pos_emb
+
+
+class Experiment21(ConvnetExperiments):
+  '''Convnet, letters prediction, adam, Attention-CrossEntropy, MultiHead, no-slicing, AudioEmbedder'''
+  def __init__(self, logfile='_logs/_logs_experiment21.txt', save_name_model='convnet/convnet_experiment21.pt', batch_size=8,
+               metadata_file='_Data_metadata_letters_mfcc0128.pk', multi_head=True, slice_fn=lambda x: x):
+    convnet_config = {'encoder_embedder': AudioEmbedder, 'enc_layers': 4, 'dec_layers': 6}
+    super().__init__(logfile=logfile, save_name_model=save_name_model, metadata_file=metadata_file, batch_size=batch_size,
+                     convnet_config=convnet_config, multi_head=multi_head, slice_fn=slice_fn)
+
+
+class Experiment22(ConvnetExperiments):
+  '''Convnet phonemes prediction, adam, Attention-CrossEntropy loss, mfcc, n_fft=2048, hop_length=512, MultiHead'''
+  def __init__(self, logfile='_logs/_logs_experiment22.txt', save_name_model='convnet/convnet_experiment22.pt', batch_size=8,
+               slice_fn=Data.mfcc_extraction, n_fft=2048, hop_length=512, scorer=Data.compute_scores, multi_head=True,
+               metadata_file='_Data_metadata_phonemes_mfcc0128.pk', encoding_fn=Data.phonemes_encoding):
+    super().__init__(logfile=logfile, save_name_model=save_name_model, slice_fn=slice_fn, batch_size=batch_size, encoding_fn=encoding_fn,
+                     n_fft=n_fft, hop_length=hop_length, scorer=scorer, multi_head=multi_head, metadata_file=metadata_file)
+
+
+class Experiment23(ConvnetExperiments):
+  '''Convnet words prediction, adam, Attention-CrossEntropy loss, mfcc, n_fft=2048, hop_length=512, MultiHead'''
+  def __init__(self, logfile='_logs/_logs_experiment23.txt', save_name_model='convnet/convnet_experiment23.pt', batch_size=8,
+               slice_fn=Data.mfcc_extraction, n_fft=2048, hop_length=512, scorer=Data.compute_scores, multi_head=True,
+               metadata_file='_Data_metadata_words_mfcc0128.pk', encoding_fn=Data.words_encoding):
+    super().__init__(logfile=logfile, save_name_model=save_name_model, slice_fn=slice_fn, batch_size=batch_size, encoding_fn=encoding_fn,
+                     n_fft=n_fft, hop_length=hop_length, scorer=scorer, multi_head=multi_head, metadata_file=metadata_file)
 
 
 if __name__ == "__main__":
@@ -1212,7 +1416,7 @@ if __name__ == "__main__":
 
   experiments = {k.replace('Experiment', ''): v for k, v in locals().items() if re.search(r'Experiment\d+', k) is not None}
   
-  rep = input('Which Experiment do you want to start? (1-16): ')
+  rep = input('Which Experiment do you want to start? (1-23): ')
   exp = experiments[rep]()
   exp.train()
 
