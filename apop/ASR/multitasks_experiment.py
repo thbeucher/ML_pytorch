@@ -1147,11 +1147,11 @@ class Experiment11(object):
 
 class Experiment12(ConvnetExperiments):
   '''Convnet letters prediction, adam, Attention-CrossEntropy loss, mfcc, n_fft=2048, hop_length=512, MultiHead'''
-  def __init__(self, logfile='_logs/_logs_experiment12.txt', save_name_model='convnet/convnet_experiment12.pt', batch_size=32,
+  def __init__(self, logfile='_logs/_logs_experiment12.txt', save_name_model='convnet/convnet_experiment12.pt', batch_size=8,
                slice_fn=Data.mfcc_extraction, n_fft=2048, hop_length=512, scorer=Data.compute_scores, multi_head=True,
-               metadata_file='_Data_metadata_letters_mfcc0128.pk', lr=1e-5):
-    super().__init__(logfile=logfile, save_name_model=save_name_model, slice_fn=slice_fn, batch_size=batch_size, lr=lr,
-                     n_fft=n_fft, hop_length=hop_length, scorer=scorer, multi_head=multi_head, metadata_file=metadata_file)
+               metadata_file='_Data_metadata_letters_mfcc0128.pk'):
+    super().__init__(logfile=logfile, save_name_model=save_name_model, slice_fn=slice_fn, batch_size=batch_size, n_fft=n_fft,
+                     hop_length=hop_length, scorer=scorer, multi_head=multi_head, metadata_file=metadata_file)
     u.load_model(self.model, save_name_model, restore_only_similars=True)
 
 
@@ -1163,6 +1163,7 @@ class Experiment13(ConvnetExperiments):
     super().__init__(logfile=logfile, save_name_model=save_name_model, batch_size=batch_size, scorer=scorer, metadata_file=metadata_file)
 
 
+## STATUS = stopped, epoch 300, good but slower convergence than experiment12
 class Experiment14(ConvnetExperiments):
   '''Convnet letters prediction, adam, Attention-CrossEntropy loss, mfcc, n_fft=2048, hop_length=512, MultiHead, ReLU'''
   def __init__(self, logfile='_logs/_logs_experiment14.txt', save_name_model='convnet/convnet_experiment14.pt', batch_size=8,
@@ -1294,6 +1295,7 @@ class RawEmbedder2(torch.nn.Module):
     return out + pos_emb
 
 
+## STATUS = stopped, epoch 160, seems promising but slower convergence than experiment21
 class Experiment20(ConvnetExperiments):
   '''Convnet, letters prediction, adam, Attention-CrossEntropy, MultiHead, no-slicing, RawEmbedder2'''
   def __init__(self, logfile='_logs/_logs_experiment20.txt', save_name_model='convnet/convnet_experiment20.pt', batch_size=8,
@@ -1400,11 +1402,202 @@ class Experiment22(ConvnetExperiments):
 
 class Experiment23(ConvnetExperiments):
   '''Convnet words prediction, adam, Attention-CrossEntropy loss, mfcc, n_fft=2048, hop_length=512, MultiHead'''
-  def __init__(self, logfile='_logs/_logs_experiment23.txt', save_name_model='convnet/convnet_experiment23.pt', batch_size=8,
-               slice_fn=Data.mfcc_extraction, n_fft=2048, hop_length=512, scorer=Data.compute_scores, multi_head=True,
+  def __init__(self, logfile='_logs/_logs_experiment23.txt', save_name_model='convnet/convnet_experiment23.pt',
+               slice_fn=Data.mfcc_extraction, n_fft=2048, hop_length=512, multi_head=True, batch_size=32,
                metadata_file='_Data_metadata_words_mfcc0128.pk', encoding_fn=Data.words_encoding):
-    super().__init__(logfile=logfile, save_name_model=save_name_model, slice_fn=slice_fn, batch_size=batch_size, encoding_fn=encoding_fn,
-                     n_fft=n_fft, hop_length=hop_length, scorer=scorer, multi_head=multi_head, metadata_file=metadata_file)
+    super().__init__(logfile=logfile, save_name_model=save_name_model, slice_fn=slice_fn, batch_size=batch_size, n_fft=n_fft,
+                     encoding_fn=encoding_fn, hop_length=hop_length, multi_head=multi_head, metadata_file=metadata_file)
+
+
+class Experiment24(ConvnetExperiments):
+  '''Convnet, letters prediction, adam, Attention-CrossEntropy, MultiHead, no-slicing, AudioEmbedder, scaling'''
+  def __init__(self, logfile='_logs/_logs_experiment24.txt', save_name_model='convnet/convnet_experiment24.pt', batch_size=8,
+               metadata_file='_Data_metadata_letters_mfcc0128.pk', multi_head=True, slice_fn=lambda x: x):
+    convnet_config = {'encoder_embedder': AudioEmbedder, 'enc_layers': 4, 'dec_layers': 6}
+    slice_fn = lambda x: (x - np.mean(x)) / (np.std(x) + 1e-15)
+    super().__init__(logfile=logfile, save_name_model=save_name_model, metadata_file=metadata_file, batch_size=batch_size,
+                     convnet_config=convnet_config, multi_head=multi_head, slice_fn=slice_fn)
+
+
+class TransformerExperiments(ConvnetExperiments):
+  def __init__(self, logfile='_logs/_logs_experiment.txt', save_name_model='transformer/transformer_experiment.pt',
+               d_keys_values=64, n_heads=4, d_model=256, d_ff=512, enc_layers=8, dec_layers=6,
+               dropout=0., reduce_dim=False, create_enc_mask=True, **kwargs):
+    convnet_config = {'d_keys': d_keys_values, 'd_values': d_keys_values, 'n_heads': n_heads, 'd_ff': d_ff, 'enc_layers': enc_layers,
+                      'dec_layers': dec_layers, 'd_model': d_model, 'dropout': dropout, 'reduce_dim': False}
+    super().__init__(convnet_config=convnet_config, logfile=logfile, save_name_model=save_name_model, create_enc_mask=create_enc_mask,
+                     **kwargs)
+    self.criterion = u.CrossEntropyLoss(self.pad_idx)
+    self.criterion.step = lambda x: x
+  
+  def instanciate_model(self, enc_max_seq_len=1400, enc_input_dim=400, d_model=256, dec_max_seq_len=600, d_ff=512, dropout=0.,
+                        dec_input_dim=31, output_size=31, enc_layers=8, dec_layers=6, d_keys=64, d_values=64, n_heads=4,
+                        reduce_dim=False, **kwargs):
+    encoder_embedder = PositionalEmbedder(enc_max_seq_len, enc_input_dim, d_model, device=self.device, reduce_dim=reduce_dim)
+    decoder_embedder = PositionalEmbedder(dec_max_seq_len, dec_input_dim+1, d_model, output_size=output_size, device=self.device)
+
+    model = Transformer(enc_layers, dec_layers, d_model, d_keys, d_values, n_heads, d_ff, output_size,
+                        encoder_embedder=encoder_embedder, decoder_embedder=decoder_embedder, dropout=dropout,
+                        enc_max_seq_len=enc_max_seq_len, dec_max_seq_len=dec_max_seq_len, device=self.device,
+                        encoder_reduce_dim=reduce_dim)
+    return model.to(self.device)
+  
+  def train_pass(self, only_loss=True):
+    losses, accs = 0, {}
+    targets, predictions = [], []
+
+    for enc_in, dec_in, pad_mask in tqdm(self.train_data_loader):
+      enc_in, dec_in, pad_mask = enc_in.to(self.device), dec_in.to(self.device), pad_mask.to(self.device)
+      preds = self.model(enc_in, dec_in[:, :-1], padding_mask=pad_mask)
+
+      self.optimizer.zero_grad()
+
+      current_loss = self.criterion(preds.reshape(-1, preds.shape[-1]), dec_in[:, 1:].reshape(-1), epsilon=self.smoothing_eps)
+
+      current_loss.backward()
+
+      self.optimizer.step()
+
+      targets += dec_in[:, 1:].tolist()
+      predictions += preds.argmax(dim=-1).tolist()
+
+      losses += current_loss.item()
+    
+    if not only_loss:
+      accs = self.scorer(**{'targets': targets, 'predictions': predictions, 'eos_idx': self.eos_idx, 'pad_idx': self.pad_idx,
+                            'idx_to_tokens': self.data.idx_to_tokens})
+    
+    return losses / len(self.train_data_loader), accs
+
+  @torch.no_grad()
+  def evaluation(self, only_loss=True):
+    losses, accs = 0, {}
+    targets, predictions = [], []
+
+    self.model.eval()
+
+    for enc_in, dec_in, pad_mask in tqdm(self.test_data_loader):
+      enc_in, dec_in, pad_mask = enc_in.to(self.device), dec_in.to(self.device), pad_mask.to(self.device)
+      preds = self.model(enc_in, dec_in[:, :-1], padding_mask=pad_mask)
+
+      losses += self.criterion(preds.reshape(-1, preds.shape[-1]), dec_in[:, 1:].reshape(-1), epsilon=self.smoothing_eps).item()
+      
+      if not only_loss:
+        preds = self.model.greedy_decoding(enc_in, self.eos_idx, self.pad_idx, max_seq_len=dec_in.shape[1])
+        targets += dec_in[:, 1:].tolist()
+        predictions += preds.tolist()
+    
+    self.model.train()
+
+    if not only_loss:
+      accs = self.scorer(**{'targets': targets, 'predictions': predictions, 'eos_idx': self.eos_idx, 'pad_idx': self.pad_idx,
+                            'idx_to_tokens': self.data.idx_to_tokens})
+
+    return losses / len(self.test_data_loader), accs
+
+
+# STATUS = FAILURE
+class Experiment25(TransformerExperiments):
+  '''Transformer letters prediction, adam, CrossEntropy loss, mfcc, n_fft=2048, hop_length=512'''
+  def __init__(self, logfile='_logs/_logs_experiment25.txt', save_name_model='transformer/transformer_experiment25.pt',
+               slice_fn=Data.mfcc_extraction, n_fft=2048, hop_length=512, scorer=Data.compute_scores,  batch_size=32,
+               metadata_file='_Data_metadata_letters_mfcc0128.pk'):
+    super().__init__(logfile=logfile, save_name_model=save_name_model, slice_fn=slice_fn, batch_size=batch_size, n_fft=n_fft,
+                     hop_length=hop_length, scorer=scorer, metadata_file=metadata_file)
+    u.load_model(self.model, save_name_model, restore_only_similars=True)
+
+
+class ConvnetFeedbackExperiments(ConvnetExperiments):
+  def __init__(self, **kwargs):
+    super().__init__(**kwargs)
+  
+  def instanciate_model(self, enc_input_dim=400, enc_max_seq_len=1400, dec_input_dim=31, dec_max_seq_len=600, output_size=31,
+                        enc_layers=10, dec_layers=10, enc_kernel_size=3, dec_kernel_size=3, enc_dropout=0.25, dec_dropout=0.25,
+                        emb_dim=256, hid_dim=512, reduce_dim=False, pad_idx=2, score_fn=torch.softmax, multi_head=False, d_keys_values=64,
+                        encoder_embedder=css.EncoderEmbedder, decoder_embedder=css.DecoderEmbedder):
+    enc_embedder = encoder_embedder(enc_input_dim, emb_dim, hid_dim, enc_max_seq_len, enc_dropout, self.device, reduce_dim=reduce_dim)
+    dec_embedder = decoder_embedder(dec_input_dim, emb_dim, dec_max_seq_len, dec_dropout, self.device)
+
+    if self.relu:
+      enc = css.EncoderRelu(emb_dim, hid_dim, enc_layers, enc_kernel_size, enc_dropout, self.device, embedder=enc_embedder)
+      dec = css.DecoderRelu(output_size, emb_dim, hid_dim, dec_layers, dec_kernel_size, dec_dropout, pad_idx, self.device,
+                            embedder=dec_embedder, score_fn=score_fn, multi_head=multi_head, d_keys_values=d_keys_values)
+    else:
+      enc = css.Encoder(emb_dim, hid_dim, enc_layers, enc_kernel_size, enc_dropout, self.device, embedder=enc_embedder)
+      dec = css.Decoder(output_size, emb_dim, hid_dim, dec_layers, dec_kernel_size, dec_dropout, pad_idx, self.device,
+                        embedder=dec_embedder, score_fn=score_fn, multi_head=multi_head, d_keys_values=d_keys_values)
+    
+    p_enc_embedder = encoder_embedder(dec_input_dim, emb_dim, hid_dim, dec_max_seq_len, enc_dropout, self.device)
+    p_encoder = css.Encoder(emb_dim, hid_dim, 2, enc_kernel_size, enc_dropout, self.device, embedder=p_enc_embedder)
+    p_decoder = css.DecoderFeedback(output_size, emb_dim, hid_dim, 2, dec_kernel_size, dec_dropout, pad_idx, self.device,
+                                    embedder=dec_embedder, score_fn=score_fn, multi_head=multi_head, d_keys_values=d_keys_values)
+
+    return css.Seq2SeqFeedback(enc, dec, p_encoder, p_decoder, self.device).to(self.device)
+
+  def train_pass(self, only_loss=True):
+    losses, accs = 0, {}
+    targets, predictions = [], []
+
+    for enc_in, dec_in in tqdm(self.train_data_loader):
+      enc_in, dec_in = enc_in.to(self.device), dec_in.to(self.device)
+      preds, att, f_preds, f_att = self.model(enc_in, dec_in[:, :-1])
+
+      self.optimizer.zero_grad()
+
+      current_loss = self.criterion(preds.reshape(-1, preds.shape[-1]), dec_in[:, 1:].reshape(-1), att, epsilon=self.smoothing_eps)
+      current_loss += self.criterion(f_preds.reshape(-1, f_preds.shape[-1]), dec_in[:, 1:].reshape(-1), f_att, epsilon=self.smoothing_eps)
+
+      current_loss.backward()
+
+      self.optimizer.step()
+
+      targets += dec_in[:, 1:].tolist()
+      predictions += preds.argmax(dim=-1).tolist()
+
+      losses += current_loss.item()
+    
+    if not only_loss:
+      accs = self.scorer(**{'targets': targets, 'predictions': predictions, 'eos_idx': self.eos_idx, 'pad_idx': self.pad_idx,
+                            'idx_to_tokens': self.data.idx_to_tokens})
+    
+    return losses / len(self.train_data_loader), accs
+  
+  @torch.no_grad()
+  def evaluation(self, only_loss=True):
+    losses, accs = 0, {}
+    targets, predictions = [], []
+
+    self.model.eval()
+
+    for enc_in, dec_in in tqdm(self.test_data_loader):
+      enc_in, dec_in = enc_in.to(self.device), dec_in.to(self.device)
+      preds, att, f_preds, f_att = self.model(enc_in, dec_in[:, :-1])
+
+      losses += self.criterion(preds.reshape(-1, preds.shape[-1]), dec_in[:, 1:].reshape(-1), att, epsilon=self.smoothing_eps).item()
+      losses += self.criterion(f_preds.reshape(-1, f_preds.shape[-1]), dec_in[:, 1:].reshape(-1), f_att, epsilon=self.smoothing_eps).item()
+      
+      if not only_loss:
+        preds, _ = self.model.greedy_decoding(enc_in, self.sos_idx, self.eos_idx, max_seq_len=dec_in.shape[1])
+        targets += dec_in[:, 1:].tolist()
+        predictions += preds.tolist()
+    
+    self.model.train()
+
+    if not only_loss:
+      accs = self.scorer(**{'targets': targets, 'predictions': predictions, 'eos_idx': self.eos_idx, 'pad_idx': self.pad_idx,
+                            'idx_to_tokens': self.data.idx_to_tokens})
+
+    return losses / len(self.test_data_loader), accs
+
+
+class Experiment26(ConvnetFeedbackExperiments):
+  '''Convnet letters prediction, adam, Attention-CrossEntropy loss, mfcc, n_fft=2048, hop_length=512, MultiHead'''
+  def __init__(self, logfile='_logs/_logs_experiment26.txt', save_name_model='convnet/convnet_experiment26.pt', batch_size=8,
+               slice_fn=Data.mfcc_extraction, n_fft=2048, hop_length=512, scorer=Data.compute_scores, multi_head=True,
+               metadata_file='_Data_metadata_letters_mfcc0128.pk', decay_factor=0):
+    super().__init__(logfile=logfile, save_name_model=save_name_model, slice_fn=slice_fn, batch_size=batch_size, n_fft=n_fft,
+                     hop_length=hop_length, scorer=scorer, multi_head=multi_head, metadata_file=metadata_file, decay_factor=decay_factor)
+    u.load_model(self.model, save_name_model, restore_only_similars=True)
 
 
 if __name__ == "__main__":
@@ -1416,7 +1609,7 @@ if __name__ == "__main__":
 
   experiments = {k.replace('Experiment', ''): v for k, v in locals().items() if re.search(r'Experiment\d+', k) is not None}
   
-  rep = input('Which Experiment do you want to start? (1-23): ')
+  rep = input('Which Experiment do you want to start? (1-26): ')
   exp = experiments[rep]()
   exp.train()
 

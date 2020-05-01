@@ -49,11 +49,11 @@ class PositionalEmbedder(nn.Module):
     ''' x : torch.tensor, shape = (batch, seq_len, n_feats) or (batch, seq_len) '''
     if self.reduce_dim:
       x = self.reducer(x.unsqueeze(1)).squeeze(1)
-
+    
     batch_size, seq_len = x.shape[:2]
 
     assert seq_len <= self.max_seq_len, f'Tensor sequence len ({seq_len}) cannot be bigger than max_seq_len ({self.max_seq_len})'
-
+    
     index_x = torch.LongTensor(range(seq_len)).unsqueeze(0).repeat(batch_size, 1).to(self.device)
     pos_emb = self.positional_embedding(index_x)
 
