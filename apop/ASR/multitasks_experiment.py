@@ -70,6 +70,7 @@ import models.naive_conv as nc
 import models.conv_seqseq as css
 
 from optimizer import RAdam
+from models.transformer.decoder import Decoder
 from models.transformer.transformer import Transformer
 from models.transformer.embedder import PositionalEmbedder
 
@@ -1421,12 +1422,13 @@ class Experiment24(ConvnetExperiments):
 
 class TransformerExperiments(ConvnetExperiments):
   def __init__(self, logfile='_logs/_logs_experiment.txt', save_name_model='transformer/transformer_experiment.pt',
-               d_keys_values=64, n_heads=4, d_model=256, d_ff=512, enc_layers=8, dec_layers=6,
-               dropout=0., reduce_dim=False, create_enc_mask=True, **kwargs):
-    convnet_config = {'d_keys': d_keys_values, 'd_values': d_keys_values, 'n_heads': n_heads, 'd_ff': d_ff, 'enc_layers': enc_layers,
+               d_keys_values=64, n_heads=4, d_model=256, d_ff=512, enc_layers=8, dec_layers=6, convnet_config={},
+               dropout=0., reduce_dim=False, create_enc_mask=True, batch_size=32, **kwargs):
+    default_config = {'d_keys': d_keys_values, 'd_values': d_keys_values, 'n_heads': n_heads, 'd_ff': d_ff, 'enc_layers': enc_layers,
                       'dec_layers': dec_layers, 'd_model': d_model, 'dropout': dropout, 'reduce_dim': False}
+    convnet_config = {**default_config, **convnet_config}
     super().__init__(convnet_config=convnet_config, logfile=logfile, save_name_model=save_name_model, create_enc_mask=create_enc_mask,
-                     **kwargs)
+                     batch_size=batch_size, **kwargs)
     self.criterion = u.CrossEntropyLoss(self.pad_idx)
     self.criterion.step = lambda x: x
   
@@ -1434,7 +1436,7 @@ class TransformerExperiments(ConvnetExperiments):
                         dec_input_dim=31, output_size=31, enc_layers=8, dec_layers=6, d_keys=64, d_values=64, n_heads=4,
                         reduce_dim=False, **kwargs):
     encoder_embedder = PositionalEmbedder(enc_max_seq_len, enc_input_dim, d_model, device=self.device, reduce_dim=reduce_dim)
-    decoder_embedder = PositionalEmbedder(dec_max_seq_len, dec_input_dim+1, d_model, output_size=output_size, device=self.device)
+    decoder_embedder = PositionalEmbedder(dec_max_seq_len, dec_input_dim, d_model, output_size=output_size, device=self.device)
 
     model = Transformer(enc_layers, dec_layers, d_model, d_keys, d_values, n_heads, d_ff, output_size,
                         encoder_embedder=encoder_embedder, decoder_embedder=decoder_embedder, dropout=dropout,
@@ -1600,6 +1602,74 @@ class Experiment26(ConvnetFeedbackExperiments):
     u.load_model(self.model, save_name_model, restore_only_similars=True)
 
 
+class SeqSeqConvnetTransformer(torch.nn.Module):
+  def __init__(self, encoder, decoder, device):
+    super().__init__()
+    self.encoder = encoder
+    self.decoder = decoder
+    self.device = device
+  
+  def forward(self, enc_in, dec_in, padding_mask=None):
+    _, encoder_combined = self.encoder(enc_in)
+    output = self.decoder(dec_in, encoder_combined, padding_mask=padding_mask)
+    return output
+  
+  def greedy_decoding(self, enc_in, sos_idx, eos_idx, max_seq_len=100):
+    _, encoder_combined = self.encoder(enc_in)
+
+    batch_size = enc_in.shape[0]
+    finished = [False] * batch_size
+    dec_in = torch.LongTensor(batch_size, 1).fill_(sos_idx).to(self.device)
+    
+    for _ in range(max_seq_len):
+      output = self.decoder(dec_in, encoder_combined, save=True, aggregate=True)
+      pred = output[:, -1, :].argmax(-1).unsqueeze(1)
+
+      for idx in range(batch_size):
+        if not finished[idx] and pred[idx].item() == eos_idx:
+          finished[idx] = True
+
+      dec_in = torch.cat((dec_in, pred), dim=1)
+
+      if all(finished):
+        break
+    
+    return dec_in[:, 1:]
+
+
+class ConvnetTransformerExperiments(TransformerExperiments):
+  def __init__(self, batch_size=32, **kwargs):
+    convnet_config = {'emb_dim': 256, 'hid_dim': 512, 'enc_dropout': 0.25, 'enc_layers': 10, 'd_model': 256, 'dec_layers': 10,
+                      'd_keys_values': 64, 'n_heads': 4, 'd_ff': 512, 'dec_dropout': 0.25, 'scaling': True}
+    super().__init__(convnet_config=convnet_config, batch_size=batch_size, **kwargs)
+  
+  def instanciate_model(self, enc_input_dim=400, enc_max_seq_len=1400, emb_dim=256, hid_dim=512, enc_dropout=0., enc_reduce_dim=False,
+                        enc_layers=10, enc_kernel_size=3, dec_max_seq_len=600, dec_input_dim=31, d_model=256, output_size=31,
+                        dec_layers=10, d_keys_values=64, n_heads=4, d_ff=512, dec_dropout=0., dec_reduce_dim=False, scaling=True,
+                        encoder_embedder=css.EncoderEmbedder, **kwargs):
+    enc_embedder = encoder_embedder(enc_input_dim, emb_dim, hid_dim, enc_max_seq_len, enc_dropout, self.device, reduce_dim=enc_reduce_dim)
+    enc = css.Encoder(emb_dim, hid_dim, enc_layers, enc_kernel_size, enc_dropout, self.device, embedder=enc_embedder)
+
+    decoder_embedder = PositionalEmbedder(dec_max_seq_len, dec_input_dim, d_model, output_size=output_size, device=self.device)
+    dec = Decoder(n_blocks=dec_layers, d_model=d_model, d_keys=d_keys_values, d_values=d_keys_values, n_heads=n_heads, d_ff=d_ff,
+                  output_size=output_size, dropout=dec_dropout, device=self.device, embedder=decoder_embedder, reduce_dim=dec_reduce_dim,
+                  max_seq_len=dec_max_seq_len, emb_dim=dec_input_dim, scaling=scaling)
+    
+    return SeqSeqConvnetTransformer(enc, dec, self.device).to(self.device)
+
+
+class Experiment27(ConvnetTransformerExperiments):
+  '''Convnet letters prediction, adam, Attention-CrossEntropy loss, mfcc, n_fft=2048, hop_length=512, MultiHead'''
+  def __init__(self, logfile='_logs/_logs_experiment27.txt', save_name_model='convnet/convnetTransformer_experiment27.pt',
+               slice_fn=Data.mfcc_extraction, n_fft=2048, hop_length=512, scorer=Data.compute_scores, batch_size=32,
+               metadata_file='_Data_metadata_letters_mfcc0128.pk'):
+    super().__init__(logfile=logfile, save_name_model=save_name_model, slice_fn=slice_fn, batch_size=batch_size, n_fft=n_fft,
+                     hop_length=hop_length, scorer=scorer, metadata_file=metadata_file)
+
+
+#TODO Wave signal Encoder -> Phonemes Decoder -> Letters Decoder -> Words Decoder
+
+
 if __name__ == "__main__":
   ## SEEDING FOR REPRODUCIBILITY
   SEED = 42
@@ -1609,7 +1679,7 @@ if __name__ == "__main__":
 
   experiments = {k.replace('Experiment', ''): v for k, v in locals().items() if re.search(r'Experiment\d+', k) is not None}
   
-  rep = input('Which Experiment do you want to start? (1-26): ')
+  rep = input('Which Experiment do you want to start? (1-27): ')
   exp = experiments[rep]()
   exp.train()
 
