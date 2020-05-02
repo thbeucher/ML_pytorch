@@ -452,6 +452,19 @@ class Data(object):
     return sources_encoded, idx_to_words, words_to_idx
 
   @staticmethod
+  def ngrams_encoding(sources, sos_tok='<sos>', eos_tok='<eos>', pad_tok='<pad>', n=2, idx_to_ngrams=None, ngrams_to_idx=None):
+    sources = [s.lower() for s in sources]
+
+    if idx_to_ngrams is None or ngrams_to_idx is None:
+      ngrams = list(sorted(set([s[i:i+n] for s in sources for i in range(0, len(s), n)])))
+      idx_to_ngrams = [sos_tok, eos_tok, pad_tok] + ngrams
+      ngrams_to_idx = {l: i for i, l in enumerate(idx_to_ngrams)}
+
+    sources_encoded = [[ngrams_to_idx[sos_tok]] + [ngrams_to_idx[s[i:i+n]] for i in range(0, len(s), n)] + [ngrams_to_idx[eos_tok]]
+                        for s in tqdm(sources)]
+    return sources_encoded, idx_to_ngrams, ngrams_to_idx
+
+  @staticmethod
   def letters_encoding(sources, sos_tok='<sos>', eos_tok='<eos>', pad_tok='<pad>', idx_to_letters=None, letters_to_idx=None):
     '''
     Encodes given sources into numerical vectors
@@ -1401,6 +1414,7 @@ class Experiment22(ConvnetExperiments):
                      n_fft=n_fft, hop_length=hop_length, scorer=scorer, multi_head=multi_head, metadata_file=metadata_file)
 
 
+# STATUS = stopped, epoch 420
 class Experiment23(ConvnetExperiments):
   '''Convnet words prediction, adam, Attention-CrossEntropy loss, mfcc, n_fft=2048, hop_length=512, MultiHead'''
   def __init__(self, logfile='_logs/_logs_experiment23.txt', save_name_model='convnet/convnet_experiment23.pt',
@@ -1640,20 +1654,21 @@ class SeqSeqConvnetTransformer(torch.nn.Module):
 class ConvnetTransformerExperiments(TransformerExperiments):
   def __init__(self, batch_size=32, **kwargs):
     convnet_config = {'emb_dim': 256, 'hid_dim': 512, 'enc_dropout': 0.25, 'enc_layers': 10, 'd_model': 256, 'dec_layers': 10,
-                      'd_keys_values': 64, 'n_heads': 4, 'd_ff': 512, 'dec_dropout': 0.25, 'scaling': True}
+                      'd_keys_values': 64, 'n_heads': 4, 'd_ff': 512, 'dec_dropout': 0.25, 'scaling': True, 'dec_emb_dim': 80}
     super().__init__(convnet_config=convnet_config, batch_size=batch_size, **kwargs)
   
-  def instanciate_model(self, enc_input_dim=400, enc_max_seq_len=1400, emb_dim=256, hid_dim=512, enc_dropout=0., enc_reduce_dim=False,
+  def instanciate_model(self, enc_input_dim=400, enc_max_seq_len=1400, emb_dim=256, hid_dim=512, enc_dropout=0.25, enc_reduce_dim=False,
                         enc_layers=10, enc_kernel_size=3, dec_max_seq_len=600, dec_input_dim=31, d_model=256, output_size=31,
-                        dec_layers=10, d_keys_values=64, n_heads=4, d_ff=512, dec_dropout=0., dec_reduce_dim=False, scaling=True,
-                        encoder_embedder=css.EncoderEmbedder, **kwargs):
+                        dec_layers=10, d_keys_values=64, n_heads=4, d_ff=512, dec_dropout=0.25, dec_reduce_dim=False, scaling=True,
+                        encoder_embedder=css.EncoderEmbedder, dec_emb_dim=100, **kwargs):
     enc_embedder = encoder_embedder(enc_input_dim, emb_dim, hid_dim, enc_max_seq_len, enc_dropout, self.device, reduce_dim=enc_reduce_dim)
     enc = css.Encoder(emb_dim, hid_dim, enc_layers, enc_kernel_size, enc_dropout, self.device, embedder=enc_embedder)
 
-    decoder_embedder = PositionalEmbedder(dec_max_seq_len, dec_input_dim, d_model, output_size=output_size, device=self.device)
+    decoder_embedder = PositionalEmbedder(dec_max_seq_len, dec_emb_dim, d_model, output_size=output_size, device=self.device,
+                                          dropout=dec_dropout)
     dec = Decoder(n_blocks=dec_layers, d_model=d_model, d_keys=d_keys_values, d_values=d_keys_values, n_heads=n_heads, d_ff=d_ff,
                   output_size=output_size, dropout=dec_dropout, device=self.device, embedder=decoder_embedder, reduce_dim=dec_reduce_dim,
-                  max_seq_len=dec_max_seq_len, emb_dim=dec_input_dim, scaling=scaling)
+                  max_seq_len=dec_max_seq_len, emb_dim=dec_emb_dim, scaling=scaling)
     
     return SeqSeqConvnetTransformer(enc, dec, self.device).to(self.device)
 
@@ -1665,7 +1680,38 @@ class Experiment27(ConvnetTransformerExperiments):
                metadata_file='_Data_metadata_letters_mfcc0128.pk'):
     super().__init__(logfile=logfile, save_name_model=save_name_model, slice_fn=slice_fn, batch_size=batch_size, n_fft=n_fft,
                      hop_length=hop_length, scorer=scorer, metadata_file=metadata_file)
+    init_transformer2(self.model, 256, 31)
+    # u.load_model(self.model, 'convnet/convnet_experiment12_0475.pt', restore_only_similars=True)
 
+
+class Experiment28(ConvnetExperiments):
+  '''Convnet bigrams prediction, adam, Attention-CrossEntropy loss, mfcc, n_fft=2048, hop_length=512, MultiHead'''
+  def __init__(self, logfile='_logs/_logs_experiment28.txt', save_name_model='convnet/convnet_experiment28.pt', batch_size=8,
+               slice_fn=Data.mfcc_extraction, n_fft=2048, hop_length=512, scorer=Data.compute_scores, multi_head=True,
+               metadata_file='_Data_metadata_bigrams_mfcc0128.pk', encoding_fn=Data.ngrams_encoding):
+    super().__init__(logfile=logfile, save_name_model=save_name_model, slice_fn=slice_fn, batch_size=batch_size, n_fft=n_fft,
+                     hop_length=hop_length, scorer=scorer, multi_head=multi_head, metadata_file=metadata_file, encoding_fn=encoding_fn)
+
+
+def init_transformer1(model, n_layers, alpha=1):
+  # https://www.aclweb.org/anthology/D19-1083.pdf
+  for k, p in model.named_parameters():
+    if p.dim() > 1 and 'decoder' in k:
+      gamma = (6 / sum(p.shape)) ** 0.5
+      val = gamma * alpha / (n_layers ** 0.5)
+      torch.nn.init.uniform_(p, a=-val, b=val)
+
+
+def init_transformer2(model, emb_dim, vocab_size):
+  # https://arxiv.org/pdf/1911.03179.pdf
+  for k, p in model.named_parameters():
+    if p.dim() > 1 and 'decoder' in k:
+      if isinstance(p, torch.nn.Linear):
+        l = (1 / p.shape[-1]) ** 0.5
+        torch.nn.init.uniform_(p, a=-l, b=l)
+      elif isinstance(p, torch.nn.Embedding):
+        e = (2 / (emb_dim + vocab_size)) ** 0.5
+        torch.nn.init.uniform_(p, a=-e, b=e)
 
 #TODO Wave signal Encoder -> Phonemes Decoder -> Letters Decoder -> Words Decoder
 
@@ -1679,7 +1725,7 @@ if __name__ == "__main__":
 
   experiments = {k.replace('Experiment', ''): v for k, v in locals().items() if re.search(r'Experiment\d+', k) is not None}
   
-  rep = input('Which Experiment do you want to start? (1-27): ')
+  rep = input('Which Experiment do you want to start? (1-28): ')
   exp = experiments[rep]()
   exp.train()
 
