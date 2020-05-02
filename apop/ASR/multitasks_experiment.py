@@ -51,12 +51,9 @@
 import os
 import re
 import sys
-import json
 import torch
 import random
-import logging
 import numpy as np
-import torch.optim as optim
 
 from tqdm import tqdm
 
@@ -64,7 +61,8 @@ sys.path.append(os.path.abspath(__file__).replace('ASR/multitasks_experiment.py'
 import utils as u
 import models.conv_seqseq as css
 
-from optimizer import RAdam
+from data import Data
+from convnet_trainer import ConvnetTrainer
 from models.transformer.decoder import Decoder
 from models.transformer.transformer import Transformer
 from models.transformer.embedder import PositionalEmbedder
@@ -105,7 +103,7 @@ class RawEmbedder(torch.nn.Module):
 
 
 # STATUS = FAILURE
-class Experiment16(ConvnetExperiments):
+class Experiment16(ConvnetTrainer):
   '''Convnet, letters prediction, adam, Attention-CrossEntropy, MultiHead, window-raw-slice with win=0.128, RawEmbedder'''
   def __init__(self, logfile='_logs/_logs_experiment16.txt', save_name_model='convnet/convnet_experiment16.pt', batch_size=8,
                metadata_file='_Data_metadata_letters_raw0128.pk', slice_fn=Data.overlapping_window_slicing_signal, multi_head=True):
@@ -115,7 +113,7 @@ class Experiment16(ConvnetExperiments):
 
 
 # STATUS = FAILURE
-class Experiment18(ConvnetExperiments):
+class Experiment18(ConvnetTrainer):
   '''Convnet, letters prediction, adam, Attention-CrossEntropy, MultiHead, window-raw-slice with win=0.025, overlap 0.1, RawEmbedder'''
   def __init__(self, logfile='_logs/_logs_experiment18.txt', save_name_model='convnet/convnet_experiment18.pt', batch_size=8,
                metadata_file='_Data_metadata_letters_raw0025_001.pk', slice_fn=Data.overlapping_window_slicing_signal, multi_head=True,
@@ -126,7 +124,7 @@ class Experiment18(ConvnetExperiments):
                      overlap_size=overlap_size)
 
 
-class Experiment19(ConvnetExperiments):
+class Experiment19(ConvnetTrainer):
   '''Convnet, letters prediction, adam, CrossEntropy, MultiHead, window-raw-slice with win=0.025, no-overlap, RawEmbedder'''
   def __init__(self, logfile='_logs/_logs_experiment19.txt', save_name_model='convnet/convnet_experiment19.pt', batch_size=8,
                metadata_file='_Data_metadata_letters_raw0025.pk', multi_head=True, decay_factor=0):
@@ -160,7 +158,7 @@ class RawEmbedder2(torch.nn.Module):
 
 
 ## STATUS = stopped, epoch 160, seems promising but slower convergence than experiment21
-class Experiment20(ConvnetExperiments):
+class Experiment20(ConvnetTrainer):
   '''Convnet, letters prediction, adam, Attention-CrossEntropy, MultiHead, no-slicing, RawEmbedder2'''
   def __init__(self, logfile='_logs/_logs_experiment20.txt', save_name_model='convnet/convnet_experiment20.pt', batch_size=8,
                metadata_file='_Data_metadata_letters_raw0025.pk', multi_head=True, slice_fn=lambda x: x):
@@ -246,7 +244,7 @@ class AudioEmbedder(torch.nn.Module):
     return out + pos_emb
 
 
-class Experiment21(ConvnetExperiments):
+class Experiment21(ConvnetTrainer):
   '''Convnet, letters prediction, adam, Attention-CrossEntropy, MultiHead, no-slicing, AudioEmbedder'''
   def __init__(self, logfile='_logs/_logs_experiment21.txt', save_name_model='convnet/convnet_experiment21.pt', batch_size=8,
                metadata_file='_Data_metadata_letters_mfcc0128.pk', multi_head=True, slice_fn=lambda x: x):
@@ -255,7 +253,7 @@ class Experiment21(ConvnetExperiments):
                      convnet_config=convnet_config, multi_head=multi_head, slice_fn=slice_fn)
 
 
-class Experiment24(ConvnetExperiments):
+class Experiment24(ConvnetTrainer):
   '''Convnet, letters prediction, adam, Attention-CrossEntropy, MultiHead, no-slicing, AudioEmbedder, scaling'''
   def __init__(self, logfile='_logs/_logs_experiment24.txt', save_name_model='convnet/convnet_experiment24.pt', batch_size=8,
                metadata_file='_Data_metadata_letters_mfcc0128.pk', multi_head=True, slice_fn=lambda x: x):
@@ -265,7 +263,7 @@ class Experiment24(ConvnetExperiments):
                      convnet_config=convnet_config, multi_head=multi_head, slice_fn=slice_fn)
 
 
-class TransformerExperiments(ConvnetExperiments):
+class TransformerExperiments(ConvnetTrainer):
   def __init__(self, logfile='_logs/_logs_experiment.txt', save_name_model='transformer/transformer_experiment.pt',
                d_keys_values=64, n_heads=4, d_model=256, d_ff=512, enc_layers=8, dec_layers=6, convnet_config={},
                dropout=0., reduce_dim=False, create_enc_mask=True, batch_size=32, **kwargs):
@@ -354,7 +352,7 @@ class Experiment25(TransformerExperiments):
     u.load_model(self.model, save_name_model, restore_only_similars=True)
 
 
-class ConvnetFeedbackExperiments(ConvnetExperiments):
+class ConvnetFeedbackExperiments(ConvnetTrainer):
   def __init__(self, **kwargs):
     super().__init__(**kwargs)
   
@@ -545,6 +543,6 @@ if __name__ == "__main__":
 
   experiments = {k.replace('Experiment', ''): v for k, v in locals().items() if re.search(r'Experiment\d+', k) is not None}
   
-  rep = input('Which Experiment do you want to start? (1-28): ')
+  rep = input(f'Which Experiment do you want to start? ({",".join(experiments.keys())}): ')
   exp = experiments[rep]()
   exp.train()
