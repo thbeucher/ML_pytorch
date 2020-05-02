@@ -4,6 +4,7 @@ import json
 import torch
 import logging
 import torch.optim as optim
+import torch.nn.functional as F
 
 from tqdm import tqdm
 

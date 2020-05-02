@@ -1,4 +1,6 @@
+import os
 import re
+import sys
 import torch
 import random
 import numpy as np
@@ -6,12 +8,15 @@ import numpy as np
 from data import Data
 from convnet_trainer import ConvnetTrainer
 
+sys.path.append(os.path.abspath(__file__).replace('ASR/data.py', ''))
+import utils as u
+
 
 ## STATUS = FAILURE
 class Experiment1(ConvnetTrainer):
   '''Encoder-Decoder Convnet for syllables prediction, adam optimizer, CrossEntropy loss, window-sliced'''
   def __init__(self, logfile='_logs/_logs_experiment1.txt', save_name_model='convnet/convnet_experiment1.pt',
-               encoding_fn=Data.syllables_encoding, decay_factor=0, metadata_file='_Data_metadata_syllables.pk'):
+               encoding_fn=Data.syllables_encoding, decay_factor=0, metadata_file='_Data_metadata_syllables_raw0025.pk'):
     super().__init__(logfile=logfile, save_name_model=save_name_model, encoding_fn=encoding_fn, decay_factor=decay_factor,
                      metadata_file=metadata_file)
 
@@ -20,7 +25,7 @@ class Experiment1(ConvnetTrainer):
 class Experiment2(ConvnetTrainer):
   '''Encoder-Decoder Convnet for syllables prediction, adam optimizer, Attention-CrossEntropy loss, window-sliced'''
   def __init__(self, logfile='_logs/_logs_experiment2.txt', save_name_model='convnet/convnet_experiment2.pt',
-               encoding_fn=Data.syllables_encoding, metadata_file='_Data_metadata_syllables.pk'):
+               encoding_fn=Data.syllables_encoding, metadata_file='_Data_metadata_syllables_raw0025.pk'):
     super().__init__(save_name_model=save_name_model, logfile=logfile, encoding_fn=encoding_fn, metadata_file=metadata_file)
 
 
@@ -28,7 +33,8 @@ class Experiment2(ConvnetTrainer):
 class Experiment3(ConvnetTrainer):
   '''Encoder-Decoder Convnet for syllables prediction, adam optimizer, CrossEntropy loss, std-threshold-selected'''
   def __init__(self, logfile='_logs/_logs_experiment3.txt', decay_factor=0, save_name_model='convnet/convnet_experiment3.pt',
-               signal_type='std-threshold-selected', encoding_fn=Data.syllables_encoding, metadata_file='_Data_metadata_syllables.pk'):
+               signal_type='std-threshold-selected', encoding_fn=Data.syllables_encoding,
+               metadata_file='_Data_metadata_syllables_raw0025.pk'):
     super().__init__(save_name_model=save_name_model, logfile=logfile, signal_type=signal_type, decay_factor=decay_factor,
                      encoding_fn=encoding_fn, metadata_file=metadata_file)
 
@@ -37,7 +43,7 @@ class Experiment3(ConvnetTrainer):
 class Experiment5(ConvnetTrainer):
   '''Encoder-Decoder Convnet for phonemes prediction, adam optimizer, CrossEntropy loss, window-sliced'''
   def __init__(self, logfile='_logs/_logs_experiment5.txt', decay_factor=0, encoding_fn=Data.phonemes_encoding,
-               save_name_model='convnet/convnet_experiment5.pt', metadata_file='_Data_metadata_phonemes.pk'):
+               save_name_model='convnet/convnet_experiment5.pt', metadata_file='_Data_metadata_phonemes_raw0025.pk'):
     super().__init__(logfile=logfile, save_name_model=save_name_model, encoding_fn=encoding_fn, metadata_file=metadata_file,
                      decay_factor=decay_factor)
 
@@ -46,7 +52,7 @@ class Experiment5(ConvnetTrainer):
 class Experiment6(ConvnetTrainer):
   '''Encoder-Decoder Convnet for syllables prediction, adam optimizer, CrossEntropy loss, window-sliced, sigmoid score_fn'''
   def __init__(self, logfile='_logs/_logs_experiment6.txt', decay_factor=0, save_name_model='convnet/convnet_experiment6.pt',
-               encoding_fn=Data.syllables_encoding, metadata_file='_Data_metadata_syllables.pk', score_fn=u.sigmoid_energy):
+               encoding_fn=Data.syllables_encoding, metadata_file='_Data_metadata_syllables_raw0025.pk', score_fn=u.sigmoid_energy):
     super().__init__(logfile=logfile, save_name_model=save_name_model, score_fn=score_fn, decay_factor=decay_factor,
                      encoding_fn=encoding_fn, metadata_file=metadata_file)
 
@@ -55,7 +61,7 @@ class Experiment6(ConvnetTrainer):
 class Experiment7(ConvnetTrainer):
   '''Encoder-Decoder Convnet for syllables prediction, adam optimizer, CrossEntropy loss, window-sliced, MultiHeadAttention'''
   def __init__(self, logfile='_logs/_logs_experiment7.txt', decay_factor=0, save_name_model='convnet/convnet_experiment7.pt',
-               encoding_fn=Data.syllables_encoding, metadata_file='_Data_metadata_syllables.pk', multi_head=True, d_keys_values=64):
+               encoding_fn=Data.syllables_encoding, metadata_file='_Data_metadata_syllables_raw0025.pk', multi_head=True, d_keys_values=64):
     super().__init__(logfile=logfile, save_name_model=save_name_model, multi_head=multi_head, d_keys_values=d_keys_values,
                      decay_factor=decay_factor, encoding_fn=encoding_fn, metadata_file=metadata_file)
 
@@ -64,7 +70,7 @@ class Experiment7(ConvnetTrainer):
 class Experiment8(ConvnetTrainer):
   '''Encoder-Decoder Convnet for syllables prediction, adam optimizer, Attention-CrossEntropy loss, window-sliced, MultiHeadAttention'''
   def __init__(self, logfile='_logs/_logs_experiment8.txt', save_name_model='convnet/convnet_experiment8.pt',
-               encoding_fn=Data.syllables_encoding, metadata_file='_Data_metadata_syllables.pk', multi_head=True, d_keys_values=64):
+               encoding_fn=Data.syllables_encoding, metadata_file='_Data_metadata_syllables_raw0025.pk', multi_head=True, d_keys_values=64):
     super().__init__(logfile=logfile, save_name_model=save_name_model, multi_head=multi_head, d_keys_values=d_keys_values,
                      encoding_fn=encoding_fn, metadata_file=metadata_file)
 
@@ -73,7 +79,7 @@ class Experiment8(ConvnetTrainer):
 class Experiment9(ConvnetTrainer):
   '''Encoder-Decoder Convnet for syllables prediction, adam optimizer, Attention-CrossEntropy loss, window-sliced=0.05'''
   def __init__(self, logfile='_logs/_logs_experiment9.txt', save_name_model='convnet/convnet_experiment9.pt',
-               encoding_fn=Data.syllables_encoding, metadata_file='_Data_metadata_syllables.pk', window_size=0.05):
+               encoding_fn=Data.syllables_encoding, metadata_file='_Data_metadata_syllables_raw0025.pk', window_size=0.05):
     super().__init__(logfile=logfile, save_name_model=save_name_model, encoding_fn=encoding_fn, metadata_file=metadata_file,
                      window_size=window_size)
 
@@ -161,6 +167,6 @@ if __name__ == "__main__":
 
   experiments = {k.replace('Experiment', ''): v for k, v in locals().items() if re.search(r'Experiment\d+', k) is not None}
   
-  rep = input('Which Experiment do you want to start? (1-28): ')
+  rep = input(f'Which Experiment do you want to start? ({",".join(experiments.keys())}): ')
   exp = experiments[rep]()
   exp.train()
