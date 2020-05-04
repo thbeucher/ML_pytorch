@@ -47,6 +47,7 @@
 
 ## Wave signal Encoder -> Phonemes Decoder -> Letters Decoder -> Words Decoder
 ## Use image of texts
+## Predictive Coding
 
 import os
 import re
@@ -435,6 +436,7 @@ class ConvnetFeedbackExperiments(ConvnetTrainer):
     return losses / len(self.test_data_loader), accs
 
 
+# STATUS = FAILURE
 class Experiment26(ConvnetFeedbackExperiments):
   '''Convnet letters prediction, adam, Attention-CrossEntropy loss, mfcc, n_fft=2048, hop_length=512, MultiHead'''
   def __init__(self, logfile='_logs/_logs_experiment26.txt', save_name_model='convnet/convnet_experiment26.pt', batch_size=8,

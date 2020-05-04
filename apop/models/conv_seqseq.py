@@ -54,7 +54,6 @@ class DecoderEmbedder(nn.Module):
   def __init__(self, input_dim, emb_dim, max_seq_len, dropout, device):
     super().__init__()
     self.device = device
-
     self.tok_embedding = nn.Embedding(input_dim, emb_dim)
     self.pos_embedding = nn.Embedding(max_seq_len, emb_dim)
 

@@ -57,17 +57,13 @@ class CustomDataset(Dataset):
 
 
 class CustomCollator(object):
-  def __init__(self, max_signal_len, max_source_len, enc_pad_val, dec_pad_val, create_enc_mask=False):
+  def __init__(self, enc_pad_val, dec_pad_val, create_enc_mask=False):
     '''
     Params:
-      * max_signal_len : int
-      * max_source_len : int
       * enc_pad_val : scalar
       * dec_pad_val : scalar
       * create_enc_mask (optional) : bool
     '''
-    self.max_signal_len = max_signal_len
-    self.max_source_len = max_source_len
     self.enc_pad_val = enc_pad_val
     self.dec_pad_val = dec_pad_val
     self.create_enc_mask = create_enc_mask
@@ -611,7 +607,7 @@ class Data(object):
     if subset:
       custom_dataset = Data.extract_subset(custom_dataset, percent=percent)
       
-    custom_collator = CustomCollator(self.max_signal_len, self.max_source_len, 0, pad_idx, create_enc_mask=create_enc_mask)
+    custom_collator = CustomCollator(0, pad_idx, create_enc_mask=create_enc_mask)
     
     return DataLoader(custom_dataset, batch_size=batch_size, num_workers=num_workers, collate_fn=custom_collator, shuffle=shuffle,
                       pin_memory=pin_memory)

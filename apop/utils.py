@@ -623,14 +623,15 @@ class CrossEntropyLoss(nn.Module):
   '''
   Cross-Entropy loss that implements Label-Smoothing
   '''
-  def __init__(self, pad_idx):
+  def __init__(self, pad_idx, reduction='mean'):
     '''
     Params:
       * pad_idx : int
     '''
     super().__init__()
     self.pad_idx = pad_idx
-    self.cross_entropy = nn.CrossEntropyLoss(ignore_index=pad_idx)
+    self.reduction = reduction
+    self.cross_entropy = nn.CrossEntropyLoss(ignore_index=pad_idx, reduction=reduction)
   
   def _compute_cross_entropy(self, outputs, targets, epsilon=0.1):
     n_class = outputs.shape[-1]
@@ -642,7 +643,11 @@ class CrossEntropyLoss(nn.Module):
     non_pad_mask = targets.ne(self.pad_idx)
 
     loss = -(one_hot * log_prb).sum(dim=1)
-    loss = loss.masked_select(non_pad_mask).mean()
+
+    if self.reduction == 'mean':
+      loss = loss.masked_select(non_pad_mask).mean()
+    else:
+      loss = loss.masked_select(non_pad_mask).sum()
 
     return loss
   
