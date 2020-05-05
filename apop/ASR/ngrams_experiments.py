@@ -18,46 +18,48 @@ import re
 import sys
 import torch
 import random
+import logging
 import numpy as np
 import pickle as pk
+import torch.optim as optim
 
 from tqdm import tqdm
+from itertools import chain
 from collections import Counter
+from torch.nn.utils.rnn import pad_sequence
+from torch.utils.data import Dataset, DataLoader
 
 sys.path.append(os.path.abspath(__file__).replace('ASR/ngrams_experiments.py', ''))
 import utils as u
+import models.conv_seqseq as css
 
 from data import Data
 from convnet_trainer import ConvnetTrainer
+from models.transformer.encoder import TransformerEncoder
+from models.transformer.attention import MultiHeadAttention
 
 
-def get_ngrams(sources, save_data='_ngrams_data.pk', n_words=3000, n_trigrams=1500):
+def get_ngrams(sources, n_words=3000, n_trigrams=1500):
   # bigrams, trigrams and sorted by occurences
-  if not os.path.isfile(save_data):
-    print('Retrieve letters, bigrams, trigrams, words.')
-    letters = list(sorted(set([l for s in sources for l in s])))
-    bigrams = [s[i:i+2] for s in sources for i in range(len(s)-2+1)]
-    trigrams = [s[i:i+3] for s in sources for i in range(len(s)-3+1)]
-    words = [w for s in sources for w in s.split()]
-    print(f'letters = {len(letters)} | bigrams = {len(set(bigrams))} | trigrams = {len(set(trigrams))} | words = {len(set(words))}')
+  print('Retrieve letters, bigrams, trigrams, words.')
+  letters = list(sorted(set([l for s in sources for l in s])))
+  bigrams = [s[i:i+2] for s in sources for i in range(len(s)-2+1)]
+  trigrams = [s[i:i+3] for s in sources for i in range(len(s)-3+1)]
+  words = [w for s in sources for w in s.split()]
+  print(f'letters = {len(letters)} | bigrams = {len(set(bigrams))} | trigrams = {len(set(trigrams))} | words = {len(set(words))}')
 
-    words = sorted([w for w, c in Counter(words).most_common(n_words+50) if w not in letters])[:n_words]
-    print('filtering of bigrams...')
-    bigrams = sorted([(k, v) for k, v in Counter(bigrams).items()], key=lambda x: x[1], reverse=True)
-    median_occ = np.median([el[1] for el in bigrams])
-    bigrams = [b for b, n in bigrams if n >= median_occ and b not in words]
+  words = sorted([w for w, c in Counter(words).most_common(n_words+50) if w not in letters])[:n_words]
+  print('filtering of bigrams...')
+  bigrams = sorted([(k, v) for k, v in Counter(bigrams).items()], key=lambda x: x[1], reverse=True)
+  median_occ = np.median([el[1] for el in bigrams])
+  bigrams = [b for b, n in bigrams if n >= median_occ and b not in words]
 
-    print('filtering of trigrams...')
-    trigrams = sorted([(k, v) for k, v in Counter(trigrams).items()], key=lambda x: x[1], reverse=True)
-    median_occ = np.median([el[1] for el in trigrams])
-    trigrams = [t for t, n in trigrams if n >= median_occ and t not in words][:n_trigrams]
-    print(f'letters = {len(letters)} | bigrams = {len(set(bigrams))} | trigrams = {len(set(trigrams))} | words = {len(set(words))}')
+  print('filtering of trigrams...')
+  trigrams = sorted([(k, v) for k, v in Counter(trigrams).items()], key=lambda x: x[1], reverse=True)
+  median_occ = np.median([el[1] for el in trigrams])
+  trigrams = [t for t, n in trigrams if n >= median_occ and t not in words][:n_trigrams]
+  print(f'letters = {len(letters)} | bigrams = {len(set(bigrams))} | trigrams = {len(set(trigrams))} | words = {len(set(words))}')
 
-    with open(save_data, 'wb') as f:
-      pk.dump([letters, bigrams, trigrams, words], f)
-  else:
-    with open(save_data, 'rb') as f:
-      letters, bigrams, trigrams, words = pk.load(f)
   return letters, bigrams, trigrams, words
 
 
@@ -155,23 +157,336 @@ class NgramsTrainer(ConvnetTrainer):
   def __init__(self, logfile='_ngrams_experiment_logs.txt', save_name_model='convnet/ngrams_convnet_experiment.pt',
                metadata_file='_Data_metadata_multigrams_mfcc0128.pk', encoding_fn=multigrams_encoding, multi_head=True,
                slice_fn=Data.mfcc_extraction, n_fft=2048, hop_length=512, scorer=Data.compute_scores, batch_size=32):
-    convnet_config = {'emb_dim': 512, 'hid_dim': 1024}
+    convnet_config = {'emb_dim': 384, 'hid_dim': 512}
     super().__init__(logfile=logfile, save_name_model=save_name_model, metadata_file=metadata_file, encoding_fn=encoding_fn,
                      multi_head=multi_head, slice_fn=slice_fn, n_fft=n_fft, hop_length=hop_length, scorer=scorer,
                      batch_size=batch_size, convnet_config=convnet_config)
+
+
+class CustomDataset(Dataset):
+  def __init__(self, ids_to_audiofile, ids_to_transcript, sos_tok='<sos>', eos_tok='<eos>', process_file_fn=None, **kwargs):
+    self.ids_to_audiofile = ids_to_audiofile
+    self.ids_to_transcript = ids_to_transcript
+    self.sos_tok = sos_tok
+    self.eos_tok = eos_tok
+
+    self.process_file_fn = process_file_fn = Data.read_and_slice_signal if process_file_fn is None else process_file_fn
+    self.process_file_fn_args = kwargs
+
+    self.identities = list(sorted(ids_to_audiofile.keys()))
+
+  def __len__(self):
+    return len(self.identities)
   
-  def compute_loss(self, preds, dec_in):
-    loss = 0
-    for i, di in enumerate(dec_in):
-      if di < 31:
-        loss += self.criterion(preds[i][:,:31], di, epsilon=self.smoothing_eps)
-      elif di < len(self.data.idx_to_tokens[:-4500]):
-        loss += self.criterion(preds[i][:,31:-4500], di-31, epsilon=self.smoothing_eps)
-      elif di < len(self.data.idx_to_tokens[:-3000]):
-        loss += self.criterion(preds[i][:,-4500:-3000], di-31-294, epsilon=self.smoothing_eps)
+  def __getitem__(self, idx):
+    identity = self.identities[idx]
+
+    signal = self.process_file_fn(self.ids_to_audiofile[identity], **self.process_file_fn_args)
+
+    encoder_input = torch.Tensor(signal)
+    decoder_input = self.ids_to_transcript[identity].lower()
+    decoder_input = self.sos_tok + decoder_input + self.eos_tok
+
+    return encoder_input, decoder_input
+
+
+class CustomCollator(object):
+  def __init__(self, enc_pad_val):
+    self.enc_pad_val = enc_pad_val
+
+  def __call__(self, batch):
+    encoder_inputs, decoder_inputs = zip(*batch)
+
+    encoder_input_batch = pad_sequence(encoder_inputs, batch_first=True, padding_value=self.enc_pad_val).float()
+
+    return encoder_input_batch, decoder_inputs
+
+
+class MultigramsGame(object):
+  def __init__(self, device=None, logfile='_multigramsGame_logs.txt', metadata_file='_Data_metadata_multigrams_mfcc0128.pk',
+               train_folder='../../../datasets/openslr/LibriSpeech/train-clean-100/', process_file_fn=Data.read_and_slice_signal,
+               test_folder='../../../datasets/openslr/LibriSpeech/test-clean/', encoding_fn=multigrams_encoding, batch_size=32,
+               create_enc_mask=False, list_files_fn=Data.get_openslr_files, n_epochs=500, lr=1e-4, smoothing_eps=0.1, eval_step=10,
+               save_model_path='ngrams_experiments/'):
+    logging.basicConfig(filename=logfile, filemode='a', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') if device is None else device
+
+    self.metadata_file = metadata_file
+    self.train_folder = train_folder
+    self.test_folder = test_folder
+    self.list_files_fn = list_files_fn
+    self.process_file_fn = process_file_fn
+    self.encoding_fn = encoding_fn
+    self.process_file_fn_args = {'slice_fn': Data.mfcc_extraction, 'n_fft': 2048, 'hop_length': 512}
+    self.batch_size = batch_size
+    self.create_enc_mask = create_enc_mask
+    self.n_epochs = n_epochs
+    self.smoothing_eps = smoothing_eps
+    self.eval_step = eval_step
+    self.save_model_path = save_model_path
+
+    self.set_data()
+    self.eos_tok = '<eos>'
+    self.sos_idx = self.data.tokens_to_idx['<sos>']
+    self.eos_idx = self.data.tokens_to_idx['<eos>']
+    self.pad_idx = self.data.tokens_to_idx['<pad>']
+
+    self.max_source_len = max(max(map(len, self.data.ids_to_transcript_train)), max(map(len, self.data.ids_to_transcript_test))) + 2
+
+    self.set_data_loader()
+
+    n_letters, n_bigrams, n_trigrams, n_words = 31, 294, 1500, 3000
+    self.predictors_idx = [0, n_letters, n_letters + n_bigrams, n_letters + n_bigrams + n_trigrams]
+    self.action_space = 4
+    self.letters = self.data.idx_to_tokens[:n_letters]
+    self.bigrams = self.data.idx_to_tokens[n_letters:n_letters+n_bigrams]
+    self.trigrams = self.data.idx_to_tokens[n_letters+n_bigrams:n_letters+n_bigrams+n_trigrams]
+    self.words = self.data.idx_to_tokens[n_letters+n_bigrams+n_trigrams:]
+
+    model_config = {'enc_input_dim': self.data.n_signal_feats, 'enc_max_seq_len': self.data.max_signal_len, 'enc_dropout': 0.25,
+                    'reduce_dim': False, 'emb_dim': 256, 'hid_dim': 512, 'enc_layers': 10, 'enc_kernel_size': 3, 'dec_n_blocks': 4,
+                    'dec_input_dim': len(self.data.idx_to_tokens), 'dec_max_seq_len': self.max_source_len, 'dec_dropout': 0.25,
+                    'd_model': 256, 'd_keys': 64, 'd_values': 64, 'n_heads': 4, 'attn_dropout': 0.1, 'out_proj': 384,
+                    'n_letters': n_letters, 'n_bigrams': n_bigrams, 'n_trigrams': n_trigrams, 'n_words': n_words, 'action_space': 4,
+                    'proj_n_blocks': 4, 'proj_dropout': 0.25}
+    self.instanciate_model(**model_config)
+
+    n_params = sum(p.numel() for layer in [self.encoder, self.dec_embedder, self.self_attn_dec_in, self.enc_in_dec_in_attention,
+                                           self.dec_out_attn_proj, self.proj_self_attn, self.predictors, self.action_layer]
+                                for p in layer.parameters() if p.requires_grad)
+    logging.info(f'The model has {n_params:,} trainable parameters')
+
+    self.optimizer = optim.Adam(self.parameters, lr=lr)
+    self.criterion = u.CrossEntropyLoss(self.pad_idx)
+  
+  def set_data(self):
+    self.data = Data()
+
+    if not os.path.isfile(self.metadata_file):
+      self.data.set_audio_metadata(self.train_folder, self.test_folder, list_files_fn=self.list_files_fn,
+                                   process_file_fn=self.process_file_fn, **self.process_file_fn_args)
+      self.data.process_all_transcripts(self.train_folder, self.test_folder, encoding_fn=self.encoding_fn)
+      self.data.save_metadata(save_name=self.metadata_file)
+    else:
+      self.data.load_metadata(save_name=self.metadata_file)
+  
+  def set_data_loader(self, num_workers=4, shuffle=True):
+    custom_collator = CustomCollator(0)
+
+    train_custom_dataset = CustomDataset(self.data.ids_to_audiofile_train, self.data.ids_to_transcript_train,
+                                         process_file_fn=self.process_file_fn, **self.process_file_fn_args)
+    test_custom_dataset = CustomDataset(self.data.ids_to_audiofile_test, self.data.ids_to_transcript_test,
+                                         process_file_fn=self.process_file_fn, **self.process_file_fn_args)
+    
+    self.train_data_loader = DataLoader(train_custom_dataset, batch_size=self.batch_size, num_workers=num_workers, shuffle=shuffle,
+                                        collate_fn=custom_collator)
+    self.test_data_loader = DataLoader(test_custom_dataset, batch_size=self.batch_size, num_workers=num_workers, shuffle=shuffle,
+                                       collate_fn=custom_collator)
+
+  def instanciate_model(self, enc_input_dim=400, emb_dim=256, hid_dim=512, enc_max_seq_len=1400, enc_dropout=0.25, reduce_dim=False,
+                        enc_layers=10, enc_kernel_size=3, dec_input_dim=4825, dec_max_seq_len=600, dec_dropout=0.25, dec_n_blocks=4,
+                        d_ff=512, d_model=256, d_keys=64, d_values=64, n_heads=4, attn_dropout=0.1, out_proj=384, n_letters=31,
+                        n_bigrams=294, n_trigrams=1500, n_words=3000, action_space=4, dec_out_attn_proj_inner=2048,
+                        proj_n_blocks=4, proj_dropout=0.25):
+    enc_embedder = css.EncoderEmbedder(enc_input_dim, emb_dim, hid_dim, enc_max_seq_len, enc_dropout, self.device, reduce_dim=reduce_dim)
+    self.encoder = css.Encoder(emb_dim, hid_dim, enc_layers, enc_kernel_size, enc_dropout,
+                               self.device, embedder=enc_embedder).to(self.device)
+
+    self.dec_embedder = css.DecoderEmbedder(dec_input_dim, emb_dim, dec_max_seq_len, dec_dropout, self.device).to(self.device)
+    self.self_attn_dec_in = TransformerEncoder(dec_n_blocks, d_model, d_keys, d_values, n_heads, d_ff,
+                                               dropout=dec_dropout, act_fn='relu', block_type='standard').to(self.device)
+    self.enc_in_dec_in_attention = MultiHeadAttention(d_model, d_keys, d_values, n_heads, dropout=attn_dropout).to(self.device)
+    self.dec_out_attn_proj = torch.nn.Sequential(torch.nn.Linear(emb_dim + d_model, out_proj), torch.nn.ReLU(inplace=True)).to(self.device)
+
+    self.proj_self_attn = TransformerEncoder(proj_n_blocks, out_proj, d_keys, d_values, out_proj//d_keys, d_ff,
+                                             dropout=proj_dropout, act_fn='relu', block_type='standard').to(self.device)
+
+    self.predictors = torch.nn.ModuleList([torch.nn.Linear(out_proj, n_letters),  # letters
+                                           torch.nn.Linear(out_proj, n_bigrams),  # bigrams
+                                           torch.nn.Linear(out_proj, n_trigrams),  # trigrams
+                                           torch.nn.Linear(out_proj, n_words)]).to(self.device)  # words
+    # action_space = 4, choose between predicting letter, bigram, trigram or word
+    self.action_layer = torch.nn.Linear(out_proj, action_space).to(self.device)
+
+    self.parameters = chain(*([self.encoder.parameters()] + [self.dec_embedder.parameters()] + [self.self_attn_dec_in.parameters()]
+                               + [self.enc_in_dec_in_attention.parameters()] + [self.dec_out_attn_proj.parameters()]
+                               + [self.predictors.parameters()] + [self.action_layer.parameters()]))
+  
+  def save_model(self):
+    u.save_checkpoint(self.encoder, None, self.save_model_path + 'encoder.pt')
+    u.save_checkpoint(self.dec_embedder, None, self.save_model_path + 'dec_embedder.pt')
+    u.save_checkpoint(self.self_attn_dec_in, None, self.save_model_path + 'self_attn_dec_in.pt')
+    u.save_checkpoint(self.enc_in_dec_in_attention, None, self.save_model_path + 'enc_in_dec_in_attention.pt')
+    u.save_checkpoint(self.dec_out_attn_proj, None, self.save_model_path + 'dec_out_attn_proj.pt')
+    u.save_checkpoint(self.predictors, None, self.save_model_path + 'predictors.pt')
+    u.save_checkpoint(self.action_layer, None, self.save_model_path + 'action_layer.pt')
+    u.save_checkpoint(self.proj_self_attn, None, self.save_model_path + 'proj_self_attn.pt')
+  
+  def load_model(self):
+    u.load_model(self.encoder, self.save_model_path + 'encoder.pt', restore_only_similars=True)
+    u.load_model(self.dec_embedder, self.save_model_path + 'dec_embedder.pt', restore_only_similars=True)
+    u.load_model(self.self_attn_dec_in, self.save_model_path + 'self_attn_dec_in.pt', restore_only_similars=True)
+    u.load_model(self.enc_in_dec_in_attention, self.save_model_path + 'enc_in_dec_in_attention.pt', restore_only_similars=True)
+    u.load_model(self.dec_out_attn_proj, self.save_model_path + 'dec_out_attn_proj.pt', restore_only_similars=True)
+    u.load_model(self.predictors, self.save_model_path + 'predictors.pt', restore_only_similars=True)
+    u.load_model(self.action_layer, self.save_model_path + 'action_layer.pt', restore_only_similars=True)
+    u.load_model(self.proj_self_attn, self.save_model_path + 'proj_self_attn.pt', restore_only_similars=True)
+  
+  def _train_mode(self):
+    self.encoder.train()
+    self.dec_embedder.train()
+    self.self_attn_dec_in.train()
+    self.enc_in_dec_in_attention.train()
+    self.dec_out_attn_proj.train()
+    self.predictors.train()
+    self.action_layer.train()
+    self.proj_self_attn.train()
+  
+  def _eval_mode(self):
+    self.encoder.eval()
+    self.dec_embedder.eval()
+    self.self_attn_dec_in.eval()
+    self.enc_in_dec_in_attention.eval()
+    self.dec_out_attn_proj.eval()
+    self.predictors.eval()
+    self.action_layer.eval()
+    self.proj_self_attn.eval()
+  
+  def train(self):
+    print('Start Training...')
+    eval_accuracy_memory = 0
+    for epoch in tqdm(range(self.n_epochs)):
+      compute_scores = False if epoch % self.eval_step == 0 else True
+
+      # epoch_action_loss, epoch_ce_loss, accuracies
+      eal, ecl, accs = self.multigrams_pass(self.train_data_loader, only_loss=compute_scores)
+      logging.info(f"Epoch {epoch} | train_loss = {eal:.3f}-{ecl:.3f} | {' | '.join([f'{k} = {v:.3f}' for k, v in accs.items()])}")
+
+      self._eval_mode()
+      with torch.no_grad():
+        # eval_action_loss, eval_ce_loss, accuracies
+        eal, ecl, accs = self.multigrams_pass(self.test_data_loader, only_loss=compute_scores, training=False, dump_sample=True)
+        logging.info(f"Epoch {epoch} | test_loss = {eal:.3f}-{ecl:.3f} | {' | '.join([f'{k} = {v:.3f}' for k, v in accs.items()])}")
+      self._train_mode()
+
+      oea = accs.get('word_accuracy', None)
+
+      if oea is not None and oea > eval_accuracy_memory:
+        logging.info(f'Save model with eval_accuracy = {oea:.3f}')
+        self.save_model()
+        eval_accuracy_memory = oea
+  
+  def get_action(self, state, enc_out_conved, enc_out_combined):
+    # state = [batch_size, current_seq_len], enc_out_conved = [batch_size, enc_seq_len, emb_dim]
+    dec_in = self.dec_embedder(state)  # [batch_size, current_seq_len, emb_dim]
+    dec_out = self.self_attn_dec_in(dec_in)  # [batch_size, current_seq_len, emb_dim]
+    attention = self.enc_in_dec_in_attention(dec_out, enc_out_conved, enc_out_combined)  # [batch_size, current_seq_len, d_model=emb_dim]
+
+    dec_out = self.dec_out_attn_proj(torch.cat((dec_out, attention), axis=-1))  # [batch_size, current_seq_len, out_proj]
+    dec_out = self.proj_self_attn(dec_out)  # [batch_size, current_seq_len, out_proj]
+    dec_out = dec_out[:, -1]  # [batch_size, out_proj]
+
+    action_probs = self.action_layer(dec_out).softmax(-1)  # [batch_size, action_space]
+    return action_probs, dec_out
+  
+  def step(self, actions, dec_out, target_texts, text_states, ends):
+    current_lens = list(map(len, text_states))
+    rewards = torch.Tensor([0]).repeat(self.batch_size)
+    next_states = torch.zeros(self.batch_size).long()
+    cross_entropy_losses = 0
+
+    for i in range(self.batch_size):
+      if ends[i]:
+        continue
+
+      output = self.predictors[actions[i]](dec_out[i:i+1])  # [1, predictor_out_size]
+      output_idx = output.argmax() + self.predictors_idx[actions[i]]
+
+      pred_token = self.data.idx_to_tokens[output_idx]
+      target_token = target_texts[i][current_lens[i]:current_lens[i] + len(pred_token)]
+      
+      rewards[i] = float(sum(np.array(list(pred_token)) == np.array(list(target_token)))) if len(pred_token) == len(target_token) else -1
+
+      next_states[i] = output_idx
+      text_states[i] += pred_token
+
+      if pred_token == self.eos_tok or len(text_states[i]) >= len(target_texts[i]):
+        ends[i] = True
+        rewards[i] += 10 if text_states[i] == target_texts[i] else -1
+      
+      ## Compute CrossEntropy loss if possible
+      if actions[i] == 0:
+        good_rep = self.data.tokens_to_idx[target_texts[i][current_lens[i]]] if target_texts[i][current_lens[i]] in self.letters else None
+      elif actions[i] == 1:
+        if target_texts[i][current_lens[i]:current_lens[i]+2] in self.bigrams:
+          good_rep = self.data.tokens_to_idx[target_texts[i][current_lens[i]:current_lens[i]+2]]
+        else:
+          good_rep = None
+      elif actions[i] == 2:
+        if target_texts[i][current_lens[i]:current_lens[i]+3] in self.trigrams:
+          good_rep = self.data.tokens_to_idx[target_texts[i][current_lens[i]:current_lens[i]+3]]
+        else:
+          good_rep = None
       else:
-        loss += self.criterion(preds[i][:,-3000:], di-31-294-1500, epsilon=self.smoothing_eps)
-    return loss / sum(preds.shape[:2])
+        if ' ' in target_texts[i][current_lens[i]:]:
+          next_word = target_texts[i][current_lens[i]:target_texts[i][current_lens[i]:].index(' ')]
+        elif self.eos_tok in target_texts[i][current_lens[i]:]:
+          next_word = target_texts[i][current_lens[i]:target_texts[i][current_lens[i]:].index(self.eos_tok)]
+        else:
+          next_word = None
+        good_rep = self.data.tokens_to_idx[next_word] if next_word in self.words else None
+      
+      if good_rep is not None:
+        good_rep -= self.predictors_idx[actions[i]]
+        cross_entropy_losses += self.criterion(output, torch.LongTensor([good_rep]).to(self.device), epsilon=self.smoothing_eps)
+    
+    return next_states, rewards, text_states, ends, cross_entropy_losses
+  
+  def multigrams_pass(self, data_loader, only_loss=True, training=True, dump_sample=False):
+    action_losses, ce_losses, accs = 0, 0, {}
+    for enc_in, target_texts in tqdm(data_loader):  # enc_in = [batch_size, enc_seq_len, enc_input_dim]
+      enc_out_conved, enc_out_combined = self.encoder(enc_in.to(self.device))  # [batch_size, enc_seq_len, emb_dim]
+
+      states = torch.LongTensor([self.data.tokens_to_idx['<sos>']]).repeat(self.batch_size, self.max_source_len).to(self.device)
+      text_states = ['<sos>'] * self.batch_size
+      ends = torch.zeros(self.batch_size).bool()
+      rewards = torch.zeros(self.batch_size, self.max_source_len).to(self.device)
+
+      for i in range(self.max_source_len - 1):
+        current_state = states[:, :i+1].clone()
+        action_probs, dec_out = self.get_action(current_state, enc_out_conved, enc_out_combined)
+        action = torch.multinomial(action_probs, 1)  # [batch_size, 1]
+
+        state, reward, text_states, ends, cross_entropy_losses = self.step(action, dec_out, target_texts, text_states, ends)
+
+        rewards[:, i] = reward
+        states[:, i+1] = state
+
+        current_rewards = rewards.sum(-1)
+        action_loss = -(current_rewards * torch.log(action_probs[torch.arange(self.batch_size), action.reshape(-1)])).mean()
+
+        if training:
+          self.optimizer.zero_grad()
+          if not isinstance(cross_entropy_losses, int):
+            cross_entropy_losses.backward(retain_graph=True)
+
+          action_loss.backward(retain_graph=True)
+          self.optimizer.step()
+
+        action_losses += action_loss.item()
+        ce_losses += cross_entropy_losses if isinstance(cross_entropy_losses, int) else cross_entropy_losses.item()
+
+        if ends.sum() == self.batch_size:
+          break
+    
+    if only_loss:
+      accs = Data.compute_scores(targets=target_texts, predictions=text_states, rec=False)
+    
+    if dump_sample:
+      to_dump = ['\n'] + [f'Target: {t}\nPrediction: {p}\n' for t, p in zip(target_texts[:10], text_states[:10])]
+      logging.info('\n'.join(to_dump))
+    
+    return action_losses, ce_losses, accs
 
 
 if __name__ == "__main__":
@@ -182,5 +497,9 @@ if __name__ == "__main__":
   random.seed(SEED)
 
   # analyze()
-  nt = NgramsTrainer()
-  nt.train()
+
+  # nt = NgramsTrainer()
+  # nt.train()
+
+  mg = MultigramsGame()
+  mg.train()

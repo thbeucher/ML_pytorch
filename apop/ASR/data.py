@@ -644,7 +644,7 @@ class Data(object):
     return {'mean_preds_acc': np.mean(acc_per_preds), 'preds_acc': n_correct_all / n_total_all}
   
   @staticmethod
-  def compute_scores(targets=[], predictions=[], eos_idx=1, idx_to_tokens={}, joiner='', strategy='other', **kwargs):
+  def compute_scores(targets=[], predictions=[], eos_idx=1, idx_to_tokens={}, joiner='', strategy='other', rec=True, **kwargs):
     '''
     Params:
       * targets : list of string
@@ -653,6 +653,7 @@ class Data(object):
       * idx_to_tokens : dict
       * joiner (optional) : str
       * strategy (optional) : str
+      * rec (optional) : bool
 
     Returns:
       * character_accuracy : float
@@ -660,15 +661,16 @@ class Data(object):
       * sentence_accuracy : float
       * mwer : float, mean word error rate
     '''
-    targets_sentences = Data.reconstruct_sources(targets, idx_to_tokens, eos_idx, joiner=joiner)
-    predictions_sentences = Data.reconstruct_sources(predictions, idx_to_tokens, eos_idx, joiner=joiner)
+    if rec:
+      targets = Data.reconstruct_sources(targets, idx_to_tokens, eos_idx, joiner=joiner)
+      predictions = Data.reconstruct_sources(predictions, idx_to_tokens, eos_idx, joiner=joiner)
 
     count_correct_sentences = 0
     count_correct_words, count_words = 0, 0
     count_correct_characters, count_characters = 0, 0
     wers = []
 
-    for target, pred in zip(targets_sentences, predictions_sentences):
+    for target, pred in zip(targets, predictions):
       count_characters += len(target)
       count_correct_characters += sum([1 for t, p in zip(target, pred) if t == p])
 
@@ -694,7 +696,7 @@ class Data(object):
     
     character_accuracy = count_correct_characters / count_characters
     word_accuracy = count_correct_words / count_words
-    sentence_accuracy = count_correct_sentences / len(targets_sentences)
+    sentence_accuracy = count_correct_sentences / len(targets)
 
     wer = np.mean(wers)
 

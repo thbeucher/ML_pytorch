@@ -167,6 +167,8 @@ class ReadExperiment(object):
 
     self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
     self.criterion = u.CrossEntropyLoss(self.pad_idx)
+
+    u.load_model(self.model, save_name_model, restore_only_similars=True)
   
   def get_data_loader(self, ids_to_transcript, ids_to_sources, pad_idx=2):
     custom_dataset = CustomDataset(ids_to_transcript, ids_to_sources)

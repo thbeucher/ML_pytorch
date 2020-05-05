@@ -245,6 +245,7 @@ class AudioEmbedder(torch.nn.Module):
     return out + pos_emb
 
 
+## STATUS = stopped, best train_acc=0.978,test_acc=0.301 epoch 260, after test_acc decrease
 class Experiment21(ConvnetTrainer):
   '''Convnet, letters prediction, adam, Attention-CrossEntropy, MultiHead, no-slicing, AudioEmbedder'''
   def __init__(self, logfile='_logs/_logs_experiment21.txt', save_name_model='convnet/convnet_experiment21.pt', batch_size=8,

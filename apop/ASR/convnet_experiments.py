@@ -130,6 +130,7 @@ class Experiment17(ConvnetTrainer):
                      batch_size=batch_size, multi_head=multi_head)
 
 
+## STATUS = stopped, best train_acc=0.74,test_acc=0.472 epoch 460, then it diverges
 class Experiment22(ConvnetTrainer):
   '''Convnet phonemes prediction, adam, Attention-CrossEntropy loss, mfcc, n_fft=2048, hop_length=512, MultiHead'''
   def __init__(self, logfile='_logs/_logs_experiment22.txt', save_name_model='convnet/convnet_experiment22.pt', batch_size=8,
