@@ -635,7 +635,7 @@ class Data(object):
                       pin_memory=pin_memory)
 
   @staticmethod
-  def reconstruct_sources(sources_encoded, idx_to_tokens, eos_idx, joiner=''):
+  def reconstruct_sources(sources_encoded, idx_to_tokens, eos_idx, joiner='', start=0):
     '''
     Params:
       * sources_encoded : list of list of int
@@ -644,7 +644,7 @@ class Data(object):
     Returns:
       * sources : list of str
     '''
-    return [joiner.join([idx_to_tokens[idx] for idx in s[1:s.index(eos_idx) if eos_idx in s else -1]]) for s in sources_encoded]
+    return [joiner.join([idx_to_tokens[idx] for idx in s[start:s.index(eos_idx) if eos_idx in s else -1]]) for s in sources_encoded]
   
   @staticmethod
   def compute_accuracy(targets=[], predictions=[], eos_idx=1, **kwargs):

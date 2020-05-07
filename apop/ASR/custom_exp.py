@@ -178,6 +178,7 @@ class CustomExperiment1(ConvnetTrainer):
     super().__init__(logfile=logfile, save_name_model=save_name_model, metadata_file=metadata_file, encoding_fn=encoding_fn,
                      slice_fn=slice_fn, scorer=scorer, batch_size=batch_size, convnet_config=convnet_config, lr=lr)
     self.criterion = u.CrossEntropyLoss(self.pad_idx)
+    u.load_model(self.model, save_name_model, restore_only_similars=True)
   
   def instanciate_model(self, **kwargs):
     return Recognizer(input_size=kwargs['enc_input_dim'], output_size=kwargs['output_size'],
@@ -224,7 +225,6 @@ class CustomExperiment1(ConvnetTrainer):
                             'idx_to_tokens': self.data.idx_to_tokens})
 
     return losses / len(self.test_data_loader), accs
-  
   
   def train_pass(self, only_loss=True):
     losses, accs = 0, {}
