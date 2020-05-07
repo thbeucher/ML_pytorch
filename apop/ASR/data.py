@@ -6,6 +6,7 @@ import random
 import librosa
 import numpy as np
 import pickle as pk
+import soundfile as sf
 
 from tqdm import tqdm
 from g2p_en import G2p
@@ -51,7 +52,7 @@ class CustomDataset(Dataset):
     if self.signal_type == 'std-threshold-selected':
       signal = Data.get_std_threshold_selected_signal(signal)
 
-    encoder_input = torch.tensor(signal) if isinstance(signal, np.ndarray) else signal
+    encoder_input = torch.Tensor(signal) if isinstance(signal, np.ndarray) else signal
     decoder_input = torch.LongTensor(self.ids_to_encodedsources[identity])
     return encoder_input, decoder_input
 
@@ -160,7 +161,7 @@ class Data(object):
     Returns:
       signal, sample_rate : np.ndarray, int
     '''
-    return librosa.load(filename, sr=sample_rate)
+    return sf.read(filename, samplerate=sample_rate)
   
   @staticmethod
   def window_slicing_signal(signal, sample_rate=16000, window_size=0.025):
@@ -261,7 +262,7 @@ class Data(object):
   @staticmethod
   def wav2vec_extraction(signal, wav2vec_model=None):
     assert wav2vec_model is not None, 'wav2vec_model need to be given'
-    z = wav2vec_model.feature_extractor(torch.tensor(signal).reshape(1, -1))
+    z = wav2vec_model.feature_extractor(torch.Tensor(signal).reshape(1, -1))
     c = wav2vec_model.feature_aggregator(z)
     return c.squeeze(0).T
 
