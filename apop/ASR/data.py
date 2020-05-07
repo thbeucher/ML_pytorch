@@ -161,7 +161,10 @@ class Data(object):
     Returns:
       signal, sample_rate : np.ndarray, int
     '''
-    return sf.read(filename, samplerate=sample_rate)
+    if sample_rate == 16000:
+      return sf.read(filename)
+    else:
+      return librosa.load(filename, sr=sample_rate)
   
   @staticmethod
   def window_slicing_signal(signal, sample_rate=16000, window_size=0.025):
