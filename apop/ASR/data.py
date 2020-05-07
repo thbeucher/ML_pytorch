@@ -167,7 +167,7 @@ class Data(object):
       return librosa.load(filename, sr=sample_rate)
   
   @staticmethod
-  def window_slicing_signal(signal, sample_rate=16000, window_size=0.025):
+  def window_slicing_signal(signal, sample_rate=16000, window_size=0.025, **kwargs):
     '''
     Slices signal into n chunks
 
@@ -185,7 +185,7 @@ class Data(object):
     return np.array(features)
   
   @staticmethod
-  def overlapping_window_slicing_signal(signal, sample_rate=16000, window_size=0.128, overlap_size=0.032):
+  def overlapping_window_slicing_signal(signal, sample_rate=16000, window_size=0.128, overlap_size=0.032, **kwargs):
     window = int(window_size * sample_rate)
     overlap = int(overlap_size * sample_rate)
     windowed_signal = [signal[i:i+window] for i in range(0, len(signal), window - overlap)]
@@ -193,7 +193,7 @@ class Data(object):
     return np.array(windowed_signal)
   
   @staticmethod
-  def filterbank_extraction(signal, sample_rate=16000, n_mels=80, n_fft=None, hop_length=None, window_size=0.025):
+  def filterbank_extraction(signal, sample_rate=16000, n_mels=80, n_fft=None, hop_length=None, window_size=0.025, **kwargs):
     '''
     Extracts filter-bank features from signal
 
@@ -214,7 +214,7 @@ class Data(object):
     return np.log(features + 1e-6).T
   
   @staticmethod
-  def log_spectrogram_extraction(signal, sample_rate=16000, nperseg=400, noverlap=240, nfft=512, padded=False, boundary=None):
+  def log_spectrogram_extraction(signal, sample_rate=16000, nperseg=400, noverlap=240, nfft=512, padded=False, boundary=None, **kwargs):
     '''
     Extracts log-spectrogram features from signal
 
@@ -234,7 +234,7 @@ class Data(object):
     return np.log(np.abs(spec)+1e-10).T
   
   @staticmethod
-  def mfcc_extraction(signal, sample_rate=16000, n_mfcc=80, hop_length=None, n_fft=None, window_size=0.025, dct_type=2):
+  def mfcc_extraction(signal, sample_rate=16000, n_mfcc=80, hop_length=None, n_fft=None, window_size=0.025, dct_type=2, **kwargs):
     '''
     Extracts mfccs features from signal
 
@@ -263,12 +263,22 @@ class Data(object):
     return librosa.feature.mfcc(y=signal, sr=sample_rate, dct_type=dct_type, n_mfcc=n_mfcc, hop_length=hop_length, n_fft=n_fft).T
   
   @staticmethod
-  def wav2vec_extraction(signal, wav2vec_model=None):
+  def wav2vec_extraction(signal, wav2vec_model=None, filename='', save_features=False, **kwargs):
+    if save_features and os.path.isfile(filename.replace('.flac', '.features.npy')):
+      c = np.load(filename.replace('.flac', '.features.npy'))
+      return c
+
     assert wav2vec_model is not None, 'wav2vec_model need to be given'
+
     with torch.no_grad():
       z = wav2vec_model.feature_extractor(torch.Tensor(signal).reshape(1, -1))
       c = wav2vec_model.feature_aggregator(z)
-    return c.squeeze(0).T
+      c = c.squeeze(0).T
+    
+    if save_features:
+      np.save(filename.replace('.flac', '.features.npy'), c.numpy())
+
+    return c
 
   @staticmethod
   def read_and_slice_signal(filename, slice_fn=None, **kwargs):
@@ -287,7 +297,7 @@ class Data(object):
     slice_fn = Data.window_slicing_signal if slice_fn is None else slice_fn
 
     signal, sample_rate = Data.read_audio_file(filename)
-    return slice_fn(signal, **kwargs)
+    return slice_fn(signal, filename=filename, **kwargs)
   
   @staticmethod
   def get_std_threshold_selected_signal(signal, threshold=0.01):

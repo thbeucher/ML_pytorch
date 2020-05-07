@@ -155,7 +155,7 @@ def analyze():
 
 
 class NgramsTrainer(ConvnetTrainer):
-  def __init__(self, logfile='_ngrams_experiment_logs.txt', save_name_model='convnet/ngrams_convnet_experiment.pt',
+  def __init__(self, logfile='_logs/_logs_multigrams1.txt', save_name_model='convnet/ngrams_convnet_experiment.pt',
                metadata_file='_Data_metadata_multigrams_mfcc0128.pk', encoding_fn=multigrams_encoding, multi_head=True,
                slice_fn=Data.mfcc_extraction, n_fft=2048, hop_length=512, scorer=Data.compute_scores, batch_size=32):
     convnet_config = {'emb_dim': 384, 'hid_dim': 512}
@@ -167,7 +167,7 @@ class NgramsTrainer(ConvnetTrainer):
 class NgramsTrainer2(ConvnetTrainer):
   def __init__(self, logfile='_logs/_logs_ngramsEXP2.txt', save_name_model='convnet/ngrams_convnet_experiment2.pt',
                metadata_file='_Data_metadata_multigrams_wav2vec.pk', encoding_fn=multigrams_encoding, multi_head=True,
-               slice_fn=Data.wav2vec_extraction, scorer=Data.compute_scores, batch_size=32):
+               slice_fn=Data.wav2vec_extraction, scorer=Data.compute_scores, batch_size=8):
     convnet_config = {'emb_dim': 384, 'hid_dim': 512}
     cp = torch.load('wav2vec_large.pt')
     wav2vec_model = Wav2VecModel.build_model(cp['args'], task=None)
@@ -175,7 +175,7 @@ class NgramsTrainer2(ConvnetTrainer):
     wav2vec_model.eval()
     super().__init__(logfile=logfile, save_name_model=save_name_model, metadata_file=metadata_file, encoding_fn=encoding_fn,
                      multi_head=multi_head, slice_fn=slice_fn, scorer=scorer, batch_size=batch_size, convnet_config=convnet_config,
-                     wav2vec_model=wav2vec_model)
+                     wav2vec_model=wav2vec_model, save_features=True)
 
 
 class CustomDataset(Dataset):
