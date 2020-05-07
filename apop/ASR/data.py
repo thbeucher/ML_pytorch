@@ -36,10 +36,20 @@ class CustomDataset(Dataset):
     self.process_file_fn = process_file_fn = Data.read_and_slice_signal if process_file_fn is None else process_file_fn
     self.process_file_fn_args = kwargs
 
+    self.mess_with_targets = kwargs.get('mess_with_targets', False)
+    self.vocab_size = kwargs.get('vocab_size', max([i for s in ids_to_encodedsources.values() for i in s]))
+    self.mess_prob = kwargs.get('mess_prob', 0.15)
+
     self.identities = list(sorted(ids_to_audiofile.keys()))
 
     if len(readers) > 0:
       self.identities = [i for i in self.identities if i.split('-')[0] in readers]
+  
+  def _mess_with_targets(self, target):
+    mask = np.random.choice([True, False], size=len(target), p=[self.mess_prob, 1-self.mess_prob])
+    new_idxs = np.random.choice(list(range(self.vocab_size)), size=len(target))
+    target[mask] = new_idxs[mask]
+    return target
 
   def __len__(self):
     return len(self.identities)
@@ -53,7 +63,12 @@ class CustomDataset(Dataset):
       signal = Data.get_std_threshold_selected_signal(signal)
 
     encoder_input = torch.Tensor(signal) if isinstance(signal, np.ndarray) else signal
-    decoder_input = torch.LongTensor(self.ids_to_encodedsources[identity])
+
+    decoder_input = self.ids_to_encodedsources[identity]
+    if self.mess_with_targets:
+      decoder_input = self._mess_with_targets(np.array(decoder_input))
+    decoder_input = torch.LongTensor(decoder_input)
+
     return encoder_input, decoder_input
 
 

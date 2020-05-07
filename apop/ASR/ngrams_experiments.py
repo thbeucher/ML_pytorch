@@ -154,7 +154,7 @@ def analyze():
   print(f'min = {min(lens)} | max = {max(lens)} | mean = {np.mean(lens)}')
 
 
-class NgramsTrainer(ConvnetTrainer):
+class NgramsTrainer1(ConvnetTrainer):
   def __init__(self, logfile='_logs/_logs_multigrams1.txt', save_name_model='convnet/ngrams_convnet_experiment.pt',
                metadata_file='_Data_metadata_multigrams_mfcc0128.pk', encoding_fn=multigrams_encoding, multi_head=True,
                slice_fn=Data.mfcc_extraction, n_fft=2048, hop_length=512, scorer=Data.compute_scores, batch_size=32):
@@ -176,6 +176,17 @@ class NgramsTrainer2(ConvnetTrainer):
     super().__init__(logfile=logfile, save_name_model=save_name_model, metadata_file=metadata_file, encoding_fn=encoding_fn,
                      multi_head=multi_head, slice_fn=slice_fn, scorer=scorer, batch_size=batch_size, convnet_config=convnet_config,
                      wav2vec_model=wav2vec_model, save_features=True)
+
+
+class NgramsTrainer3(ConvnetTrainer):
+  def __init__(self, logfile='_logs/_logs_multigrams3.txt', save_name_model='convnet/ngrams_convnet_experiment3.pt',
+               metadata_file='_Data_metadata_multigrams_mfcc0128.pk', encoding_fn=multigrams_encoding, multi_head=True,
+               slice_fn=Data.mfcc_extraction, n_fft=2048, hop_length=512, scorer=Data.compute_scores, batch_size=32):
+    convnet_config = {'emb_dim': 384, 'hid_dim': 512}
+    super().__init__(logfile=logfile, save_name_model=save_name_model, metadata_file=metadata_file, encoding_fn=encoding_fn,
+                     multi_head=multi_head, slice_fn=slice_fn, n_fft=n_fft, hop_length=hop_length, scorer=scorer,
+                     batch_size=batch_size, convnet_config=convnet_config, mess_with_targets=True)
+    u.load_model(self.model, 'convnet/ngrams_convnet_experiment.pt', restore_only_similars=True)
 
 
 class CustomDataset(Dataset):
@@ -522,6 +533,12 @@ if __name__ == "__main__":
   np.random.seed(SEED)
   random.seed(SEED)
 
+  experiments = {k.replace('NgramsTrainer', ''): v for k, v in locals().items() if re.search(r'NgramsTrainer\d+', k) is not None}
+  
+  rep = input(f'Which Experiment do you want to start? ({",".join(experiments.keys())}): ')
+  exp = experiments[rep]()
+  exp.train()
+
   # analyze()
 
   # nt = NgramsTrainer()
@@ -530,5 +547,5 @@ if __name__ == "__main__":
   # mg = MultigramsGame()
   # mg.train()
 
-  nt = NgramsTrainer2()
-  nt.train()
+  # nt = NgramsTrainer2()
+  # nt.train()
