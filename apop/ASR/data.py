@@ -262,8 +262,9 @@ class Data(object):
   @staticmethod
   def wav2vec_extraction(signal, wav2vec_model=None):
     assert wav2vec_model is not None, 'wav2vec_model need to be given'
-    z = wav2vec_model.feature_extractor(torch.Tensor(signal).reshape(1, -1))
-    c = wav2vec_model.feature_aggregator(z)
+    with torch.no_grad():
+      z = wav2vec_model.feature_extractor(torch.Tensor(signal).reshape(1, -1))
+      c = wav2vec_model.feature_aggregator(z)
     return c.squeeze(0).T
 
   @staticmethod
