@@ -51,7 +51,7 @@ class CustomDataset(Dataset):
     if self.signal_type == 'std-threshold-selected':
       signal = Data.get_std_threshold_selected_signal(signal)
 
-    encoder_input = torch.tensor(signal)
+    encoder_input = torch.tensor(signal) if isinstance(signal, np.ndarray) else signal
     decoder_input = torch.LongTensor(self.ids_to_encodedsources[identity])
     return encoder_input, decoder_input
 
@@ -258,6 +258,13 @@ class Data(object):
 
     return librosa.feature.mfcc(y=signal, sr=sample_rate, dct_type=dct_type, n_mfcc=n_mfcc, hop_length=hop_length, n_fft=n_fft).T
   
+  @staticmethod
+  def wav2vec_extraction(signal, wav2vec_model=None):
+    assert wav2vec_model is not None, 'wav2vec_model need to be given'
+    z = wav2vec_model.feature_extractor(torch.tensor(signal).reshape(1, -1))
+    c = wav2vec_model.feature_aggregator(z)
+    return c.squeeze(0).T
+
   @staticmethod
   def read_and_slice_signal(filename, slice_fn=None, **kwargs):
     '''

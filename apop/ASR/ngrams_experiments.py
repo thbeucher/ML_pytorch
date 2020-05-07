@@ -27,6 +27,7 @@ from tqdm import tqdm
 from itertools import chain
 from collections import Counter
 from torch.nn.utils.rnn import pad_sequence
+from fairseq.models.wav2vec import Wav2VecModel
 from torch.utils.data import Dataset, DataLoader
 
 sys.path.append(os.path.abspath(__file__).replace('ASR/ngrams_experiments.py', ''))
@@ -163,6 +164,20 @@ class NgramsTrainer(ConvnetTrainer):
                      batch_size=batch_size, convnet_config=convnet_config)
 
 
+class NgramsTrainer2(ConvnetTrainer):
+  def __init__(self, logfile='_logs/_logs_ngramsEXP2.txt', save_name_model='convnet/ngrams_convnet_experiment2.pt',
+               metadata_file='_Data_metadata_multigrams_wav2vec.pk', encoding_fn=multigrams_encoding, multi_head=True,
+               slice_fn=Data.wav2vec_extraction, scorer=Data.compute_scores, batch_size=32):
+    convnet_config = {'emb_dim': 384, 'hid_dim': 512}
+    cp = torch.load('wav2vec_large.pt')
+    wav2vec_model = Wav2VecModel.build_model(cp['args'], task=None)
+    wav2vec_model.load_state_dict(cp['model'])
+    wav2vec_model.eval()
+    super().__init__(logfile=logfile, save_name_model=save_name_model, metadata_file=metadata_file, encoding_fn=encoding_fn,
+                     multi_head=multi_head, slice_fn=slice_fn, scorer=scorer, batch_size=batch_size, convnet_config=convnet_config,
+                     wav2vec_model=wav2vec_model)
+
+
 class CustomDataset(Dataset):
   def __init__(self, ids_to_audiofile, ids_to_transcript, sos_tok='<sos>', eos_tok='<eos>', process_file_fn=None, **kwargs):
     self.ids_to_audiofile = ids_to_audiofile
@@ -206,8 +221,8 @@ class MultigramsGame(object):
   def __init__(self, device=None, logfile='_multigramsGame_logs.txt', metadata_file='_Data_metadata_multigrams_mfcc0128.pk',
                train_folder='../../../datasets/openslr/LibriSpeech/train-clean-100/', process_file_fn=Data.read_and_slice_signal,
                test_folder='../../../datasets/openslr/LibriSpeech/test-clean/', encoding_fn=multigrams_encoding, batch_size=32,
-               create_enc_mask=False, list_files_fn=Data.get_openslr_files, n_epochs=500, lr=1e-4, smoothing_eps=0.1, eval_step=10,
-               save_model_path='ngrams_experiments/'):
+               create_enc_mask=False, list_files_fn=Data.get_openslr_files, n_epochs=500, lr=1e-4, smoothing_eps=0., eval_step=1,
+               save_model_path='ngrams_experiments/', subset=True, subset_percent=0.05):
     logging.basicConfig(filename=logfile, filemode='a', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') if device is None else device
 
@@ -231,9 +246,10 @@ class MultigramsGame(object):
     self.eos_idx = self.data.tokens_to_idx['<eos>']
     self.pad_idx = self.data.tokens_to_idx['<pad>']
 
-    self.max_source_len = max(max(map(len, self.data.ids_to_transcript_train)), max(map(len, self.data.ids_to_transcript_test))) + 2
+    self.max_source_len = max(max(map(len, self.data.ids_to_transcript_train.values())),
+                              max(map(len, self.data.ids_to_transcript_test.values()))) + 10
 
-    self.set_data_loader()
+    self.set_data_loader(subset=subset, subset_percent=subset_percent)
 
     n_letters, n_bigrams, n_trigrams, n_words = 31, 294, 1500, 3000
     self.predictors_idx = [0, n_letters, n_letters + n_bigrams, n_letters + n_bigrams + n_trigrams]
@@ -258,6 +274,11 @@ class MultigramsGame(object):
 
     self.optimizer = optim.Adam(self.parameters, lr=lr)
     self.criterion = u.CrossEntropyLoss(self.pad_idx)
+
+    if not os.path.isdir(save_model_path):
+      os.makedirs(save_model_path)
+
+    self.load_model()
   
   def set_data(self):
     self.data = Data()
@@ -270,13 +291,17 @@ class MultigramsGame(object):
     else:
       self.data.load_metadata(save_name=self.metadata_file)
   
-  def set_data_loader(self, num_workers=4, shuffle=True):
+  def set_data_loader(self, num_workers=4, shuffle=True, subset=False, subset_percent=0.2):
     custom_collator = CustomCollator(0)
 
     train_custom_dataset = CustomDataset(self.data.ids_to_audiofile_train, self.data.ids_to_transcript_train,
                                          process_file_fn=self.process_file_fn, **self.process_file_fn_args)
     test_custom_dataset = CustomDataset(self.data.ids_to_audiofile_test, self.data.ids_to_transcript_test,
                                          process_file_fn=self.process_file_fn, **self.process_file_fn_args)
+    
+    if subset:
+      train_custom_dataset = Data.extract_subset(train_custom_dataset, percent=subset_percent)
+      test_custom_dataset = Data.extract_subset(test_custom_dataset, percent=subset_percent)
     
     self.train_data_loader = DataLoader(train_custom_dataset, batch_size=self.batch_size, num_workers=num_workers, shuffle=shuffle,
                                         collate_fn=custom_collator)
@@ -365,7 +390,7 @@ class MultigramsGame(object):
       self._eval_mode()
       with torch.no_grad():
         # eval_action_loss, eval_ce_loss, accuracies
-        eal, ecl, accs = self.multigrams_pass(self.test_data_loader, only_loss=compute_scores, training=False, dump_sample=True)
+        eal, ecl, accs = self.multigrams_pass(self.test_data_loader, only_loss=compute_scores, training=False, dump_sample=False)
         logging.info(f"Epoch {epoch} | test_loss = {eal:.3f}-{ecl:.3f} | {' | '.join([f'{k} = {v:.3f}' for k, v in accs.items()])}")
       self._train_mode()
 
@@ -391,11 +416,11 @@ class MultigramsGame(object):
   
   def step(self, actions, dec_out, target_texts, text_states, ends):
     current_lens = list(map(len, text_states))
-    rewards = torch.Tensor([0]).repeat(self.batch_size)
-    next_states = torch.zeros(self.batch_size).long()
+    rewards = torch.Tensor([0]).repeat(len(ends))
+    next_states = torch.zeros(len(ends)).long()
     cross_entropy_losses = 0
 
-    for i in range(self.batch_size):
+    for i in range(len(ends)):
       if ends[i]:
         continue
 
@@ -445,12 +470,13 @@ class MultigramsGame(object):
   def multigrams_pass(self, data_loader, only_loss=True, training=True, dump_sample=False):
     action_losses, ce_losses, accs = 0, 0, {}
     for enc_in, target_texts in tqdm(data_loader):  # enc_in = [batch_size, enc_seq_len, enc_input_dim]
+      current_batch_size = enc_in.shape[0]
       enc_out_conved, enc_out_combined = self.encoder(enc_in.to(self.device))  # [batch_size, enc_seq_len, emb_dim]
 
-      states = torch.LongTensor([self.data.tokens_to_idx['<sos>']]).repeat(self.batch_size, self.max_source_len).to(self.device)
-      text_states = ['<sos>'] * self.batch_size
-      ends = torch.zeros(self.batch_size).bool()
-      rewards = torch.zeros(self.batch_size, self.max_source_len).to(self.device)
+      states = torch.LongTensor([self.data.tokens_to_idx['<sos>']]).repeat(current_batch_size, self.max_source_len).to(self.device)
+      text_states = ['<sos>'] * current_batch_size
+      ends = torch.zeros(current_batch_size).bool().to(self.device)
+      rewards = torch.zeros(current_batch_size, self.max_source_len).to(self.device)
 
       for i in range(self.max_source_len - 1):
         current_state = states[:, :i+1].clone()
@@ -463,7 +489,7 @@ class MultigramsGame(object):
         states[:, i+1] = state
 
         current_rewards = rewards.sum(-1)
-        action_loss = -(current_rewards * torch.log(action_probs[torch.arange(self.batch_size), action.reshape(-1)])).mean()
+        action_loss = -(current_rewards * torch.log(action_probs[torch.arange(current_batch_size), action.reshape(-1)]) * ends).mean()
 
         if training:
           self.optimizer.zero_grad()
@@ -476,14 +502,14 @@ class MultigramsGame(object):
         action_losses += action_loss.item()
         ce_losses += cross_entropy_losses if isinstance(cross_entropy_losses, int) else cross_entropy_losses.item()
 
-        if ends.sum() == self.batch_size:
+        if ends.sum() == current_batch_size:
           break
     
-    if only_loss:
+    if not only_loss:
       accs = Data.compute_scores(targets=target_texts, predictions=text_states, rec=False)
     
     if dump_sample:
-      to_dump = ['\n'] + [f'Target: {t}\nPrediction: {p}\n' for t, p in zip(target_texts[:10], text_states[:10])]
+      to_dump = ['\n'] + [f'Target: {t}\nPrediction: {p}\n' for t, p in zip(target_texts[:5], text_states[:5])]
       logging.info('\n'.join(to_dump))
     
     return action_losses, ce_losses, accs
@@ -501,5 +527,8 @@ if __name__ == "__main__":
   # nt = NgramsTrainer()
   # nt.train()
 
-  mg = MultigramsGame()
-  mg.train()
+  # mg = MultigramsGame()
+  # mg.train()
+
+  nt = NgramsTrainer2()
+  nt.train()

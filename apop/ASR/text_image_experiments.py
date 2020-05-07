@@ -67,6 +67,33 @@ def analyze():
   print(f'min = {min(seq_len)} | max = {max(seq_len)} | mean = {np.mean(seq_len):.2f} | std = {np.std(seq_len):.2f}')
 
 
+def test():
+  with open('divers/_Data_metadata_letters_raw0025.pk', 'rb') as f:
+    data = pk.load(f)
+    
+  data['ids_to_transcript_train'] = {k: v + '.' for k, v in data['ids_to_transcript_train'].items()}
+  data['ids_to_transcript_test'] = {k: v + '.' for k, v in data['ids_to_transcript_test'].items()}
+  
+  train_data_loader = ReadExperiment.get_data_loader(data['ids_to_transcript_train'], data['ids_to_encodedsources_train'])
+
+  a = torch.nn.Conv1d(12, 12, 6, stride=3)
+  b = torch.nn.Conv1d(12, 12, 4, stride=2)
+
+  model = torch.nn.Sequential(torch.nn.Conv1d(12, 80, 6, stride=3), torch.nn.ReLU(inplace=True),
+                              torch.nn.Conv1d(80, 80, 4, stride=2), torch.nn.ReLU(inplace=True),
+                              torch.nn.Conv1d(80, 80, 3, stride=1), torch.nn.ReLU(inplace=True),
+                              torch.nn.Conv1d(80, 80, 3, stride=1), torch.nn.ReLU(inplace=True),
+                              torch.nn.Conv1d(80, 80, 3, stride=1), torch.nn.ReLU(inplace=True),
+                              torch.nn.Conv1d(80, 256, 3, stride=1), torch.nn.ReLU(inplace=True))
+
+  for enc_in, dec_in in train_data_loader:
+    to_conv = enc_in.permute(0, 2, 1)
+    aa = a(to_conv)
+    ab = b(aa)
+    am = model(to_conv)
+    input(f'enc_in = {to_conv.shape} | aa = {aa.shape} | ab = {ab.shape} | am = {am.shape}')
+
+
 class CustomDataset(Dataset):
   def __init__(self, ids_to_transcript, ids_to_encodedsources):
     self.ids_to_transcript = ids_to_transcript
@@ -106,20 +133,19 @@ class ConvModel(torch.nn.Module):
     self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') if device is None else device
     self.decoder = css.Decoder(output_dim, emb_dim, hid_dim, n_layers, kernel_size, dropout, pad_idx, self.device, max_seq_len=max_seq_len,
                                multi_head=multi_head, d_keys_values=d_keys_values, scaling_energy=scaling_energy)
-    # self.encoder = torch.nn.Sequential(torch.nn.Conv1d(12, 12, 5, stride=4),
-    #                                    torch.nn.ReLU(inplace=True),
-    #                                    torch.nn.Conv1d(12, emb_dim, 4, stride=2),
-    #                                    torch.nn.ReLU(inplace=True))
-    self.encoder = torch.nn.Sequential(torch.nn.Conv2d(1, emb_dim, (12, 5), stride=(1, 4)), torch.nn.ReLU(inplace=True))
+    self.encoder = torch.nn.Sequential(torch.nn.Conv1d(12, 80, 6, stride=3), torch.nn.ReLU(inplace=True),
+                                       torch.nn.Conv1d(80, 80, 4, stride=2), torch.nn.ReLU(inplace=True),
+                                       torch.nn.Conv1d(80, 80, 3, stride=1), torch.nn.ReLU(inplace=True),
+                                       torch.nn.Conv1d(80, 80, 3, stride=1), torch.nn.ReLU(inplace=True),
+                                       torch.nn.Conv1d(80, 80, 3, stride=1), torch.nn.ReLU(inplace=True),
+                                       torch.nn.Conv1d(80, emb_dim, 3, stride=1), torch.nn.ReLU(inplace=True))
   
   def forward(self, enc_in, dec_in):
-    # enc_in = self.encoder(enc_in.permute(0, 2, 1)).permute(0, 2, 1)
-    enc_in = self.encoder(enc_in.permute(0, 2, 1).unsqueeze(1)).squeeze(2).permute(0, 2, 1)
+    enc_in = self.encoder(enc_in.permute(0, 2, 1)).permute(0, 2, 1)
     return self.decoder(dec_in, enc_in, enc_in)
   
   def greedy_decoding(self, enc_in, sos_idx, eos_idx, max_seq_len=100):
-    # enc_in = self.encoder(enc_in.permute(0, 2, 1)).permute(0, 2, 1)
-    enc_in = self.encoder(enc_in.permute(0, 2, 1).unsqueeze(1)).squeeze(2).permute(0, 2, 1)
+    enc_in = self.encoder(enc_in.permute(0, 2, 1)).permute(0, 2, 1)
     encoder_conved, encoder_combined = enc_in, enc_in
 
     batch_size = enc_in.shape[0]
@@ -170,10 +196,11 @@ class ReadExperiment(object):
 
     u.load_model(self.model, save_name_model, restore_only_similars=True)
   
-  def get_data_loader(self, ids_to_transcript, ids_to_sources, pad_idx=2):
+  @staticmethod
+  def get_data_loader(ids_to_transcript, ids_to_sources, pad_idx=2, batch_size=32):
     custom_dataset = CustomDataset(ids_to_transcript, ids_to_sources)
     custom_collator = CustomCollator(1, pad_idx)
-    return DataLoader(custom_dataset, batch_size=self.batch_size, num_workers=4, collate_fn=custom_collator, shuffle=True, pin_memory=True)
+    return DataLoader(custom_dataset, batch_size=batch_size, num_workers=4, collate_fn=custom_collator, shuffle=True, pin_memory=True)
   
   def prepare_data(self):
     with open('_Data_metadata_letters_raw0025.pk', 'rb') as f:
@@ -194,8 +221,8 @@ class ReadExperiment(object):
     #   print(arr.shape)
     #   input('wait')
     
-    self.train_data_loader = self.get_data_loader(self.data['ids_to_transcript_train'], self.data['ids_to_encodedsources_train'])
-    self.test_data_loader = self.get_data_loader(self.data['ids_to_transcript_test'], self.data['ids_to_encodedsources_test'])
+    self.train_data_loader = ReadExperiment.get_data_loader(self.data['ids_to_transcript_train'], self.data['ids_to_encodedsources_train'])
+    self.test_data_loader = ReadExperiment.get_data_loader(self.data['ids_to_transcript_test'], self.data['ids_to_encodedsources_test'])
   
   def instanciate_model(self, output_dim=31, emb_dim=256, hid_dim=512, n_layers=8, kernel_size=3, dropout=0.25, pad_idx=2,
                         max_seq_len=600, scaling_energy=True, multi_head=True, d_keys_values=64):
@@ -276,3 +303,5 @@ class ReadExperiment(object):
 if __name__ == "__main__":
   re = ReadExperiment()
   re.train()
+
+  # test()
