@@ -228,7 +228,7 @@ class NgramsTrainer1(ConvnetTrainer):
 class NgramsTrainer2(ConvnetTrainer):
   def __init__(self, logfile='_logs/_logs_ngramsEXP2.txt', save_name_model='convnet/ngrams_convnet_experiment2.pt',
                metadata_file='_Data_metadata_multigrams_wav2vec.pk', encoding_fn=multigrams_encoding, multi_head=True,
-               slice_fn=Data.wav2vec_extraction, scorer=Data.compute_scores, batch_size=8):
+               slice_fn=Data.wav2vec_extraction, scorer=Data.compute_scores, batch_size=8, save_features=True):
     convnet_config = {'emb_dim': 384, 'hid_dim': 512}
     cp = torch.load('wav2vec_large.pt')
     wav2vec_model = Wav2VecModel.build_model(cp['args'], task=None)
@@ -236,28 +236,54 @@ class NgramsTrainer2(ConvnetTrainer):
     wav2vec_model.eval()
     super().__init__(logfile=logfile, save_name_model=save_name_model, metadata_file=metadata_file, encoding_fn=encoding_fn,
                      multi_head=multi_head, slice_fn=slice_fn, scorer=scorer, batch_size=batch_size, convnet_config=convnet_config,
-                     wav2vec_model=wav2vec_model, save_features=True)
+                     wav2vec_model=wav2vec_model, save_features=save_features)
 
 
 class NgramsTrainer3(ConvnetTrainer):
   def __init__(self, logfile='_logs/_logs_multigrams3.txt', save_name_model='convnet/ngrams_convnet_experiment3.pt',
                metadata_file='_Data_metadata_multigrams_mfcc0128.pk', encoding_fn=multigrams_encoding, multi_head=True,
-               slice_fn=Data.mfcc_extraction, n_fft=2048, hop_length=512, scorer=Data.compute_scores, batch_size=32):
+               slice_fn=Data.mfcc_extraction, n_fft=2048, hop_length=512, scorer=Data.compute_scores, batch_size=32,
+               mess_with_targets=True):
     convnet_config = {'emb_dim': 384, 'hid_dim': 512}
     super().__init__(logfile=logfile, save_name_model=save_name_model, metadata_file=metadata_file, encoding_fn=encoding_fn,
                      multi_head=multi_head, slice_fn=slice_fn, n_fft=n_fft, hop_length=hop_length, scorer=scorer,
-                     batch_size=batch_size, convnet_config=convnet_config, mess_with_targets=True)
+                     batch_size=batch_size, convnet_config=convnet_config, mess_with_targets=mess_with_targets)
     u.load_model(self.model, 'convnet/ngrams_convnet_experiment.pt', restore_only_similars=True)
 
 
 class NgramsTrainer4(ConvnetTrainer):
   def __init__(self, logfile='_logs/_logs_multigrams4.txt', save_name_model='convnet/ngrams_convnet_experiment4.pt',
-               metadata_file='_Data_metadata_mutliEncoding_multigrams_mfcc0128.pk', encoding_fn=multigrams_encoding, multi_head=True,
-               slice_fn=Data.mfcc_extraction, n_fft=2048, hop_length=512, scorer=Data.compute_scores, batch_size=32):
+               metadata_file='_Data_metadata_multiEncoding_mfcc0128.pk', encoding_fn=multigrams_encoding, multi_head=True,
+               slice_fn=Data.mfcc_extraction, n_fft=2048, hop_length=512, scorer=Data.compute_scores, batch_size=24):
     convnet_config = {'emb_dim': 384, 'hid_dim': 512}
     super().__init__(logfile=logfile, save_name_model=save_name_model, metadata_file=metadata_file, encoding_fn=encoding_fn,
                      multi_head=multi_head, slice_fn=slice_fn, n_fft=n_fft, hop_length=hop_length, scorer=scorer,
                      batch_size=batch_size, convnet_config=convnet_config)
+  
+  def set_data(self):
+    self.data = Data()
+
+    if not os.path.isfile(self.metadata_file):
+      self.data.set_audio_metadata(self.train_folder, self.test_folder, list_files_fn=self.list_files_fn,
+                                   process_file_fn=self.process_file_fn, **self.process_file_fn_args)
+      set_metadata(self.data, self.train_folder, self.test_folder)
+      self.data.save_metadata(save_name=self.metadata_file)
+    else:
+      self.data.load_metadata(save_name=self.metadata_file)
+
+
+class NgramsTrainer5(ConvnetTrainer):
+  def __init__(self, logfile='_logs/_logs_ngramsEXP5.txt', save_name_model='convnet/ngrams_convnet_experiment5.pt',
+               metadata_file='_Data_metadata_multiEncoding_wav2vec.pk', encoding_fn=multigrams_encoding, multi_head=True,
+               slice_fn=Data.wav2vec_extraction, scorer=Data.compute_scores, batch_size=8, save_features=True):
+    convnet_config = {'emb_dim': 384, 'hid_dim': 512}
+    cp = torch.load('wav2vec_large.pt')
+    wav2vec_model = Wav2VecModel.build_model(cp['args'], task=None)
+    wav2vec_model.load_state_dict(cp['model'])
+    wav2vec_model.eval()
+    super().__init__(logfile=logfile, save_name_model=save_name_model, metadata_file=metadata_file, encoding_fn=encoding_fn,
+                     multi_head=multi_head, slice_fn=slice_fn, scorer=scorer, batch_size=batch_size, convnet_config=convnet_config,
+                     wav2vec_model=wav2vec_model, save_features=save_features)
   
   def set_data(self):
     self.data = Data()
