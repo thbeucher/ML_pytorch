@@ -210,17 +210,6 @@ class ReadExperiment(object):
     self.data['ids_to_transcript_train'] = {k: v + '.' for k, v in self.data['ids_to_transcript_train'].items()}
     self.data['ids_to_transcript_test'] = {k: v + '.' for k, v in self.data['ids_to_transcript_test'].items()}
     
-    # for k, v in data['ids_to_encodedsources_train'].items():
-    #   print(v)
-    #   s = ''.join([data['idx_to_tokens'][i] for i in data['ids_to_encodedsources_train'][k]])
-    #   print(s)
-    #   s2 = ''.join([data['idx_to_tokens'][i] for i in data['ids_to_encodedsources_train'][k][1:-1]])
-    #   arr = text_to_image(s2)
-    #   img = Image.fromarray(arr)
-    #   img.show()
-    #   print(arr.shape)
-    #   input('wait')
-    
     self.train_data_loader = ReadExperiment.get_data_loader(self.data['ids_to_transcript_train'], self.data['ids_to_encodedsources_train'])
     self.test_data_loader = ReadExperiment.get_data_loader(self.data['ids_to_transcript_test'], self.data['ids_to_encodedsources_test'])
   

@@ -36,9 +36,9 @@ class CustomDataset(Dataset):
     self.process_file_fn = process_file_fn = Data.read_and_slice_signal if process_file_fn is None else process_file_fn
     self.process_file_fn_args = kwargs
 
-    self.mess_with_targets = kwargs.get('mess_with_targets', False)
+    self.mess_with_targets = kwargs.get('mess_with_targets', False) if kwargs.get('train', True) else False
     self.vocab_size = kwargs.get('vocab_size', max([i for s in ids_to_encodedsources.values() for i in s]))
-    self.mess_prob = kwargs.get('mess_prob', 0.15)
+    self.mess_prob = kwargs.get('mess_prob', 0.1)
 
     self.identities = list(sorted(ids_to_audiofile.keys()))
 
@@ -639,7 +639,7 @@ class Data(object):
     ids_to_sources = self.ids_to_encodedsources_train if train else self.ids_to_encodedsources_test
 
     custom_dataset = CustomDataset(ids_to_audiofile, ids_to_sources, signal_type=signal_type, readers=readers,
-                                   process_file_fn=process_file_fn, **kwargs)
+                                   process_file_fn=process_file_fn, train=train, **kwargs)
     
     if subset:
       custom_dataset = Data.extract_subset(custom_dataset, percent=percent)

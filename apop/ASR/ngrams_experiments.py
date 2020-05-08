@@ -97,6 +97,16 @@ def encode_ngrams(encoded, ngrams):
   return encoded_tmp
 
 
+def encode_letters(encoded, letters):
+  encoded_tmp = []
+  for el in encoded:
+    if isinstance(el, tuple):
+      encoded_tmp.append(el)
+    else:
+      encoded_tmp += [(l, letters[l]) for l in el]
+  return encoded_tmp
+
+
 def ngrams_encoding(source, letters, bigrams, trigrams, vocab_words):
   # strategy = words then trigrams then bigrams then letters
   words = [e for el in [[w] + [' '] for w in source.split()] for e in el][:-1]
@@ -131,6 +141,7 @@ def multigrams_encoding(sources, sos_tok='<sos>', eos_tok='<eos>', pad_tok='<pad
   trigrams_to_idx = {t: i + len(letters) + len(bigrams) for i, t in enumerate(trigrams)}
   words_to_idx = {w: i + len(letters) + len(bigrams) + len(trigrams) for i, w in enumerate(words)}
 
+  print('multigrams encoding...')
   sources_encoded = [ngrams_encoding(s, letters_to_idx, bigrams_to_idx, trigrams_to_idx, words_to_idx) for s in tqdm(sources)]
 
   multigrams_to_idx = {**letters_to_idx, **bigrams_to_idx, **trigrams_to_idx, **words_to_idx}
@@ -139,6 +150,56 @@ def multigrams_encoding(sources, sos_tok='<sos>', eos_tok='<eos>', pad_tok='<pad
   sources_encoded = [[multigrams_to_idx[sos_tok]] + se + [multigrams_to_idx[eos_tok]] for se in sources_encoded]
   
   return sources_encoded, idx_to_multigrams, multigrams_to_idx
+
+
+def multi_encoding_ngrams(ids, sources, sos_tok='<sos>', eos_tok='<eos>', pad_tok='<pad>'):
+  sources = [s.lower() for s in sources]
+
+  sources_multigrams, idx_to_multigrams, multigrams_to_idx = multigrams_encoding(sources)
+
+  sos_idx, eos_idx, pad_idx = multigrams_to_idx[sos_tok], multigrams_to_idx[eos_tok], multigrams_to_idx[pad_tok]
+
+  sources_letters = [[sos_idx] + [multigrams_to_idx[l] for l in s] + [eos_idx] for s in sources]
+
+  sources_words = [[e for el in [[w] + [' '] for w in s.split()] for e in el][:-1] for s in sources]
+  sources_spaces = [[(w, multigrams_to_idx[' ']) if w == ' ' else w for w in words] for words in sources_words]
+
+  print('encode known bigrams...')
+  sources_bigrams = [encode_ngrams(s, {k: v for k, v in multigrams_to_idx.items() if len(k) == 2}) for s in tqdm(sources_spaces)]
+  print('encode leaved letters...')
+  sources_bigrams = [list(map(lambda x: x[1], encode_letters(s, multigrams_to_idx))) for s in tqdm(sources_bigrams)]
+
+  print('encode known trigrams...')
+  sources_trigrams = [encode_ngrams(s, {k: v for k, v in multigrams_to_idx.items() if len(k) == 3}) for s in tqdm(sources_spaces)]
+  print('encode leaved letters...')
+  sources_trigrams = [list(map(lambda x: x[1], encode_letters(s, multigrams_to_idx))) for s in tqdm(sources_trigrams)]
+  
+  ids_to_encoded = {f'{ids[i]}_multigrams': s for i, s in enumerate(sources_multigrams)}
+  ids_to_encoded = {**ids_to_encoded, **{f'{ids[i]}_letters': s for i, s in enumerate(sources_letters)}}
+  ids_to_encoded = {**ids_to_encoded, **{f'{ids[i]}_bigrams': s for i, s in enumerate(sources_bigrams)}}
+  ids_to_encoded = {**ids_to_encoded, **{f'{ids[i]}_trigrams': s for i, s in enumerate(sources_trigrams)}}
+
+  return ids_to_encoded, idx_to_multigrams, multigrams_to_idx
+
+
+def set_metadata(data, train_folder, test_folder):
+  data.get_transcripts(train_folder, var_name='ids_to_transcript_train')
+  data.get_transcripts(test_folder, var_name='ids_to_transcript_test')
+  ids_train, sources_train = zip(*[(k, v) for k, v in data.ids_to_transcript_train.items()])
+  ids_test, sources_test = zip(*[(k, v) for k, v in data.ids_to_transcript_test.items()])
+
+  ids_to_encoded, idx_to_tokens, tokens_to_idx = multi_encoding_ngrams(ids_train + ids_test, sources_train + sources_test)
+  data.idx_to_tokens = idx_to_tokens
+  data.tokens_to_idx = tokens_to_idx
+  data.max_source_len = max(map(len, ids_to_encoded.values()))
+
+  print('Create ids_to_encodedsources_train and ids_to_encodedsources_test variables...')
+  data.ids_to_encodedsources_train = {k: v for k, v in tqdm(ids_to_encoded.items()) if k.split('_')[0] in ids_train}
+  data.ids_to_encodedsources_test = {k: v for k, v in tqdm(ids_to_encoded.items()) if k.split('_')[0] in ids_test}
+
+  print('Create ids_to_audiofile_train and ids_to_audiofile_train variables...')
+  data.ids_to_audiofile_train = {k: data.ids_to_audiofile_train[k.split('_')[0]] for k in tqdm(ids_to_encoded) if k.split('_')[0] in ids_train}
+  data.ids_to_audiofile_test = {k: data.ids_to_audiofile_test[k.split('_')[0]] for k in tqdm(ids_to_encoded) if k.split('_')[0] in ids_test}
 
 
 def analyze():
@@ -187,6 +248,27 @@ class NgramsTrainer3(ConvnetTrainer):
                      multi_head=multi_head, slice_fn=slice_fn, n_fft=n_fft, hop_length=hop_length, scorer=scorer,
                      batch_size=batch_size, convnet_config=convnet_config, mess_with_targets=True)
     u.load_model(self.model, 'convnet/ngrams_convnet_experiment.pt', restore_only_similars=True)
+
+
+class NgramsTrainer4(ConvnetTrainer):
+  def __init__(self, logfile='_logs/_logs_multigrams4.txt', save_name_model='convnet/ngrams_convnet_experiment4.pt',
+               metadata_file='_Data_metadata_mutliEncoding_multigrams_mfcc0128.pk', encoding_fn=multigrams_encoding, multi_head=True,
+               slice_fn=Data.mfcc_extraction, n_fft=2048, hop_length=512, scorer=Data.compute_scores, batch_size=32):
+    convnet_config = {'emb_dim': 384, 'hid_dim': 512}
+    super().__init__(logfile=logfile, save_name_model=save_name_model, metadata_file=metadata_file, encoding_fn=encoding_fn,
+                     multi_head=multi_head, slice_fn=slice_fn, n_fft=n_fft, hop_length=hop_length, scorer=scorer,
+                     batch_size=batch_size, convnet_config=convnet_config)
+  
+  def set_data(self):
+    self.data = Data()
+
+    if not os.path.isfile(self.metadata_file):
+      self.data.set_audio_metadata(self.train_folder, self.test_folder, list_files_fn=self.list_files_fn,
+                                   process_file_fn=self.process_file_fn, **self.process_file_fn_args)
+      set_metadata(self.data, self.train_folder, self.test_folder)
+      self.data.save_metadata(save_name=self.metadata_file)
+    else:
+      self.data.load_metadata(save_name=self.metadata_file)
 
 
 class CustomDataset(Dataset):
