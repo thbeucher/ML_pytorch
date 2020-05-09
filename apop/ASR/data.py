@@ -11,6 +11,7 @@ import soundfile as sf
 from tqdm import tqdm
 from g2p_en import G2p
 from scipy.signal import stft
+from jiwer import wer as wer_compute
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset, DataLoader, Subset
 
@@ -729,7 +730,7 @@ class Data(object):
       if target == pred:
         count_correct_sentences += 1
       
-      wers.append(u.compute_WER(target, pred))
+      wers.append(wer_compute(target, pred))
     
     character_accuracy = count_correct_characters / count_characters
     word_accuracy = count_correct_words / count_words
