@@ -248,7 +248,7 @@ class NgramsTrainer3(ConvnetTrainer):
     super().__init__(logfile=logfile, save_name_model=save_name_model, metadata_file=metadata_file, encoding_fn=encoding_fn,
                      multi_head=multi_head, slice_fn=slice_fn, n_fft=n_fft, hop_length=hop_length, scorer=scorer,
                      batch_size=batch_size, convnet_config=convnet_config, mess_with_targets=mess_with_targets)
-    u.load_model(self.model, 'convnet/ngrams_convnet_experiment.pt', restore_only_similars=True)
+    u.load_model(self.model, 'convnet/ngrams_convnet_experiment_051.pt', restore_only_similars=True)
 
 
 class NgramsTrainer4(ConvnetTrainer):
@@ -295,6 +295,18 @@ class NgramsTrainer5(ConvnetTrainer):
       self.data.save_metadata(save_name=self.metadata_file)
     else:
       self.data.load_metadata(save_name=self.metadata_file)
+
+
+class NgramsTrainer6(ConvnetTrainer):
+  def __init__(self, logfile='_logs/_logs_multigrams6.txt', save_name_model='convnet/ngrams_convnet_experiment6.pt',
+               metadata_file='_Data_metadata_multigrams_mfcc0128.pk', encoding_fn=multigrams_encoding, multi_head=True,
+               slice_fn=Data.mfcc_extraction, n_fft=2048, hop_length=512, scorer=Data.compute_scores, batch_size=32):
+    convnet_config = {'emb_dim': 384, 'hid_dim': 512}
+    super().__init__(logfile=logfile, save_name_model=save_name_model, metadata_file=metadata_file, encoding_fn=encoding_fn,
+                     multi_head=multi_head, slice_fn=slice_fn, n_fft=n_fft, hop_length=hop_length, scorer=scorer,
+                     batch_size=batch_size, convnet_config=convnet_config)
+    u.load_model(self.model, 'convnet/ngrams_convnet_experiment_051.pt', restore_only_similars=True)
+    self.train_pass = self.beam_decoding_training
 
 
 class CustomDataset(Dataset):

@@ -237,3 +237,41 @@ class ConvnetTrainer(object):
 
     with open(save_name, 'w') as f:
       json.dump([{'target': t, 'prediction': p} for t, p in zip(targets_sentences, predictions_sentences)], f)
+  
+  def beam_decoding_training(self, only_loss=True, depth=3, depth_probs=[0.7, 0.2, 0.1]):
+    losses, accs = 0, {}
+    targets, predictions = [], []
+
+    for enc_in, dec_in in tqdm(self.train_data_loader):
+      enc_in, dec_in = enc_in.to(self.device), dec_in.to(self.device)
+
+      with torch.no_grad():
+        preds, att = self.model(enc_in, dec_in[:, :-1])  # preds = [batch_size, seq_len, out_size]
+
+      _, idxs = torch.topk(preds, depth, dim=-1)  # ids = [batch_size, seq_len, depth]
+      bs, sl, _ = preds.shape
+      selection = torch.multinomial(torch.Tensor(depth_probs).repeat(bs*sl, 1), 1).reshape(bs, sl, 1)  # [batch_size, seq_len, 1]
+
+      new_truth = torch.gather(idxs, -1, selection.to(self.device))
+      new_truth = torch.cat((torch.ones(bs, 1, 1).long().to(self.device) * dec_in[0, 0], new_truth), 1).squeeze(-1)
+
+      preds, att = self.model(enc_in, new_truth[:, :-1])
+
+      self.optimizer.zero_grad()
+
+      current_loss = self.criterion(preds.reshape(-1, preds.shape[-1]), new_truth[:, 1:].reshape(-1), att, epsilon=self.smoothing_eps)
+
+      current_loss.backward()
+
+      self.optimizer.step()
+
+      targets += new_truth[:, 1:].tolist()
+      predictions += preds.argmax(dim=-1).tolist()
+
+      losses += current_loss.item()
+    
+    if not only_loss:
+      accs = self.scorer(**{'targets': targets, 'predictions': predictions, 'eos_idx': self.eos_idx, 'pad_idx': self.pad_idx,
+                            'idx_to_tokens': self.data.idx_to_tokens})
+    
+    return losses / len(self.train_data_loader), accs
