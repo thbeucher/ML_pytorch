@@ -127,9 +127,10 @@ class ConvnetTrainer(object):
                                                              readers=self.readers, pin_memory=self.pin_memory,
                                                              process_file_fn=self.process_file_fn, **self.process_file_fn_args)
     self.test_data_loader = self.data.get_dataset_generator(train=False, batch_size=self.batch_size, pad_idx=self.pad_idx,
-                                                            pin_memory=self.pin_memory, signal_type=self.signal_type,
+                                                            pin_memory=self.pin_memory, signal_type=self.signal_type, shuffle=False,
                                                             create_enc_mask=self.create_enc_mask, readers=self.readers,
-                                                            process_file_fn=self.process_file_fn, **self.process_file_fn_args)
+                                                            process_file_fn=self.process_file_fn, **self.process_file_fn_args,
+                                                            sort_by_target_len=True)
   
   def instanciate_model(self, enc_input_dim=400, enc_max_seq_len=1400, dec_input_dim=31, dec_max_seq_len=600, output_size=31,
                         enc_layers=10, dec_layers=10, enc_kernel_size=3, dec_kernel_size=3, enc_dropout=0.25, dec_dropout=0.25,

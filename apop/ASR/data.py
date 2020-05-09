@@ -20,7 +20,8 @@ import utils as u
 
 
 class CustomDataset(Dataset):
-  def __init__(self, ids_to_audiofile, ids_to_encodedsources, signal_type='window-sliced', readers=[], process_file_fn=None, **kwargs):
+  def __init__(self, ids_to_audiofile, ids_to_encodedsources, signal_type='window-sliced', readers=[], process_file_fn=None,
+               sort_by_target_len=False, **kwargs):
     '''
     Params:
       * ids_to_audiofile : dict
@@ -45,6 +46,13 @@ class CustomDataset(Dataset):
 
     if len(readers) > 0:
       self.identities = [i for i in self.identities if i.split('-')[0] in readers]
+    
+    if sort_by_target_len:
+      self.identities = CustomDataset._sort_by_targets_len(self.identities, self.ids_to_encodedsources)
+  
+  @staticmethod
+  def _sort_by_targets_len(ids, ids2es):
+    return list(map(lambda x: x[0], sorted([(i, len(ids2es[i])) for i in ids], key=lambda x: x[1])))
   
   def _mess_with_targets(self, target):
     mask = np.random.choice([True, False], size=len(target), p=[self.mess_prob, 1-self.mess_prob])
