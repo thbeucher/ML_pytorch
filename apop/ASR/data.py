@@ -21,7 +21,7 @@ import utils as u
 
 class CustomDataset(Dataset):
   def __init__(self, ids_to_audiofile, ids_to_encodedsources, signal_type='window-sliced', readers=[], process_file_fn=None,
-               sort_by_target_len=False, **kwargs):
+               sort_by_target_len=True, **kwargs):
     '''
     Params:
       * ids_to_audiofile : dict
