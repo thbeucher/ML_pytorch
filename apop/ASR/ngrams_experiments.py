@@ -195,11 +195,13 @@ def set_metadata(data, train_folder, test_folder):
 
   print('Create ids_to_encodedsources_train and ids_to_encodedsources_test variables...')
   data.ids_to_encodedsources_train = {k: v for k, v in tqdm(ids_to_encoded.items()) if k.split('_')[0] in ids_train}
-  data.ids_to_encodedsources_test = {k: v for k, v in tqdm(ids_to_encoded.items()) if k.split('_')[0] in ids_test}
+  data.ids_to_encodedsources_test = {k.split('_')[0]: v for k, v in tqdm(ids_to_encoded.items()) if k.split('_')[0] in ids_test}
 
   print('Create ids_to_audiofile_train and ids_to_audiofile_train variables...')
-  data.ids_to_audiofile_train = {k: data.ids_to_audiofile_train[k.split('_')[0]] for k in tqdm(ids_to_encoded) if k.split('_')[0] in ids_train}
-  data.ids_to_audiofile_test = {k: data.ids_to_audiofile_test[k.split('_')[0]] for k in tqdm(ids_to_encoded) if k.split('_')[0] in ids_test}
+  data.ids_to_audiofile_train = {k: data.ids_to_audiofile_train[k.split('_')[0]]
+                                  for k in tqdm(ids_to_encoded) if k.split('_')[0] in ids_train}
+  data.ids_to_audiofile_test = {k.split('_')[0]: data.ids_to_audiofile_test[k.split('_')[0]]
+                                  for k in tqdm(ids_to_encoded) if k.split('_')[0] in ids_test}
 
 
 def analyze():

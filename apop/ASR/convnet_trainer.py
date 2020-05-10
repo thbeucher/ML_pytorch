@@ -243,29 +243,31 @@ class ConvnetTrainer(object):
     targets, predictions = [], []
 
     for enc_in, dec_in in tqdm(self.train_data_loader):
-      enc_in, dec_in = enc_in.to(self.device), dec_in.to(self.device)
+      enc_in, dec_in = enc_in.to(self.device), dec_in.to(self.device)  # dec_in = [batch_size, seq_len]
 
       with torch.no_grad():
-        preds, att = self.model(enc_in, dec_in[:, :-1])  # preds = [batch_size, seq_len, out_size]
+        preds, att = self.model(enc_in, dec_in[:, :-1])  # preds = [batch_size, seq_len-1, out_size]
 
-      _, idxs = torch.topk(preds, depth, dim=-1)  # ids = [batch_size, seq_len, depth]
-      bs, sl, _ = preds.shape
-      selection = torch.multinomial(torch.Tensor(depth_probs).repeat(bs*sl, 1), 1).reshape(bs, sl, 1)  # [batch_size, seq_len, 1]
+      _, idxs = torch.topk(preds[:, :-1], depth, dim=-1)  # ids = [batch_size, seq_len-2, depth]
+      bs, sl, _ = idxs.shape
+      selection = torch.multinomial(torch.Tensor(depth_probs).repeat(bs*sl, 1), 1).reshape(bs, sl, 1)  # [batch_size, seq_len-2, 1]
 
       new_truth = torch.gather(idxs, -1, selection.to(self.device))
-      new_truth = torch.cat((torch.ones(bs, 1, 1).long().to(self.device) * dec_in[0, 0], new_truth), 1).squeeze(-1)
 
-      preds, att = self.model(enc_in, new_truth[:, :-1])
+      sos_tensor = torch.ones(bs, 1, 1).long().to(self.device) * self.sos_idx
+      new_truth = torch.cat((sos_tensor, new_truth), 1).squeeze(-1)  # [batch_size, seq_len-1, 1]
+
+      preds, att = self.model(enc_in, new_truth)
 
       self.optimizer.zero_grad()
 
-      current_loss = self.criterion(preds.reshape(-1, preds.shape[-1]), new_truth[:, 1:].reshape(-1), att, epsilon=self.smoothing_eps)
+      current_loss = self.criterion(preds.reshape(-1, preds.shape[-1]), dec_in[:, 1:].reshape(-1), att, epsilon=self.smoothing_eps)
 
       current_loss.backward()
 
       self.optimizer.step()
 
-      targets += new_truth[:, 1:].tolist()
+      targets += dec_in[:, 1:].tolist()
       predictions += preds.argmax(dim=-1).tolist()
 
       losses += current_loss.item()
