@@ -171,7 +171,7 @@ class ConvModel(torch.nn.Module):
 
 
 class ReadExperiment(object):
-  def __init__(self, device=None, n_epochs=500, logfile='_text_image_experiments_logs.txt', eval_step=5, lr=1e-4,
+  def __init__(self, device=None, n_epochs=500, logfile='_text_image_experiments_logs.txt', eval_step=5, lr=1e-5,
                save_name_model='readexperiment.pt', scorer=Data.compute_scores, batch_size=32):
     logging.basicConfig(filename=logfile, filemode='a', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 

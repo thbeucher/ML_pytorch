@@ -37,7 +37,7 @@ class PositionalEncoding(nn.Module):
     return self.dropout(x)
 
 
-def process_raw_signal(signal, sample_rate=16000, window_size=0.025, overlap_size=0.010):
+def process_raw_signal(signal, sample_rate=16000, window_size=0.025, overlap_size=0.010, **kwargs):
   window = int(window_size * sample_rate)
   overlap = int(overlap_size * sample_rate)
   ## Slice signal into n chunks

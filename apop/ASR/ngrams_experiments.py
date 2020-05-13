@@ -217,6 +217,7 @@ def analyze():
   print(f'min = {min(lens)} | max = {max(lens)} | mean = {np.mean(lens)}')
 
 
+## STATUS = 500 epochs finished, best train_acc = 0.925 | test_acc = 0.511 (epoch 500)
 class NgramsTrainer1(ConvnetTrainer):
   def __init__(self, logfile='_logs/_logs_multigrams1.txt', save_name_model='convnet/ngrams_convnet_experiment.pt',
                metadata_file='_Data_metadata_multigrams_mfcc0128.pk', encoding_fn=multigrams_encoding, multi_head=True,
@@ -227,6 +228,7 @@ class NgramsTrainer1(ConvnetTrainer):
                      batch_size=batch_size, convnet_config=convnet_config)
 
 
+## STATUS = stopped, start diverging at epoch 170, best train_acc = 0.893 | test_acc = 0.565 (epoch 140)
 class NgramsTrainer2(ConvnetTrainer):
   def __init__(self, logfile='_logs/_logs_ngramsEXP2.txt', save_name_model='convnet/ngrams_convnet_experiment2.pt',
                metadata_file='_Data_metadata_multigrams_wav2vec.pk', encoding_fn=multigrams_encoding, multi_head=True,
@@ -308,6 +310,22 @@ class NgramsTrainer6(ConvnetTrainer):
                      multi_head=multi_head, slice_fn=slice_fn, n_fft=n_fft, hop_length=hop_length, scorer=scorer,
                      batch_size=batch_size, convnet_config=convnet_config)
     u.load_model(self.model, 'convnet/ngrams_convnet_experiment_051.pt', restore_only_similars=True)
+    self.train_pass = self.beam_decoding_training
+
+
+class NgramsTrainer7(ConvnetTrainer):
+  def __init__(self, logfile='_logs/_logs_ngramsEXP7.txt', save_name_model='convnet/ngrams_convnet_experiment7.pt',
+               metadata_file='_Data_metadata_multigrams_wav2vec.pk', encoding_fn=multigrams_encoding, multi_head=True,
+               slice_fn=Data.wav2vec_extraction, scorer=Data.compute_scores, batch_size=8, save_features=True):
+    convnet_config = {'emb_dim': 384, 'hid_dim': 512}
+    cp = torch.load('wav2vec_large.pt')
+    wav2vec_model = Wav2VecModel.build_model(cp['args'], task=None)
+    wav2vec_model.load_state_dict(cp['model'])
+    wav2vec_model.eval()
+    super().__init__(logfile=logfile, save_name_model=save_name_model, metadata_file=metadata_file, encoding_fn=encoding_fn,
+                     multi_head=multi_head, slice_fn=slice_fn, scorer=scorer, batch_size=batch_size, convnet_config=convnet_config,
+                     wav2vec_model=wav2vec_model, save_features=save_features, lr=1e-5)
+    u.load_model(self.model, 'convnet/ngrams_convnet_experiment2.pt', restore_only_similars=True)
     self.train_pass = self.beam_decoding_training
 
 

@@ -22,7 +22,7 @@ class ConvnetTrainer(object):
                slice_fn=Data.window_slicing_signal, multi_head=False, d_keys_values=64, lr=1e-4, smoothing_eps=0.1, n_epochs=500,
                batch_size=32, decay_factor=1, decay_step=0.01, create_enc_mask=False, eval_step=10, scorer=Data.compute_accuracy,
                convnet_config={}, relu=False, pin_memory=True, train_folder='../../../datasets/openslr/LibriSpeech/train-clean-100/',
-               test_folder='../../../datasets/openslr/LibriSpeech/test-clean/', **kwargs):
+               test_folder='../../../datasets/openslr/LibriSpeech/test-clean/', scores_step=5, **kwargs):
     '''
     Params:
       * device (optional) : torch.device
@@ -85,6 +85,7 @@ class ConvnetTrainer(object):
     self.pin_memory = pin_memory
     self.train_folder = train_folder
     self.test_folder = test_folder
+    self.scores_step = scores_step
     self.process_file_fn_args = {**kwargs, **{'slice_fn': slice_fn}}
 
     self.set_data()
@@ -153,9 +154,9 @@ class ConvnetTrainer(object):
     print('Start Training...')
     eval_accuracy_memory = 0
     for epoch in tqdm(range(self.n_epochs)):
-      epoch_loss, accs = self.train_pass(only_loss=False if epoch % self.eval_step == 0 else True)
+      epoch_loss, accs = self.train_pass(only_loss=epoch % self.scores_step != 0)
       logging.info(f"Epoch {epoch} | train_loss = {epoch_loss:.3f} | {' | '.join([f'{k} = {v:.3f}' for k, v in accs.items()])}")
-      eval_loss, accs = self.evaluation(only_loss=False if epoch % self.eval_step == 0 else True)
+      eval_loss, accs = self.evaluation(scores=epoch % self.scores_step == 0, greedy_scores=epoch % self.eval_step ==0)
       logging.info(f"Epoch {epoch} | test_loss = {eval_loss:.3f} | {' | '.join([f'{k} = {v:.3f}' for k, v in accs.items()])}")
 
       oea = accs['preds_acc'] if 'preds_acc' in accs else accs.get('word_accuracy', None)
@@ -168,9 +169,9 @@ class ConvnetTrainer(object):
         eval_accuracy_memory = oea
   
   @torch.no_grad()
-  def evaluation(self, only_loss=True):
+  def evaluation(self, scores=False, greedy_scores=False):
     losses, accs = 0, {}
-    targets, predictions = [], []
+    targets, predictions, greedy_predictions = [], [], []
 
     self.model.eval()
 
@@ -179,17 +180,24 @@ class ConvnetTrainer(object):
       preds, att = self.model(enc_in, dec_in[:, :-1])
 
       losses += self.criterion(preds.reshape(-1, preds.shape[-1]), dec_in[:, 1:].reshape(-1), att, epsilon=self.smoothing_eps).item()
+
+      targets += dec_in[:, 1:].tolist()
+      predictions += preds.argmax(dim=-1).tolist()
       
-      if not only_loss:
+      if greedy_scores:
         preds, _ = self.model.greedy_decoding(enc_in, self.sos_idx, self.eos_idx, max_seq_len=dec_in.shape[1])
-        targets += dec_in[:, 1:].tolist()
-        predictions += preds.tolist()
+        greedy_predictions += preds.tolist()
     
     self.model.train()
 
-    if not only_loss:
+    if scores:
       accs = self.scorer(**{'targets': targets, 'predictions': predictions, 'eos_idx': self.eos_idx, 'pad_idx': self.pad_idx,
                             'idx_to_tokens': self.data.idx_to_tokens})
+
+    if greedy_scores:
+      greedy_accs = self.scorer(**{'targets': targets, 'predictions': greedy_predictions, 'eos_idx': self.eos_idx, 'pad_idx': self.pad_idx,
+                            'idx_to_tokens': self.data.idx_to_tokens})
+      accs = {**accs, **{'greedy_'+k: v for k, v in greedy_accs.items()}}
 
     return losses / len(self.test_data_loader), accs
   
@@ -225,18 +233,22 @@ class ConvnetTrainer(object):
     u.load_model(self.model, self.save_name_model, restore_only_similars=True)
     self.model.eval()
 
-    targets, predictions = [], []
+    targets, predictions, greedy_predictions = [], [], []
     for enc_in, dec_in in tqdm(self.test_data_loader):
       enc_in, dec_in = enc_in.to(self.device), dec_in.to(self.device)
-      preds, _ = self.model.greedy_decoding(enc_in, self.sos_idx, self.eos_idx, max_seq_len=dec_in.shape[1])
+      preds, _ = self.model(enc_in, dec_in[:, :-1])
+      greedy_preds, _ = self.model.greedy_decoding(enc_in, self.sos_idx, self.eos_idx, max_seq_len=dec_in.shape[1])
       targets += dec_in[:, 1:].tolist()
-      predictions += preds.tolist()
+      predictions += preds.argmax(dim=-1).tolist()
+      greedy_predictions += greedy_preds.tolist()
     
     targets_sentences = Data.reconstruct_sources(targets, self.data.idx_to_tokens, self.eos_idx, joiner='')
     predictions_sentences = Data.reconstruct_sources(predictions, self.data.idx_to_tokens, self.eos_idx, joiner='')
+    greedy_predictions_sentences = Data.reconstruct_sources(greedy_predictions, self.data.idx_to_tokens, self.eos_idx, joiner='')
 
     with open(save_name, 'w') as f:
-      json.dump([{'target': t, 'prediction': p} for t, p in zip(targets_sentences, predictions_sentences)], f)
+      json.dump([{'target': t, 'prediction': p, 'greedy_prediction': gp}
+                    for t, p, gp in zip(targets_sentences, predictions_sentences, greedy_predictions_sentences)], f)
   
   def beam_decoding_training(self, only_loss=True, depth=3, depth_probs=[0.7, 0.2, 0.1]):
     losses, accs = 0, {}

@@ -55,6 +55,7 @@ import sys
 import torch
 import random
 import numpy as np
+import torch.nn as nn
 
 from tqdm import tqdm
 
@@ -69,7 +70,7 @@ from models.transformer.transformer import Transformer
 from models.transformer.embedder import PositionalEmbedder
 
 
-class RawEmbedder(torch.nn.Module):
+class RawEmbedder(nn.Module):
   '''
   Fourier Transform is usualy used for spectral features extraction, as it's a linear transformation we use a FF to simulates it
   then some Convolution to simulates various filters and maybe a log(relu()+eps), not forgetting positional encoding
@@ -80,13 +81,13 @@ class RawEmbedder(torch.nn.Module):
     self.device = device
     moving_len = hop_length // 2
 
-    self.fourier = torch.nn.Linear(input_dim, input_dim)
-    self.filtering = torch.nn.Conv2d(1, n_filters, (seq_kernel, hop_length), padding=(seq_kernel//2, moving_len), stride=(1, moving_len))
-    self.non_linearity = torch.nn.ReLU(inplace=True)
-    self.low_pass_filter = torch.nn.MaxPool1d(pooling)
+    self.fourier = nn.Linear(input_dim, input_dim)
+    self.filtering = nn.Conv2d(1, n_filters, (seq_kernel, hop_length), padding=(seq_kernel//2, moving_len), stride=(1, moving_len))
+    self.non_linearity = nn.ReLU(inplace=True)
+    self.low_pass_filter = nn.MaxPool1d(pooling)
 
     out_size = u.compute_out_conv(input_dim, kernel=hop_length, stride=moving_len, padding=moving_len) * n_filters // pooling
-    self.projection = torch.nn.Linear(out_size, emb_dim)
+    self.projection = nn.Linear(out_size, emb_dim)
     self.positional_embedding = u.create_positional_embedding(max_seq_len, emb_dim, hid_dim)
   
   def forward(self, x):
@@ -134,17 +135,17 @@ class Experiment19(ConvnetTrainer):
                      batch_size=batch_size, convnet_config=convnet_config, multi_head=multi_head)
 
 
-class RawEmbedder2(torch.nn.Module):
+class RawEmbedder2(nn.Module):
   def __init__(self, input_dim, emb_dim, hid_dim, max_seq_len, dropout, device, reduce_dim=False,
                n_filters=80, window=2048, hop_length=512, pooling=2):
     super().__init__()
     self.device = device
 
-    self.conv = torch.nn.Conv1d(1, n_filters, window, stride=hop_length)
-    self.non_linearity = torch.nn.ReLU(inplace=True)
+    self.conv = nn.Conv1d(1, n_filters, window, stride=hop_length)
+    self.non_linearity = nn.ReLU(inplace=True)
 
-    self.projection = torch.nn.Linear(n_filters, emb_dim)
-    self.normalization = torch.nn.LayerNorm(emb_dim)
+    self.projection = nn.Linear(n_filters, emb_dim)
+    self.normalization = nn.LayerNorm(emb_dim)
     self.positional_embedding = u.create_positional_embedding(max_seq_len, emb_dim, hid_dim)
   
   def forward(self, x):
@@ -168,18 +169,18 @@ class Experiment20(ConvnetTrainer):
                      batch_size=batch_size, convnet_config=convnet_config, multi_head=multi_head, slice_fn=slice_fn)
 
 
-class ScateringFilter(torch.nn.Module):
+class ScateringFilter(nn.Module):
   def __init__(self, n_feats=80, kernel=400, stride=160, norm_pooling=2, kernel_pooling=2, non_linearity='l2_pooling'):
     super().__init__()
     self.n_feats = n_feats
-    self.conv = torch.nn.Conv1d(1, n_feats, kernel)
+    self.conv = nn.Conv1d(1, n_feats, kernel)
 
     if non_linearity == 'relu':
-      self.non_linearity = torch.nn.ReLU(inplace=True)
+      self.non_linearity = nn.ReLU(inplace=True)
     else:
-      self.non_linearity = torch.nn.LPPool1d(norm_pooling, kernel_pooling)
+      self.non_linearity = nn.LPPool1d(norm_pooling, kernel_pooling)
 
-    self.low_pass_filter = torch.nn.Conv1d(n_feats, n_feats, kernel, stride=stride)
+    self.low_pass_filter = nn.Conv1d(n_feats, n_feats, kernel, stride=stride)
   
   def forward(self, x):  # x = [batch_size, signal_len]
     out = self.conv(x.unsqueeze(1))  # [batch_size, n_feats, new_signal_len]
@@ -188,17 +189,17 @@ class ScateringFilter(torch.nn.Module):
     return torch.log(1 + torch.abs(out))  # log-compression
 
 
-class GammatonesFilter(torch.nn.Module):
+class GammatonesFilter(nn.Module):
   def __init__(self, n_feats=40, kernel=400, kernel_pooling=400, stride=160, low_pass_filter='max_pool'):
     super().__init__()
     self.n_feats = n_feats
-    self.conv = torch.nn.Conv1d(1, n_feats, kernel)
-    self.non_linearity = torch.nn.ReLU(inplace=True)
+    self.conv = nn.Conv1d(1, n_feats, kernel)
+    self.non_linearity = nn.ReLU(inplace=True)
 
     if low_pass_filter == 'sq_hanning':
-      self.low_pass_filter = torch.nn.Conv1d(n_feats, n_feats, kernel, stride=stride)
+      self.low_pass_filter = nn.Conv1d(n_feats, n_feats, kernel, stride=stride)
     else:
-      self.low_pass_filter = torch.nn.MaxPool1d(kernel_pooling)
+      self.low_pass_filter = nn.MaxPool1d(kernel_pooling)
   
   def forward(self, x):  # x = [batch_size, signal_len]
     out = self.non_linearity(self.conv(x.unsqueeze(1)))  # [batch_size, n_feats, new_signal_len] 
@@ -206,16 +207,16 @@ class GammatonesFilter(torch.nn.Module):
     return torch.log(0.01 + torch.abs(out))  # log-compression
 
 
-class MixFilters(torch.nn.Module):
+class MixFilters(nn.Module):
   def __init__(self, n_feats_scatering=80, n_feats_gammatones=40, kernel=4, stride=2):
     super().__init__()
     self.scatering = ScateringFilter(n_feats=n_feats_scatering, non_linearity='relu')
     self.gammatones = GammatonesFilter(n_feats=n_feats_gammatones, low_pass_filter='sq_hanning')
     self.n_feats = n_feats_scatering + n_feats_gammatones 
-    self.reducer = torch.nn.Sequential(torch.nn.Conv1d(self.n_feats, self.n_feats, kernel, stride=stride),
-                                       torch.nn.ReLU(),
-                                       torch.nn.Conv1d(self.n_feats, self.n_feats, kernel, stride=stride),
-                                       torch.nn.ReLU())
+    self.reducer = nn.Sequential(nn.Conv1d(self.n_feats, self.n_feats, kernel, stride=stride),
+                                           nn.ReLU(),
+                                           nn.Conv1d(self.n_feats, self.n_feats, kernel, stride=stride),
+                                           nn.ReLU())
   
   def forward(self, x):  # x = [batch_size, signal_len]
     scatering_filters = self.scatering(x)
@@ -224,14 +225,14 @@ class MixFilters(torch.nn.Module):
     return out.permute(0, 2, 1)
 
 
-class AudioEmbedder(torch.nn.Module):
+class AudioEmbedder(nn.Module):
   def __init__(self, input_dim, emb_dim, hid_dim, max_seq_len, dropout, device, reduce_dim=False):
     super().__init__()
     self.device = device
     self.filters = MixFilters()
 
-    self.projection = torch.nn.Linear(self.filters.n_feats, emb_dim)
-    self.normalization = torch.nn.LayerNorm(emb_dim)
+    self.projection = nn.Linear(self.filters.n_feats, emb_dim)
+    self.normalization = nn.LayerNorm(emb_dim)
     self.positional_embedding = u.create_positional_embedding(max_seq_len, emb_dim, hid_dim)
   
   def forward(self, x):
@@ -448,7 +449,7 @@ class Experiment26(ConvnetFeedbackExperiments):
     u.load_model(self.model, save_name_model, restore_only_similars=True)
 
 
-class SeqSeqConvnetTransformer(torch.nn.Module):
+class SeqSeqConvnetTransformer(nn.Module):
   def __init__(self, encoder, decoder, device):
     super().__init__()
     self.encoder = encoder
@@ -522,19 +523,51 @@ def init_transformer1(model, n_layers, alpha=1):
     if p.dim() > 1 and 'decoder' in k:
       gamma = (6 / sum(p.shape)) ** 0.5
       val = gamma * alpha / (n_layers ** 0.5)
-      torch.nn.init.uniform_(p, a=-val, b=val)
+      nn.init.uniform_(p, a=-val, b=val)
 
 
 def init_transformer2(model, emb_dim, vocab_size):
   # https://arxiv.org/pdf/1911.03179.pdf
   for k, p in model.named_parameters():
     if p.dim() > 1 and 'decoder' in k:
-      if isinstance(p, torch.nn.Linear):
+      if isinstance(p, nn.Linear):
         l = (1 / p.shape[-1]) ** 0.5
-        torch.nn.init.uniform_(p, a=-l, b=l)
-      elif isinstance(p, torch.nn.Embedding):
+        nn.init.uniform_(p, a=-l, b=l)
+      elif isinstance(p, nn.Embedding):
         e = (2 / (emb_dim + vocab_size)) ** 0.5
-        torch.nn.init.uniform_(p, a=-e, b=e)
+        nn.init.uniform_(p, a=-e, b=e)
+
+
+class NstepsAheadDecoder(nn.Module):
+  def __init__(self, output_dim, emb_dim, hid_dim, n_layers, kernel_size, dropout, pad_idx, device, embedder=None, max_seq_len=100,
+               score_fn=torch.softmax, scaling_energy=False, multi_head=False, d_keys_values=64, n_steps_ahead=3):
+    super().__init__()
+    self.scale = torch.sqrt(torch.FloatTensor([0.5])).to(device)
+    self.dropout = nn.Dropout(dropout)
+    self.n_steps_ahead = n_steps_ahead
+
+    self.embedder = css.DecoderEmbedder(output_dim, emb_dim, max_seq_len, dropout, device) if embedder is None else embedder
+
+    self.emb2hid = nn.Linear(emb_dim, hid_dim)
+    self.decoders = nn.ModuleList([css.DecoderBlock(hid_dim, emb_dim, kernel_size, pad_idx, dropout, device, score_fn=score_fn,
+                                                    scaling_energy=scaling_energy, multi_head=multi_head, d_keys_values=d_keys_values)
+                                                      for _ in range(n_layers)])
+    self.hid2emb = nn.Linear(hid_dim, emb_dim)
+
+    self.out = nn.Linear(emb_dim, n_steps_ahead * output_dim)
+  
+  def forward(self, x, encoder_conved, encoder_combined):
+    embedded = self.embedder(x)  # [batch_size, seq_len, emb_dim]
+    conv_in = self.emb2hid(embedded)  # [batch_size, seq_len, hid_dim]
+    conv_in = conv_in.permute(0, 2, 1)  # prepare for convolution layers
+
+    for decoder in self.decoders:
+      attention, conv_in = decoder(embedded, conv_in, encoder_conved, encoder_combined)
+
+    conved = conv_in.permute(0, 2, 1)  # [batch_size, seq_len, hid_dim]
+    conved = self.hid2emb(conved)  # [batch_size, seq_len, emb_dim]
+    output = self.out(self.dropout(conved))  # [batch_size, seq_len, output_dim]
+    return output.split(self.n_steps_ahead, dim=-1), attention
 
 
 if __name__ == "__main__":
