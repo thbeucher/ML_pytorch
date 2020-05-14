@@ -240,7 +240,8 @@ class NgramsTrainer2(ConvnetTrainer):
     wav2vec_model.eval()
     super().__init__(logfile=logfile, save_name_model=save_name_model, metadata_file=metadata_file, encoding_fn=encoding_fn,
                      multi_head=multi_head, slice_fn=slice_fn, scorer=scorer, batch_size=batch_size, convnet_config=convnet_config,
-                     wav2vec_model=wav2vec_model, save_features=save_features)
+                     wav2vec_model=wav2vec_model, save_features=save_features, lr=1e-5, decay_factor=0)
+    u.load_model(self.model, self.save_name_model, restore_only_similars=True)
 
 
 class NgramsTrainer3(ConvnetTrainer):
@@ -309,7 +310,7 @@ class NgramsTrainer6(ConvnetTrainer):
     super().__init__(logfile=logfile, save_name_model=save_name_model, metadata_file=metadata_file, encoding_fn=encoding_fn,
                      multi_head=multi_head, slice_fn=slice_fn, n_fft=n_fft, hop_length=hop_length, scorer=scorer,
                      batch_size=batch_size, convnet_config=convnet_config)
-    u.load_model(self.model, 'convnet/ngrams_convnet_experiment_051.pt', restore_only_similars=True)
+    u.load_model(self.model, 'convnet/ngrams_convnet_experiment6.pt', restore_only_similars=True)
     self.train_pass = self.beam_decoding_training
 
 

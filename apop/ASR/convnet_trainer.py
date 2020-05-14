@@ -229,12 +229,13 @@ class ConvnetTrainer(object):
     return losses / len(self.train_data_loader), accs
 
   @torch.no_grad()
-  def dump_predictions(self, save_name='_convnet_preds_results.json'):
+  def dump_predictions(self, save_name='_convnet_preds_results.json', data_loader=None):
+    data_loader = self.test_data_loader if data_loader is None else data_loader
     u.load_model(self.model, self.save_name_model, restore_only_similars=True)
     self.model.eval()
 
     targets, predictions, greedy_predictions = [], [], []
-    for enc_in, dec_in in tqdm(self.test_data_loader):
+    for enc_in, dec_in in tqdm(data_loader):
       enc_in, dec_in = enc_in.to(self.device), dec_in.to(self.device)
       preds, _ = self.model(enc_in, dec_in[:, :-1])
       greedy_preds, _ = self.model.greedy_decoding(enc_in, self.sos_idx, self.eos_idx, max_seq_len=dec_in.shape[1])

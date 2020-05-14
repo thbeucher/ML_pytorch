@@ -64,6 +64,7 @@ import utils as u
 import models.conv_seqseq as css
 
 from data import Data
+from custom_exp import TextEmbedder
 from convnet_trainer import ConvnetTrainer
 from models.transformer.decoder import Decoder
 from models.transformer.transformer import Transformer
@@ -536,38 +537,6 @@ def init_transformer2(model, emb_dim, vocab_size):
       elif isinstance(p, nn.Embedding):
         e = (2 / (emb_dim + vocab_size)) ** 0.5
         nn.init.uniform_(p, a=-e, b=e)
-
-
-class NstepsAheadDecoder(nn.Module):
-  def __init__(self, output_dim, emb_dim, hid_dim, n_layers, kernel_size, dropout, pad_idx, device, embedder=None, max_seq_len=100,
-               score_fn=torch.softmax, scaling_energy=False, multi_head=False, d_keys_values=64, n_steps_ahead=3):
-    super().__init__()
-    self.scale = torch.sqrt(torch.FloatTensor([0.5])).to(device)
-    self.dropout = nn.Dropout(dropout)
-    self.n_steps_ahead = n_steps_ahead
-
-    self.embedder = css.DecoderEmbedder(output_dim, emb_dim, max_seq_len, dropout, device) if embedder is None else embedder
-
-    self.emb2hid = nn.Linear(emb_dim, hid_dim)
-    self.decoders = nn.ModuleList([css.DecoderBlock(hid_dim, emb_dim, kernel_size, pad_idx, dropout, device, score_fn=score_fn,
-                                                    scaling_energy=scaling_energy, multi_head=multi_head, d_keys_values=d_keys_values)
-                                                      for _ in range(n_layers)])
-    self.hid2emb = nn.Linear(hid_dim, emb_dim)
-
-    self.out = nn.Linear(emb_dim, n_steps_ahead * output_dim)
-  
-  def forward(self, x, encoder_conved, encoder_combined):
-    embedded = self.embedder(x)  # [batch_size, seq_len, emb_dim]
-    conv_in = self.emb2hid(embedded)  # [batch_size, seq_len, hid_dim]
-    conv_in = conv_in.permute(0, 2, 1)  # prepare for convolution layers
-
-    for decoder in self.decoders:
-      attention, conv_in = decoder(embedded, conv_in, encoder_conved, encoder_combined)
-
-    conved = conv_in.permute(0, 2, 1)  # [batch_size, seq_len, hid_dim]
-    conved = self.hid2emb(conved)  # [batch_size, seq_len, emb_dim]
-    output = self.out(self.dropout(conved))  # [batch_size, seq_len, output_dim]
-    return output.split(self.n_steps_ahead, dim=-1), attention
 
 
 if __name__ == "__main__":
