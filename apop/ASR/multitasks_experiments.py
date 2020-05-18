@@ -20,6 +20,7 @@ import utils as u
 
 from data import Data
 from ngrams_experiments import multigrams_encoding
+from optimizer import CosineAnnealingWarmUpRestarts
 from models.divers_models import TextEmbedder, Seq2Seq, Seq2SeqReview, ConvLayer
 
 
@@ -219,7 +220,7 @@ class STTTrainer(object):
                train_folder='../../../datasets/openslr/LibriSpeech/train-clean-100/', lr=1e-4, batch_size=8, scores_step=5,
                test_folder='../../../datasets/openslr/LibriSpeech/test-clean/', scorer=Data.compute_scores, eval_step=10,
                save_name_model='convnet/stt_trainer.pt', smoothing_eps=0.1, n_epochs=500, load_model=True,
-               encoding_fn=multigrams_encoding, block_type='self_attn'):
+               encoding_fn=multigrams_encoding, block_type='self_attn', lr_scheduling=False):
     logging.basicConfig(filename=logfile, filemode='a', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') if device is None else device
     self.train_folder = train_folder
@@ -234,6 +235,7 @@ class STTTrainer(object):
     self.n_epochs = n_epochs
     self.encoding_fn = encoding_fn
     self.block_type = block_type
+    self.lr_scheduling = lr_scheduling
 
     self.set_wav2vec()
     self.set_data()
@@ -248,6 +250,9 @@ class STTTrainer(object):
 
     self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
     self.criterion = u.CrossEntropyLoss(self.pad_idx)
+
+    if lr_scheduling:
+      self.lr_scheduler = CosineAnnealingWarmUpRestarts(self.optimizer, T_0=150, T_mult=1, eta_max=1e-3, T_up=10, gamma=0.5)
 
     if load_model:
       u.load_model(self.model, self.save_name_model, restore_only_similars=True)
@@ -294,6 +299,9 @@ class STTTrainer(object):
       logging.info(f"Epoch {epoch} | test_loss = {eval_loss:.3f} | {' | '.join([f'{k} = {v:.3f}' for k, v in accs.items()])}")
 
       oea = accs['preds_acc'] if 'preds_acc' in accs else accs.get('word_accuracy', None)
+
+      if self.lr_scheduling:
+        self.lr_scheduler.step()
 
       if oea is not None and oea > eval_accuracy_memory:
         logging.info(f'Save model with eval_accuracy = {oea:.3f}')
@@ -765,6 +773,19 @@ class STTTrainer4(STTTrainer):
   def __init__(self, logfile='_logs/_logs_sttTrainer4.txt'):
     super().__init__(logfile=logfile, save_name_model='convnet/stt_trainer4.pt', encoding_fn=Data.letters_encoding,
                      metadata_file='_Data_metadata_letters_wav2vec.pk', block_type='dilated', batch_size=32)
+  
+  def instanciate_model(self, emb_dim=50, d_model=512, n_heads=8, enc_d_ff=2048, dec_d_ff=1024, kernel_size=3, n_blocks=6):
+    self.output_dim = len(self.data.idx_to_tokens)
+    self.n_step_aheads = 1
+    return Seq2Seq(self.output_dim, self.data.n_signal_feats, emb_dim, d_model, n_heads, enc_d_ff, dec_d_ff, kernel_size, n_blocks,
+                   self.data.max_signal_len, self.data.max_source_len, dropout=0., n_step_aheads=self.n_step_aheads,
+                   enc_block_type=self.block_type, dec_block_type=self.block_type).to(self.device)
+
+
+class STTTrainer5(STTTrainer):
+  def __init__(self, logfile='_logs/_logs_sttTrainer5.txt'):
+    super().__init__(logfile=logfile, save_name_model='convnet/stt_trainer5.pt', encoding_fn=Data.letters_encoding,
+                     metadata_file='_Data_metadata_letters_wav2vec.pk', block_type='dilated', batch_size=32, lr_scheduling=True)
   
   def instanciate_model(self, emb_dim=50, d_model=512, n_heads=8, enc_d_ff=2048, dec_d_ff=1024, kernel_size=3, n_blocks=6):
     self.output_dim = len(self.data.idx_to_tokens)

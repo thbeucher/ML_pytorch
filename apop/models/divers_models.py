@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from transformer.attention import MultiHeadAttention
+from attention import MultiHeadAttention
 
 
 class PositionalEncoding(nn.Module):
