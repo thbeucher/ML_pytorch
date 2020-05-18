@@ -129,6 +129,46 @@ def ngrams_encoding(source, letters, bigrams, trigrams, vocab_words):
   return [i for _, i in encoded]
 
 
+def encode_words_letters(source, letters, words_to_idx):
+  words = [e for el in [[w] + [' '] for w in source.split()] for e in el][:-1]
+  # encode space
+  encoded = [(w, letters[' ']) if w == ' ' else w for w in words]
+  # encode words present in vocab_words
+  encoded = [(w, words_to_idx[w]) if not isinstance(w, tuple) and w in words_to_idx else w for w in encoded]
+  # encode letters
+  encoded_tmp = []
+  for el in encoded:
+    if isinstance(el, tuple):
+      encoded_tmp.append(el)
+    else:
+      encoded_tmp += [(l, letters[l]) for l in el]
+  encoded = encoded_tmp
+  return [i for _, i in encoded]
+
+
+def words_letters_encoding(sources, sos_tok='<sos>', eos_tok='<eos>', pad_tok='<pad>', n_words=5000):
+  sources = [s.lower() for s in sources]
+
+  letters = list(sorted(set([l for s in sources for l in s])))
+  letters = [sos_tok, eos_tok, pad_tok] + letters
+
+  words = [w for s in sources for w in s.split()]
+  words = sorted([w for w, c in Counter(words).most_common(n_words+50) if w not in letters])[:n_words]
+
+  letters_to_idx = {l: i for i, l in enumerate(letters)}
+  words_to_idx = {w: i + len(letters) for i, w in enumerate(words)}
+
+  print('words & letters encoding...')
+  sources_encoded = [encode_words_letters(s, letters_to_idx, words_to_idx) for s in tqdm(sources)]
+
+  wordsletters_to_idx = {**letters_to_idx, **words_to_idx}
+  idx_to_wordsletters = [k for k in wordsletters_to_idx]
+
+  sources_encoded = [[wordsletters_to_idx[sos_tok]] + se + [wordsletters_to_idx[eos_tok]] for se in sources_encoded]
+  
+  return sources_encoded, idx_to_wordsletters, wordsletters_to_idx
+
+
 def multigrams_encoding(sources, sos_tok='<sos>', eos_tok='<eos>', pad_tok='<pad>'):
   sources = [s.lower() for s in sources]
 
@@ -328,6 +368,21 @@ class NgramsTrainer7(ConvnetTrainer):
                      wav2vec_model=wav2vec_model, save_features=save_features, lr=1e-5)
     u.load_model(self.model, 'convnet/ngrams_convnet_experiment2.pt', restore_only_similars=True)
     self.train_pass = self.beam_decoding_training
+
+
+class NgramsTrainer8(ConvnetTrainer):
+  def __init__(self, logfile='_logs/_logs_ngramsEXP8.txt', save_name_model='convnet/ngrams_convnet_experiment8.pt',
+               metadata_file='_Data_metadata_wordsLetters_wav2vec.pk', encoding_fn=words_letters_encoding, multi_head=True,
+               slice_fn=Data.wav2vec_extraction, scorer=Data.compute_scores, batch_size=8, save_features=True):
+    convnet_config = {'emb_dim': 384, 'hid_dim': 512}
+    cp = torch.load('wav2vec_large.pt')
+    wav2vec_model = Wav2VecModel.build_model(cp['args'], task=None)
+    wav2vec_model.load_state_dict(cp['model'])
+    wav2vec_model.eval()
+    super().__init__(logfile=logfile, save_name_model=save_name_model, metadata_file=metadata_file, encoding_fn=encoding_fn,
+                     multi_head=multi_head, slice_fn=slice_fn, scorer=scorer, batch_size=batch_size, convnet_config=convnet_config,
+                     wav2vec_model=wav2vec_model, save_features=save_features, lr=1e-4, decay_factor=0)
+    u.load_model(self.model, self.save_name_model, restore_only_similars=True)
 
 
 class CustomDataset(Dataset):
@@ -665,6 +720,9 @@ class MultigramsGame(object):
       logging.info('\n'.join(to_dump))
     
     return action_losses, ce_losses, accs
+  
+  def oracle_train(self):
+    pass
 
 
 if __name__ == "__main__":
@@ -682,11 +740,5 @@ if __name__ == "__main__":
 
   # analyze()
 
-  # nt = NgramsTrainer()
-  # nt.train()
-
   # mg = MultigramsGame()
   # mg.train()
-
-  # nt = NgramsTrainer2()
-  # nt.train()

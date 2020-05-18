@@ -23,6 +23,7 @@ def fix_logfile(filename):
 
 
 def get_train_test_epoch_acc(filename, read_from_new=True):
+  print(f'Handle {filename}')
   with open(filename, 'r') as f:
     data = f.read().splitlines()
   
@@ -33,9 +34,12 @@ def get_train_test_epoch_acc(filename, read_from_new=True):
                         for el in train_lines]
     train_epoch_acc = train_epoch_acc[[i for i, (e, acc) in enumerate(train_epoch_acc) if e == 0][-1]:]
 
-    test_lines = [el for el in data if 'test_' in el and not 'None' in el and '_acc' in el]
-    test_epoch_acc = [(int(el.split(' | ')[0].split('Epoch ')[-1]), round(float(el.split('| word_accuracy = ')[-1].split(' | ')[0]), 3))
+    test_lines = [el for el in data if 'test_' in el and not 'None' in el and 'greedy_word_accuracy' in el]
+    test_epoch_acc = [(int(el.split(' | ')[0].split('Epoch ')[-1]), round(float(el.split(' = ')[-1]), 3))
                         for el in test_lines]
+    # test_lines = [el for el in data if 'test_' in el and not 'None' in el and 'accuracy' in el]
+    # test_epoch_acc = [(int(el.split(' | ')[0].split('Epoch ')[-1]), round(float(el.split('| word_accuracy = ')[-1].split(' | ')[0]), 3))
+    #                     for el in test_lines]
     test_epoch_acc = test_epoch_acc[[i for i, (e, acc) in enumerate(test_epoch_acc) if e == 0][-1]:]
   else:
     # READ _OLD_LOGS/ from convnet_experiments and convnet_experiment_feedback

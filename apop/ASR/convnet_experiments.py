@@ -3,13 +3,17 @@ import re
 import sys
 import torch
 import random
+import logging
 import numpy as np
+
+from tqdm import tqdm
+from fairseq.models.wav2vec import Wav2VecModel
+
+sys.path.append(os.path.abspath(__file__).replace('ASR/convnet_experiments.py', ''))
+import utils as u
 
 from data import Data
 from convnet_trainer import ConvnetTrainer
-
-sys.path.append(os.path.abspath(__file__).replace('ASR/data.py', ''))
-import utils as u
 
 
 ## STATUS = FAILURE
@@ -157,6 +161,57 @@ class Experiment28(ConvnetTrainer):
                metadata_file='_Data_metadata_bigrams_mfcc0128.pk', encoding_fn=Data.ngrams_encoding):
     super().__init__(logfile=logfile, save_name_model=save_name_model, slice_fn=slice_fn, batch_size=batch_size, n_fft=n_fft,
                      hop_length=hop_length, scorer=scorer, multi_head=multi_head, metadata_file=metadata_file, encoding_fn=encoding_fn)
+
+
+class Experiment29(ConvnetTrainer):
+  '''Convnet letters prediction, adam, CrossEntropy loss, wav2letter, MultiHead'''
+  def __init__(self, logfile='_logs/_logs_experiment29.txt', save_name_model='convnet/convnet_experiment29.pt', batch_size=8,
+               slice_fn=Data.wav2vec_extraction, scorer=Data.compute_scores, multi_head=True, decay_factor=0,
+               metadata_file='_Data_metadata_letters_wav2vec.pk'):
+    convnet_config = {'emb_dim': 384, 'hid_dim': 512}
+    cp = torch.load('wav2vec_large.pt')
+    wav2vec_model = Wav2VecModel.build_model(cp['args'], task=None)
+    wav2vec_model.load_state_dict(cp['model'])
+    wav2vec_model.eval()
+    super().__init__(logfile=logfile, save_name_model=save_name_model, slice_fn=slice_fn, batch_size=batch_size,
+                     scorer=scorer, multi_head=multi_head, metadata_file=metadata_file, convnet_config=convnet_config,
+                     wav2vec_model=wav2vec_model, save_features=True, decay_factor=decay_factor)
+
+
+class Experiment30(ConvnetTrainer):
+  '''Convnet letters prediction, adam, CrossEntropy loss, wav2letter, MultiHead'''
+  def __init__(self, logfile='_logs/_logs_experiment29bigLR.txt', save_name_model='convnet/convnet_experiment29bigLR.pt', batch_size=8,
+               slice_fn=Data.wav2vec_extraction, scorer=Data.compute_scores, multi_head=True, decay_factor=0,
+               metadata_file='_Data_metadata_letters_wav2vec.pk'):
+    convnet_config = {'emb_dim': 384, 'hid_dim': 512}
+    cp = torch.load('wav2vec_large.pt')
+    wav2vec_model = Wav2VecModel.build_model(cp['args'], task=None)
+    wav2vec_model.load_state_dict(cp['model'])
+    wav2vec_model.eval()
+    super().__init__(logfile=logfile, save_name_model=save_name_model, slice_fn=slice_fn, batch_size=batch_size,
+                     scorer=scorer, multi_head=multi_head, metadata_file=metadata_file, convnet_config=convnet_config,
+                     wav2vec_model=wav2vec_model, save_features=True, decay_factor=decay_factor, lr=5e-4)
+    self.lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, 500, eta_min=0, last_epoch=-1)
+    u.load_model(self.model, self.save_name_model, restore_only_similars=True)
+  
+  def train(self):
+    print('Start Training...')
+    eval_accuracy_memory = 0
+    for epoch in tqdm(range(self.n_epochs)):
+      epoch_loss, accs = self.train_pass(only_loss=epoch % self.scores_step != 0)
+      logging.info(f"Epoch {epoch} | train_loss = {epoch_loss:.3f} | {' | '.join([f'{k} = {v:.3f}' for k, v in accs.items()])}")
+      eval_loss, accs = self.evaluation(scores=epoch % self.scores_step == 0, greedy_scores=epoch % self.eval_step ==0)
+      logging.info(f"Epoch {epoch} | test_loss = {eval_loss:.3f} | {' | '.join([f'{k} = {v:.3f}' for k, v in accs.items()])}")
+
+      oea = accs['preds_acc'] if 'preds_acc' in accs else accs.get('word_accuracy', None)
+
+      self.criterion.step(999 if self.decay_factor == 0 else epoch)
+      self.lr_scheduler.step()
+
+      if oea is not None and oea > eval_accuracy_memory:
+        logging.info(f'Save model with eval_accuracy = {oea:.3f}')
+        u.save_checkpoint(self.model, None, self.save_name_model)
+        eval_accuracy_memory = oea
 
 
 if __name__ == "__main__":
