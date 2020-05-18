@@ -71,25 +71,30 @@ class ConvDepthPointWiseBlock(nn.Module):
 
 class ConvLayer(nn.Module):
   def __init__(self, n_input_feats, d_model, n_heads, d_ff, kernel_size, n_blocks, embedder, dropout=0., only_see_past=True,
-               full_att=False, block_type='self_attn'):
+               full_att=False, block_type='self_attn', n_blocks_strided=None, residual=True):
     super().__init__()
+    n_blocks_strided = n_blocks // 2 if n_blocks_strided is None else n_blocks_strided
+    strides = [2 if i < n_blocks_strided else 1 for i in range(n_blocks)]
+    self.residual = residual
     self.embedder = embedder
     self.input_proj = nn.Sequential(nn.Linear(n_input_feats, d_model), nn.ReLU(inplace=True), nn.LayerNorm(d_model))
     self.block_type = ConvSelfAttnBlock if block_type == 'self_attn' else ConvMultipleDilationBlock
     self.blocks = nn.ModuleList([self.block_type(d_model, n_heads, kernel_size, d_ff, dropout=dropout, only_see_past=only_see_past,
-                                                 self_attn=True if i % 2 == 0 or full_att else False)
-                                    for i in range(n_blocks)])
+                                                 self_attn=True if i % 2 == 0 or full_att else False, stride=s)
+                                    for i, s in enumerate(strides)])
   
   def forward(self, x, y=None):
     x = self.embedder(x)
     x = self.input_proj(x)
     for block in self.blocks:
-      x = block(x, y=y)
+      out = block(x, y=y)
+      if self.residual and out.shape == x.shape:
+        x = x + out
     return x
 
 
 class ConvSelfAttnBlock(nn.Module):
-  def __init__(self, d_model, n_heads, kernel_size, d_ff, dropout=0., only_see_past=True, self_attn=True):
+  def __init__(self, d_model, n_heads, kernel_size, d_ff, dropout=0., only_see_past=True, self_attn=True, **kwargs):
     super().__init__()
     self.kernel_size = kernel_size
     self.only_see_past = only_see_past

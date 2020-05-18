@@ -737,10 +737,9 @@ class STTTrainer2(STTTrainer):
       self.optimizer.zero_grad()
 
       current_loss = self.criterion(preds.reshape(-1, preds.shape[-1]), dec_in[:, 1:].reshape(-1), epsilon=self.smoothing_eps)
-      l1_loss = u.l1_regularization(self.model, _lambda=0.5, device=self.device)
+      current_loss += u.l1_regularization(self.model, _lambda=0.01, device=self.device)
 
       current_loss.backward()
-      l1_loss.backward()
 
       self.optimizer.step()
 
@@ -784,7 +783,7 @@ class STTTrainer4(STTTrainer):
 
 class STTTrainer5(STTTrainer):
   def __init__(self, logfile='_logs/_logs_sttTrainer5.txt'):
-    super().__init__(logfile=logfile, save_name_model='convnet/stt_trainer5.pt', encoding_fn=Data.letters_encoding,
+    super().__init__(logfile=logfile, save_name_model='convnet/stt_trainer5.pt', encoding_fn=Data.letters_encoding, lr=1e-6,
                      metadata_file='_Data_metadata_letters_wav2vec.pk', block_type='dilated', batch_size=32, lr_scheduling=True)
   
   def instanciate_model(self, emb_dim=50, d_model=512, n_heads=8, enc_d_ff=2048, dec_d_ff=1024, kernel_size=3, n_blocks=6):
