@@ -285,7 +285,7 @@ class STTTrainer(object):
   def instanciate_model(self, emb_dim=50, d_model=256, n_heads=4, d_ff=512, kernel_size=3, n_blocks=6):
     self.output_dim = len(self.data.idx_to_tokens)
     self.n_step_aheads = 1
-    return Seq2Seq(self.output_dim, self.data.n_signal_feats, emb_dim, d_model, n_heads, d_ff, d_ff, kernel_size, n_blocks,
+    return Seq2Seq(self.output_dim, self.data.n_signal_feats, emb_dim, d_model, n_heads, d_ff, d_ff, kernel_size, n_blocks, n_blocks,
                    self.data.max_signal_len, self.data.max_source_len, dropout=0., n_step_aheads=self.n_step_aheads,
                    enc_block_type=self.block_type, dec_block_type=self.block_type).to(self.device)
 
@@ -764,7 +764,7 @@ class STTTrainer3(STTTrainer):
     self.output_dim = len(self.data.idx_to_tokens)
     self.n_step_aheads = 1
     return Seq2Seq(self.output_dim, self.data.n_signal_feats, emb_dim, d_model, n_heads, enc_d_ff, dec_d_ff, kernel_size, n_blocks,
-                   self.data.max_signal_len, self.data.max_source_len, dropout=0., n_step_aheads=self.n_step_aheads,
+                   n_blocks, self.data.max_signal_len, self.data.max_source_len, dropout=0., n_step_aheads=self.n_step_aheads,
                    enc_block_type=self.block_type).to(self.device)
 
 
@@ -773,12 +773,13 @@ class STTTrainer4(STTTrainer):
     super().__init__(logfile=logfile, save_name_model='convnet/stt_trainer4.pt', encoding_fn=Data.letters_encoding,
                      metadata_file='_Data_metadata_letters_wav2vec.pk', block_type='dilated', batch_size=32)
   
-  def instanciate_model(self, emb_dim=50, d_model=512, n_heads=8, enc_d_ff=2048, dec_d_ff=1024, kernel_size=3, n_blocks=6):
+  def instanciate_model(self, emb_dim=50, d_model=512, n_heads=8, enc_d_ff=768, dec_d_ff=768, kernel_size=3, enc_n_blocks=6,
+                        dec_n_blocks=6):
     self.output_dim = len(self.data.idx_to_tokens)
     self.n_step_aheads = 1
-    return Seq2Seq(self.output_dim, self.data.n_signal_feats, emb_dim, d_model, n_heads, enc_d_ff, dec_d_ff, kernel_size, n_blocks,
-                   self.data.max_signal_len, self.data.max_source_len, dropout=0., n_step_aheads=self.n_step_aheads,
-                   enc_block_type=self.block_type, dec_block_type=self.block_type).to(self.device)
+    return Seq2Seq(self.output_dim, self.data.n_signal_feats, emb_dim, d_model, n_heads, enc_d_ff, dec_d_ff, kernel_size, enc_n_blocks,
+                   dec_n_blocks, self.data.max_signal_len, self.data.max_source_len, dropout=0., n_step_aheads=self.n_step_aheads,
+                   enc_block_type=self.block_type, dec_block_type=self.block_type, decoder_layer='decoding_conv_layer').to(self.device)
 
 
 class STTTrainer5(STTTrainer):
@@ -786,11 +787,12 @@ class STTTrainer5(STTTrainer):
     super().__init__(logfile=logfile, save_name_model='convnet/stt_trainer5.pt', encoding_fn=Data.letters_encoding, lr=1e-6,
                      metadata_file='_Data_metadata_letters_wav2vec.pk', block_type='dilated', batch_size=32, lr_scheduling=True)
   
-  def instanciate_model(self, emb_dim=50, d_model=512, n_heads=8, enc_d_ff=2048, dec_d_ff=1024, kernel_size=3, n_blocks=6):
+  def instanciate_model(self, emb_dim=50, d_model=512, n_heads=8, enc_d_ff=768, dec_d_ff=768, kernel_size=3, enc_n_blocks=6,
+                        dec_n_blocks=6):
     self.output_dim = len(self.data.idx_to_tokens)
     self.n_step_aheads = 1
-    return Seq2Seq(self.output_dim, self.data.n_signal_feats, emb_dim, d_model, n_heads, enc_d_ff, dec_d_ff, kernel_size, n_blocks,
-                   self.data.max_signal_len, self.data.max_source_len, dropout=0., n_step_aheads=self.n_step_aheads,
+    return Seq2Seq(self.output_dim, self.data.n_signal_feats, emb_dim, d_model, n_heads, enc_d_ff, dec_d_ff, kernel_size, enc_n_blocks,
+                   dec_n_blocks, self.data.max_signal_len, self.data.max_source_len, dropout=0., n_step_aheads=self.n_step_aheads,
                    enc_block_type=self.block_type, dec_block_type=self.block_type).to(self.device)
 
 

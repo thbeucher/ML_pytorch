@@ -1,8 +1,11 @@
+import os
+import sys
 import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+sys.path.append(os.path.abspath(__file__).replace('divers_models.py', 'transformer/'))
 from attention import MultiHeadAttention
 
 
@@ -88,8 +91,32 @@ class ConvLayer(nn.Module):
     x = self.input_proj(x)
     for block in self.blocks:
       out = block(x, y=y)
-      if self.residual and out.shape == x.shape:
-        x = x + out
+      x = x + out if self.residual and out.shape == x.shape else out
+    return x
+
+
+class DecodingConvLayer(nn.Module):
+  def __init__(self, n_input_feats, d_model, n_heads, d_ff, kernel_size, n_blocks, embedder, dropout=0., only_see_past=True,
+               full_att=False, n_blocks_strided=None, residual=True, **kwargs):
+    super().__init__()
+    n_blocks_strided = n_blocks // 2 if n_blocks_strided is None else n_blocks_strided
+    strides = [2 if i < n_blocks_strided else 1 for i in range(n_blocks)]
+    self.residual = residual
+    self.embedder = embedder
+    self.input_proj = nn.Sequential(nn.Linear(n_input_feats, d_model), nn.ReLU(inplace=True), nn.LayerNorm(d_model))
+    self.blocks = nn.ModuleList([ConvMultipleDilationBlock(d_model, n_heads, kernel_size, d_ff, dropout=dropout, only_see_past=only_see_past,
+                                                           self_attn=True if i % 2 == 0 or full_att else False, stride=s)
+                                    for i, s in enumerate(strides)])
+    self.attn = MultiHeadAttention(d_model, d_model // n_heads, d_model // n_heads, n_heads, dropout=dropout)
+  
+  def forward(self, x, y):
+    x = self.embedder(x)
+    x = self.input_proj(x)
+    attn = self.attn(x, y, y)
+    for i, block in enumerate(self.blocks):
+      out = block(x)
+      out = out if i < len(self.blocks) // 3 else out + attn
+      x = x + out if self.residual and out.shape == x.shape else out
     return x
 
 
@@ -125,7 +152,7 @@ class ConvSelfAttnBlock(nn.Module):
 
     if self.self_attn:
       if y is not None:
-        self_attn = self.attn_norm(self.attn(conved, y, y, mask=futur_mask))
+        self_attn = self.attn_norm(self.attn(conved, y, y))
       else:
         self_attn = self.attn_norm(self.attn(conved, conved, conved, mask=futur_mask))
 
@@ -173,17 +200,22 @@ class ConvStackedDilationBlock(nn.Module):
 
 
 class Seq2Seq(nn.Module):
-  def __init__(self, output_dim, enc_emb_dim, dec_emb_dim, d_model, n_heads, enc_d_ff, dec_d_ff, kernel_size, n_blocks,
-               enc_max_seq_len, dec_max_seq_len, dropout=0., n_step_aheads=1, enc_block_type='self_attn', dec_block_type='self_attn'):
+  def __init__(self, output_dim, enc_emb_dim, dec_emb_dim, d_model, n_heads, enc_d_ff, dec_d_ff, kernel_size, enc_n_blocks, dec_n_blocks,
+               enc_max_seq_len, dec_max_seq_len, dropout=0., n_step_aheads=1, enc_block_type='self_attn', dec_block_type='self_attn',
+               decoder_layer='conv_layer'):
     super().__init__()
     self.n_step_aheads = n_step_aheads
     pos_emb = PositionalEncoding(enc_emb_dim, dropout=dropout, max_len=enc_max_seq_len)
     embedder = TextEmbedder(output_dim, emb_dim=dec_emb_dim, max_seq_len=dec_max_seq_len)
     # self.encoder = ConvDepthPointWise(pos_emb, out_size=d_model, repeat=5, kernels=[3, 5, 9, 15, 21, 33])
-    self.encoder = ConvLayer(enc_emb_dim, d_model, n_heads, enc_d_ff, kernel_size, n_blocks, pos_emb, dropout=dropout,
+    self.encoder = ConvLayer(enc_emb_dim, d_model, n_heads, enc_d_ff, kernel_size, enc_n_blocks, pos_emb, dropout=dropout,
                              only_see_past=False, block_type=enc_block_type)
-    self.decoder = ConvLayer(dec_emb_dim, d_model, n_heads, dec_d_ff, kernel_size, n_blocks, embedder, dropout=dropout,
-                             only_see_past=True, block_type=dec_block_type)
+    if decoder_layer == 'conv_layer':
+      self.decoder = ConvLayer(dec_emb_dim, d_model, n_heads, dec_d_ff, kernel_size, dec_n_blocks, embedder, dropout=dropout,
+                              only_see_past=True, block_type=dec_block_type)
+    else:
+      self.decoder = DecodingConvLayer(dec_emb_dim, d_model, n_heads, dec_d_ff, kernel_size, dec_n_blocks, embedder, dropout=dropout,
+                                       only_see_past=True, block_type=dec_block_type)
     self.output_proj = nn.Linear(d_model, n_step_aheads*output_dim)
   
   def forward(self, x, y):

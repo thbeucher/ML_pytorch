@@ -190,8 +190,8 @@ class Experiment30(ConvnetTrainer):
     wav2vec_model.eval()
     super().__init__(logfile=logfile, save_name_model=save_name_model, slice_fn=slice_fn, batch_size=batch_size,
                      scorer=scorer, multi_head=multi_head, metadata_file=metadata_file, convnet_config=convnet_config,
-                     wav2vec_model=wav2vec_model, save_features=True, decay_factor=decay_factor, lr=5e-4)
-    self.lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, 500, eta_min=0, last_epoch=-1)
+                     wav2vec_model=wav2vec_model, save_features=True, decay_factor=decay_factor, lr=1e-4)
+    self.lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, 200, eta_min=1e-6, last_epoch=-1)
     u.load_model(self.model, self.save_name_model, restore_only_similars=True)
   
   def train(self):
