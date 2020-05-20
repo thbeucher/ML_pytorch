@@ -70,9 +70,6 @@ class CustomCollator(object):
     targets_batch = pad_sequence(targets, batch_first=True, padding_value=self.text_pad)
     input_lens = torch.LongTensor(input_lens)
     target_lens = torch.LongTensor(target_lens)
-    # targets_batch = torch.cat(targets).int() # Try for cuDNN version of CTC loss
-    # input_lens = torch.IntTensor(input_lens) # Try for cuDNN version of CTC loss
-    # target_lens = torch.IntTensor(target_lens) # Try for cuDNN version of CTC loss
     return inputs_batch, targets_batch, input_lens, target_lens
 
 
@@ -177,7 +174,6 @@ class CTCTrainer(object):
       losses += self.criterion(preds.permute(1, 0, 2).log_softmax(-1), targets, input_lens, target_lens).item()
 
       all_targets += targets.tolist()
-      # all_targets += [t.tolist() for t in targets.split(target_lens.tolist())]  # Try for cuDNN version of CTC loss
       all_preds += preds.argmax(dim=-1).tolist()
     
     self.model.train()
@@ -206,7 +202,6 @@ class CTCTrainer(object):
       self.optimizer.step()
 
       all_targets += targets.tolist()
-      # all_targets += [t.tolist() for t in targets.split(target_lens.tolist())]  # Try for cuDNN version of CTC loss
       all_preds += preds.argmax(dim=-1).tolist()
 
       losses += current_loss.item()
@@ -224,23 +219,12 @@ class CTCTrainer(object):
     return Data.compute_scores(targets=target_sentences, predictions=predicted_sentences, rec=False)
 
 
-def ddp_run(rank, world_size):
-  torch.distributed.init_process_group("nccl", rank=rank, world_size=world_size)
-  ctct = CTCTrainer()
-  ctct.model = nn.parallel.DistributedDataParallel(ctct.model, device_ids=[rank])
-  ctct.train()
-
-
 if __name__ == "__main__":
   ## SEEDING FOR REPRODUCIBILITY
   SEED = 42
   torch.manual_seed(SEED)
   np.random.seed(SEED)
   random.seed(SEED)
-
-  # world_size = 1
-  # torch.multiprocessing.spawn(ddp_run, args=(world_size,), nprocs=world_size, join=True)
-  # python -m torch.distributed.launch ctc_experiments.py
 
   ctct = CTCTrainer()
   ctct.train()
