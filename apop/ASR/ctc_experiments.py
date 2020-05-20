@@ -70,14 +70,17 @@ class CustomCollator(object):
     targets_batch = pad_sequence(targets, batch_first=True, padding_value=self.text_pad)
     input_lens = torch.LongTensor(input_lens)
     target_lens = torch.LongTensor(target_lens)
+    # targets_batch = torch.cat(targets).int() # Try for cuDNN version of CTC loss
+    # input_lens = torch.IntTensor(input_lens) # Try for cuDNN version of CTC loss
+    # target_lens = torch.IntTensor(target_lens) # Try for cuDNN version of CTC loss
     return inputs_batch, targets_batch, input_lens, target_lens
 
 
 class CTCTrainer(object):
   # ratios audio_len/text_len -> min = 4.75 | max = 9.29 | mean = 5.96
-  def __init__(self, device=None, logfile='_logs/_logs_CTC.txt', metadata_file='_Data_metadata_letters_wav2vec.pk', batch_size=32,
-               lr=1e-2, load_model=True, n_epochs=500, eval_step=5, config={}, save_name_model='convnet/ctc_convDilated.pt',
-               lr_scheduling=False):
+  def __init__(self, device=None, logfile='_logs/_logs_CTC.txt', metadata_file='_Data_metadata_letters_wav2vec.pk', batch_size=64,
+               lr=1e-4, load_model=True, n_epochs=500, eval_step=1, config={}, save_name_model='convnet/ctc_convDilated.pt',
+               lr_scheduling=True):
     logging.basicConfig(filename=logfile, filemode='a', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') if device is None else device
     self.batch_size = batch_size
@@ -102,7 +105,7 @@ class CTCTrainer(object):
     self.criterion = nn.CTCLoss()
 
     if self.lr_scheduling:
-      self.lr_scheduler = CosineAnnealingWarmUpRestarts(self.optimizer, T_0=150, T_mult=1, eta_max=1e-3, T_up=10, gamma=0.5)
+      self.lr_scheduler = CosineAnnealingWarmUpRestarts(self.optimizer, T_0=150, T_mult=1, eta_max=1e-2, T_up=10, gamma=0.5)
 
     if load_model:
       u.load_model(self.model, self.save_name_model, restore_only_similars=True)
@@ -174,6 +177,7 @@ class CTCTrainer(object):
       losses += self.criterion(preds.permute(1, 0, 2).log_softmax(-1), targets, input_lens, target_lens).item()
 
       all_targets += targets.tolist()
+      # all_targets += [t.tolist() for t in targets.split(target_lens.tolist())]  # Try for cuDNN version of CTC loss
       all_preds += preds.argmax(dim=-1).tolist()
     
     self.model.train()
@@ -202,6 +206,7 @@ class CTCTrainer(object):
       self.optimizer.step()
 
       all_targets += targets.tolist()
+      # all_targets += [t.tolist() for t in targets.split(target_lens.tolist())]  # Try for cuDNN version of CTC loss
       all_preds += preds.argmax(dim=-1).tolist()
 
       losses += current_loss.item()
