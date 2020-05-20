@@ -10,6 +10,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 
 from tqdm import tqdm
+from itertools import groupby
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset, DataLoader, Subset
 
@@ -75,13 +76,15 @@ class CustomCollator(object):
 class CTCTrainer(object):
   # ratios audio_len/text_len -> min = 4.75 | max = 9.29 | mean = 5.96
   def __init__(self, device=None, logfile='_logs/_logs_CTC.txt', metadata_file='_Data_metadata_letters_wav2vec.pk', batch_size=32,
-               lr=1e-5, load_model=True, n_epochs=500, eval_step=5, config={}, save_name_model='convnet/ctc_convDilated.pt'):
+               lr=1e-2, load_model=True, n_epochs=500, eval_step=5, config={}, save_name_model='convnet/ctc_convDilated.pt',
+               lr_scheduling=False):
     logging.basicConfig(filename=logfile, filemode='a', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') if device is None else device
     self.batch_size = batch_size
     self.n_epochs = n_epochs
     self.eval_step = eval_step
     self.save_name_model = save_name_model
+    self.lr_scheduling = lr_scheduling
 
     self.set_metadata(metadata_file)
     self.set_data_loader()
@@ -90,14 +93,16 @@ class CTCTrainer(object):
                    'kernel_size': 3, 'n_blocks': 6, 'n_blocks_strided': 2, 'dropout': 0.}
     self.config = {**self.config, **config}
     self.model = self.instanciate_model(**self.config)
+    self.model = nn.DataParallel(self.model)
 
     u.dump_dict(self.config, 'CTCModel PARAMETERS')
     logging.info(f'The model has {u.count_trainable_parameters(self.model):,} trainable parameters')
 
     self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
-    self.criterion = nn.CTCLoss(blank=self.tokens_to_idx['<blank>'])
+    self.criterion = nn.CTCLoss()
 
-    self.lr_scheduler = CosineAnnealingWarmUpRestarts(self.optimizer, T_0=150, T_mult=1, eta_max=1e-3, T_up=10, gamma=0.5)
+    if self.lr_scheduling:
+      self.lr_scheduler = CosineAnnealingWarmUpRestarts(self.optimizer, T_0=150, T_mult=1, eta_max=1e-3, T_up=10, gamma=0.5)
 
     if load_model:
       u.load_model(self.model, self.save_name_model, restore_only_similars=True)
@@ -106,11 +111,11 @@ class CTCTrainer(object):
     with open(metadata_file, 'rb') as f:
       data = pk.load(f)
 
-    self.idx_to_tokens = data['idx_to_tokens'] + ['<blank>']
-    self.tokens_to_idx = {**data['tokens_to_idx'], **{'<blank>': len(self.idx_to_tokens)-1}}
+    self.idx_to_tokens = ['<blank>'] + data['idx_to_tokens'][3:]
+    self.tokens_to_idx = {t: i for i, t in enumerate(self.idx_to_tokens)}
 
-    self.ids_to_encodedsources_train = data['ids_to_encodedsources_train']
-    self.ids_to_encodedsources_test = data['ids_to_encodedsources_test']
+    self.ids_to_encodedsources_train = {k: (np.array(v[1:-1])-2).tolist() for k, v in data['ids_to_encodedsources_train'].items()}
+    self.ids_to_encodedsources_test = {k: (np.array(v[1:-1])-2).tolist() for k, v in data['ids_to_encodedsources_test'].items()}
 
     self.ids_to_audiofile_train = data['ids_to_audiofile_train']
     self.ids_to_audiofile_test = data['ids_to_audiofile_test']
@@ -119,11 +124,11 @@ class CTCTrainer(object):
     train_dataset = CustomDataset(self.ids_to_audiofile_train, self.ids_to_encodedsources_train)
     test_dataset = CustomDataset(self.ids_to_audiofile_test, self.ids_to_encodedsources_test)
 
-    collator = CustomCollator(0, self.tokens_to_idx['<pad>'])
+    collator = CustomCollator(0, 0)
 
-    self.train_data_loader = DataLoader(train_dataset, batch_size=self.batch_size, num_workers=4, collate_fn=collator,
+    self.train_data_loader = DataLoader(train_dataset, batch_size=self.batch_size, num_workers=8, collate_fn=collator,
                                         shuffle=True, pin_memory=True)
-    self.test_data_loader = DataLoader(test_dataset, batch_size=self.batch_size, num_workers=4, collate_fn=collator,
+    self.test_data_loader = DataLoader(test_dataset, batch_size=self.batch_size, num_workers=8, collate_fn=collator,
                                        shuffle=True, pin_memory=True)
   
   def instanciate_model(self, output_dim=32, emb_dim=512, d_model=512, n_heads=8, d_ff=2048, kernel_size=3, n_blocks=10,
@@ -137,12 +142,13 @@ class CTCTrainer(object):
     for epoch in tqdm(range(self.n_epochs)):
       epoch_loss, accs = self.train_pass(only_loss=epoch % self.eval_step != 0)
       logging.info(f"Epoch {epoch} | train_loss = {epoch_loss:.3f} | {' | '.join([f'{k} = {v:.3f}' for k, v in accs.items()])}")
-      eval_loss, accs = self.evaluation(only_loss=epoch % self.eval_step == 0)
+      eval_loss, accs = self.evaluation(only_loss=epoch % self.eval_step != 0)
       logging.info(f"Epoch {epoch} | test_loss = {eval_loss:.3f} | {' | '.join([f'{k} = {v:.3f}' for k, v in accs.items()])}")
 
       oea = accs.get('word_accuracy', None)
 
-      self.lr_scheduler.step()
+      if self.lr_scheduling:
+        self.lr_scheduler.step()
 
       if oea is not None and oea > eval_accuracy_memory:
         logging.info(f'Save model with eval_accuracy = {oea:.3f}')
@@ -207,10 +213,17 @@ class CTCTrainer(object):
   
   @staticmethod
   def scorer(targets, predictions, idx_to_tokens, tokens_to_idx):
-    target_sentences = [''.join([idx_to_tokens[i] for i in t[1:t.index(tokens_to_idx['<eos>'])]]) for p in targets]
-    ignored_idxs = [tokens_to_idx['<sos>'], tokens_to_idx['<eos>'], tokens_to_idx['<pad>'], tokens_to_idx['<blank>']]
-    predicted_sentences = [''.join([idx_to_tokens[i] for i in p if i not in ignored_idxs]) for p in predictions]
+    target_sentences = [''.join([idx_to_tokens[i] for i in t[:t.index(0) if 0 in t else None]]) for t in targets]
+    predicted_sentences = [[i for i, _ in groupby(p)] for p in predictions]
+    predicted_sentences = [''.join([idx_to_tokens[i] for i in p if i != 0]) for p in predicted_sentences]
     return Data.compute_scores(targets=target_sentences, predictions=predicted_sentences, rec=False)
+
+
+def ddp_run(rank, world_size):
+  torch.distributed.init_process_group("nccl", rank=rank, world_size=world_size)
+  ctct = CTCTrainer()
+  ctct.model = nn.parallel.DistributedDataParallel(ctct.model, device_ids=[rank])
+  ctct.train()
 
 
 if __name__ == "__main__":
@@ -219,6 +232,10 @@ if __name__ == "__main__":
   torch.manual_seed(SEED)
   np.random.seed(SEED)
   random.seed(SEED)
+
+  # world_size = 1
+  # torch.multiprocessing.spawn(ddp_run, args=(world_size,), nprocs=world_size, join=True)
+  # python -m torch.distributed.launch ctc_experiments.py
 
   ctct = CTCTrainer()
   ctct.train()
