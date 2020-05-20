@@ -178,8 +178,12 @@ class ConvMultipleDilationBlock(nn.Module):
                                          nn.ReLU(inplace=True))
     self.conv4 = nn.Sequential(nn.Conv1d(d_model, d_model, kernel_size, stride=stride, dilation=dilations[3], padding=pad[3]),
                                          nn.ReLU(inplace=True))
-    self.feed_forward = nn.Sequential(nn.Linear(d_model if self.only_see_past else 4*d_model, d_ff), nn.ReLU(inplace=True),
-                                      nn.Linear(d_ff, d_model), nn.LayerNorm(d_model))
+    self.feed_forward = nn.Sequential(nn.Dropout(dropout),
+                                      nn.Linear(d_model if self.only_see_past else 4*d_model, d_ff),
+                                      nn.ReLU(inplace=True),
+                                      nn.Dropout(dropout),
+                                      nn.Linear(d_ff, d_model),
+                                      nn.LayerNorm(d_model))
   
   def forward(self, x, y=None):
     x = x.permute(0, 2, 1)

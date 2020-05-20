@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import torch
 import random
@@ -77,7 +78,7 @@ class CTCTrainer(object):
   # ratios audio_len/text_len -> min = 4.75 | max = 9.29 | mean = 5.96
   def __init__(self, device=None, logfile='_logs/_logs_CTC.txt', metadata_file='_Data_metadata_letters_wav2vec.pk', batch_size=64,
                lr=1e-4, load_model=True, n_epochs=500, eval_step=1, config={}, save_name_model='convnet/ctc_convDilated.pt',
-               lr_scheduling=True):
+               lr_scheduling=False):
     logging.basicConfig(filename=logfile, filemode='a', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') if device is None else device
     self.batch_size = batch_size
@@ -219,6 +220,17 @@ class CTCTrainer(object):
     return Data.compute_scores(targets=target_sentences, predictions=predicted_sentences, rec=False)
 
 
+class Experiment1(CTCTrainer):
+  def __init__(self, logfile='_logs/_logs_CTC.txt', dropout=0.25):
+    super().__init__(logfile=logfile, config={'dropout': dropout})
+
+
+class Experiment2(CTCTrainer):
+  def __init__(self, logfile='_logs/_logs_CTC2.txt', save_name_model='convnet/ctc_convDilated2.pt', dropout=0.25):
+    super().__init__(logfile=logfile, save_name_model=save_name_model, config={'dropout': dropout})
+    logging.info(self.model)
+
+
 if __name__ == "__main__":
   ## SEEDING FOR REPRODUCIBILITY
   SEED = 42
@@ -226,5 +238,8 @@ if __name__ == "__main__":
   np.random.seed(SEED)
   random.seed(SEED)
 
-  ctct = CTCTrainer()
-  ctct.train()
+  experiments = {k.replace('Experiment', ''): v for k, v in locals().items() if re.search(r'Experiment\d+', k) is not None}
+  
+  rep = input(f'Which Experiment do you want to start? ({",".join(experiments.keys())}): ')
+  exp = experiments[rep]()
+  exp.train()
