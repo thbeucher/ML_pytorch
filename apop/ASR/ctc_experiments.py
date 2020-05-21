@@ -24,11 +24,12 @@ from optimizer import CosineAnnealingWarmUpRestarts
 
 
 class CTCModel(nn.Module):
-  def __init__(self, output_dim, emb_dim, d_model, n_heads, d_ff, kernel_size, n_blocks, n_blocks_strided=None, dropout=0.):
+  def __init__(self, output_dim, emb_dim, d_model, n_heads, d_ff, kernel_size, n_blocks, n_blocks_strided=None, dropout=0.,
+               block_type='dilated'):
     super().__init__()
     embedder = lambda x: x
     self.net = ConvLayer(emb_dim, d_model, n_heads, d_ff, kernel_size, n_blocks, embedder, dropout=dropout,
-                         only_see_past=False, block_type='dilated', n_blocks_strided=n_blocks_strided)
+                         only_see_past=False, block_type=block_type, n_blocks_strided=n_blocks_strided)
     self.output_proj = nn.Linear(d_model, output_dim)
   
   def forward(self, x):
@@ -91,12 +92,13 @@ class CTCTrainer(object):
     self.set_data_loader()
 
     self.config = {'output_dim': len(self.idx_to_tokens), 'emb_dim': 512, 'd_model': 512, 'n_heads': 8, 'd_ff': 1024,
-                   'kernel_size': 3, 'n_blocks': 6, 'n_blocks_strided': 2, 'dropout': 0.}
+                   'kernel_size': 3, 'n_blocks': 6, 'n_blocks_strided': 2, 'dropout': 0., 'block_type': 'dilated'}
     self.config = {**self.config, **config}
     self.model = self.instanciate_model(**self.config)
     self.model = nn.DataParallel(self.model)
 
     u.dump_dict(self.config, 'CTCModel PARAMETERS')
+    logging.info(self.model)
     logging.info(f'The model has {u.count_trainable_parameters(self.model):,} trainable parameters')
 
     self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
@@ -127,15 +129,15 @@ class CTCTrainer(object):
 
     collator = CustomCollator(0, 0)
 
-    self.train_data_loader = DataLoader(train_dataset, batch_size=self.batch_size, num_workers=8, collate_fn=collator,
+    self.train_data_loader = DataLoader(train_dataset, batch_size=self.batch_size, num_workers=4, collate_fn=collator,
                                         shuffle=True, pin_memory=True)
-    self.test_data_loader = DataLoader(test_dataset, batch_size=self.batch_size, num_workers=8, collate_fn=collator,
+    self.test_data_loader = DataLoader(test_dataset, batch_size=self.batch_size, num_workers=4, collate_fn=collator,
                                        shuffle=True, pin_memory=True)
   
   def instanciate_model(self, output_dim=32, emb_dim=512, d_model=512, n_heads=8, d_ff=2048, kernel_size=3, n_blocks=10,
-                        n_blocks_strided=None, dropout=0.):
+                        n_blocks_strided=None, dropout=0., block_type='dilated'):
     return CTCModel(output_dim, emb_dim, d_model, n_heads, d_ff, kernel_size, n_blocks, n_blocks_strided=n_blocks_strided,
-                    dropout=dropout).to(self.device)
+                    dropout=dropout, block_type=block_type).to(self.device)
 
   def train(self):
     print('Start Training...')
@@ -228,7 +230,12 @@ class Experiment1(CTCTrainer):
 class Experiment2(CTCTrainer):
   def __init__(self, logfile='_logs/_logs_CTC2.txt', save_name_model='convnet/ctc_convDilated2.pt', dropout=0.25):
     super().__init__(logfile=logfile, save_name_model=save_name_model, config={'dropout': dropout})
-    logging.info(self.model)
+
+
+class Experiment3(CTCTrainer):
+  def __init__(self, logfile='_logs/_logs_CTC3.txt', save_name_model='convnet/ctc_convDilated3.pt'):
+    super().__init__(logfile=logfile, save_name_model=save_name_model, batch_size=64,
+                     config={'dropout': 0.25, 'block_type': 'dilated_bnd'})
 
 
 if __name__ == "__main__":
@@ -243,3 +250,27 @@ if __name__ == "__main__":
   rep = input(f'Which Experiment do you want to start? ({",".join(experiments.keys())}): ')
   exp = experiments[rep]()
   exp.train()
+
+
+## Maybe usefull
+# def retrieve_predictions(save_file='_ctc_exp2_predictions.pk'):
+#   ctc = CTCTrainer(logfile='_DUMPS_logs.txt', save_name_model='convnet/ctc_convDilated2.pt', config={'dropout': 0.25})
+#   all_targets, predictions = [], []
+
+#   with torch.no_grad():
+#     ctc.model.eval()
+
+#     for inputs, targets, input_lens, target_lens in tqdm(ctc.test_data_loader):
+#       input_lens = u.compute_out_conv(u.compute_out_conv(input_lens, kernel=3, stride=2, padding=1, dilation=1),
+#                                       kernel=3, stride=2, padding=1, dilation=1)
+
+#       inputs, targets = inputs.to(ctc.device), targets.to(ctc.device)
+#       input_lens, target_lens = input_lens.to(ctc.device), target_lens.to(ctc.device)
+
+#       preds = ctc.model(inputs)
+
+#       all_targets += targets.tolist()
+#       predictions += preds.softmax(-1).tolist()
+  
+#   with open(save_file, 'wb') as f:
+#     pk.dump({'targets': all_targets, 'predictions': predictions}, f)

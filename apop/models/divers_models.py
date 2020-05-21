@@ -76,14 +76,14 @@ class ConvLayer(nn.Module):
   def __init__(self, n_input_feats, d_model, n_heads, d_ff, kernel_size, n_blocks, embedder, dropout=0., only_see_past=True,
                full_att=False, block_type='self_attn', n_blocks_strided=None, residual=True):
     super().__init__()
+    blocks_choice = {'self_attn': ConvSelfAttnBlock, 'dilated': ConvMultipleDilationBlock, 'dilated_bnd': ConvMultipleDilationBlockBNDrop}
     n_blocks_strided = n_blocks // 2 if n_blocks_strided is None else n_blocks_strided
     strides = [2 if i < n_blocks_strided else 1 for i in range(n_blocks)]
     self.residual = residual
     self.embedder = embedder
     self.input_proj = nn.Sequential(nn.Dropout(dropout), nn.Linear(n_input_feats, d_model), nn.ReLU(inplace=True), nn.LayerNorm(d_model))
-    self.block_type = ConvSelfAttnBlock if block_type == 'self_attn' else ConvMultipleDilationBlock
-    self.blocks = nn.ModuleList([self.block_type(d_model, n_heads, kernel_size, d_ff, dropout=dropout, only_see_past=only_see_past,
-                                                 self_attn=True if i % 2 == 0 or full_att else False, stride=s)
+    self.blocks = nn.ModuleList([blocks_choice[block_type](d_model, n_heads, kernel_size, d_ff, dropout=dropout, only_see_past=only_see_past,
+                                                           self_attn=True if i % 2 == 0 or full_att else False, stride=s)
                                     for i, s in enumerate(strides)])
   
   def forward(self, x, y=None):
@@ -183,6 +183,41 @@ class ConvMultipleDilationBlock(nn.Module):
                                          nn.ReLU(inplace=True))
     self.conv4 = nn.Sequential(nn.Conv1d(d_model, d_model, kernel_size, stride=stride, dilation=dilations[3], padding=pad[3]),
                                          nn.ReLU(inplace=True))
+    self.feed_forward = nn.Sequential(nn.Dropout(dropout),
+                                      nn.Linear(d_model if self.only_see_past else 4*d_model, d_ff),
+                                      nn.ReLU(inplace=True),
+                                      nn.Dropout(dropout),
+                                      nn.Linear(d_ff, d_model),
+                                      nn.LayerNorm(d_model))
+  
+  def forward(self, x, y=None):
+    x = x.permute(0, 2, 1)
+    out1 = self.conv1(F.pad(x, (self.futur_pad[0], 0)) if self.only_see_past else x).permute(0, 2, 1)
+    out2 = self.conv2(F.pad(x, (self.futur_pad[1], 0)) if self.only_see_past else x).permute(0, 2, 1)
+    out3 = self.conv3(F.pad(x, (self.futur_pad[2], 0)) if self.only_see_past else x).permute(0, 2, 1)
+    out4 = self.conv4(F.pad(x, (self.futur_pad[3], 0)) if self.only_see_past else x).permute(0, 2, 1)
+    out = out1 + out2 + out3 + out4 if self.only_see_past else torch.cat((out1, out2, out3, out4), dim=-1)
+    return self.feed_forward(out)
+
+
+class ConvMultipleDilationBlockBNDrop(nn.Module):
+  def __init__(self, d_model, n_heads, kernel_size, d_ff, stride=2, dropout=0., only_see_past=True, **kwargs):
+    super().__init__()
+    self.only_see_past = only_see_past
+    dilations = list(range(1, 5))
+    pad = [0 if only_see_past else (kernel_size - 1) // 2 + i for i in range(4)]
+    if self.only_see_past:
+      stride = 1
+    self.futur_pad = [(kernel_size - 1) * dilation for dilation in dilations]
+
+    self.conv1 = nn.Sequential(nn.Conv1d(d_model, d_model, kernel_size, stride=stride, dilation=dilations[0], padding=pad[0]),
+                                         nn.BatchNorm1d(d_model), nn.ReLU(inplace=True), nn.Dropout(dropout))
+    self.conv2 = nn.Sequential(nn.Conv1d(d_model, d_model, kernel_size, stride=stride, dilation=dilations[1], padding=pad[1]),
+                                         nn.BatchNorm1d(d_model), nn.ReLU(inplace=True), nn.Dropout(dropout))
+    self.conv3 = nn.Sequential(nn.Conv1d(d_model, d_model, kernel_size, stride=stride, dilation=dilations[2], padding=pad[2]),
+                                         nn.BatchNorm1d(d_model), nn.ReLU(inplace=True), nn.Dropout(dropout))
+    self.conv4 = nn.Sequential(nn.Conv1d(d_model, d_model, kernel_size, stride=stride, dilation=dilations[3], padding=pad[3]),
+                                         nn.BatchNorm1d(d_model), nn.ReLU(inplace=True), nn.Dropout(dropout))
     self.feed_forward = nn.Sequential(nn.Dropout(dropout),
                                       nn.Linear(d_model if self.only_see_past else 4*d_model, d_ff),
                                       nn.ReLU(inplace=True),
