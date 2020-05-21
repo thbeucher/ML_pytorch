@@ -221,8 +221,8 @@ class CTCTrainer(object):
 
 
 class Experiment1(CTCTrainer):
-  def __init__(self, logfile='_logs/_logs_CTC.txt', dropout=0.25):
-    super().__init__(logfile=logfile, config={'dropout': dropout})
+  def __init__(self):
+    super().__init__()
 
 
 class Experiment2(CTCTrainer):

@@ -220,7 +220,7 @@ class STTTrainer(object):
                train_folder='../../../datasets/openslr/LibriSpeech/train-clean-100/', lr=1e-4, batch_size=8, scores_step=5,
                test_folder='../../../datasets/openslr/LibriSpeech/test-clean/', scorer=Data.compute_scores, eval_step=10,
                save_name_model='convnet/stt_trainer.pt', smoothing_eps=0.1, n_epochs=500, load_model=True,
-               encoding_fn=multigrams_encoding, block_type='self_attn', lr_scheduling=False):
+               encoding_fn=multigrams_encoding, block_type='self_attn', lr_scheduling=False, config={}):
     logging.basicConfig(filename=logfile, filemode='a', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') if device is None else device
     self.train_folder = train_folder
@@ -245,7 +245,13 @@ class STTTrainer(object):
 
     self.set_data_loader()
 
-    self.model = self.instanciate_model()
+    self.config = {'emb_dim': 50, 'd_model': 256, 'n_heads': 4, 'd_ff': 512, 'kernel_size': 3, 'enc_n_blocks': 6,
+                   'dec_n_blocks': 6, 'dropout': 0., 'enc_block_type': 'self_attn', 'dec_block_type': 'self_attn'}
+    self.config = {**self.config, **config}
+    self.model = self.instanciate_model(**self.config)
+
+    u.dump_dict(self.config, 'STTTrainer PARAMETERS')
+    logging.info(self.model)
     logging.info(f'The model has {u.count_trainable_parameters(self.model):,} trainable parameters')
 
     self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
@@ -282,12 +288,13 @@ class STTTrainer(object):
                                                             pin_memory=True, shuffle=False, save_features=True,
                                                             wav2vec_model=self.wav2vec_model, slice_fn=Data.wav2vec_extraction)
 
-  def instanciate_model(self, emb_dim=50, d_model=256, n_heads=4, d_ff=512, kernel_size=3, n_blocks=6):
+  def instanciate_model(self, emb_dim=50, d_model=256, n_heads=4, d_ff=512, kernel_size=3, enc_n_blocks=6, dec_n_blocks=6, dropout=0.,
+                        enc_block_type='self_attn', dec_block_type='self_attn', decoder_layer='conv_layer', **kwargs):
     self.output_dim = len(self.data.idx_to_tokens)
     self.n_step_aheads = 1
-    return Seq2Seq(self.output_dim, self.data.n_signal_feats, emb_dim, d_model, n_heads, d_ff, d_ff, kernel_size, n_blocks, n_blocks,
-                   self.data.max_signal_len, self.data.max_source_len, dropout=0., n_step_aheads=self.n_step_aheads,
-                   enc_block_type=self.block_type, dec_block_type=self.block_type).to(self.device)
+    return Seq2Seq(self.output_dim, self.data.n_signal_feats, emb_dim, d_model, n_heads, d_ff, d_ff, kernel_size, enc_n_blocks,
+                   dec_n_blocks, self.data.max_signal_len, self.data.max_source_len, dropout=dropout, n_step_aheads=self.n_step_aheads,
+                   enc_block_type=enc_block_type, dec_block_type=dec_block_type, decoder_layer=decoder_layer).to(self.device)
 
   def train(self):
     print('Start Training...')
@@ -794,6 +801,28 @@ class STTTrainer5(STTTrainer):
     return Seq2Seq(self.output_dim, self.data.n_signal_feats, emb_dim, d_model, n_heads, enc_d_ff, dec_d_ff, kernel_size, enc_n_blocks,
                    dec_n_blocks, self.data.max_signal_len, self.data.max_source_len, dropout=0., n_step_aheads=self.n_step_aheads,
                    enc_block_type=self.block_type, dec_block_type=self.block_type).to(self.device)
+
+
+class STTTrainer6(STTTrainer):
+  def __init__(self, logfile='_logs/_logs_sttTrainer6.txt'):
+    config = {'emb_dim': 50, 'd_model': 512, 'n_heads': 8, 'enc_d_ff': 768, 'dec_d_ff': 768, 'kernel_size': 3,
+              'enc_n_blocks': 6, 'dec_n_blocks': 6, 'dropout': 0.25}
+    super().__init__(logfile=logfile, save_name_model='convnet/stt_trainer6.pt', encoding_fn=Data.letters_encoding,
+                     metadata_file='_Data_metadata_letters_wav2vec.pk', block_type='dilated', batch_size=32, config=config)
+  
+  def instanciate_model(self, emb_dim=50, d_model=512, n_heads=8, enc_d_ff=768, dec_d_ff=768, kernel_size=3, enc_n_blocks=6,
+                        dec_n_blocks=6, dropout=0.25, **kwargs):
+    self.output_dim = len(self.data.idx_to_tokens)
+    self.n_step_aheads = 1
+    return Seq2Seq(self.output_dim, self.data.n_signal_feats, emb_dim, d_model, n_heads, enc_d_ff, dec_d_ff, kernel_size, enc_n_blocks,
+                   dec_n_blocks, self.data.max_signal_len, self.data.max_source_len, dropout=dropout, n_step_aheads=self.n_step_aheads,
+                   enc_block_type=self.block_type, dec_block_type=self.block_type, decoder_layer='decoding_conv_layer').to(self.device)
+
+
+class STTTrainer7(STTTrainer):
+  def __init__(self, logfile='_logs/_logs_sttTrainer7.txt'):
+    super().__init__(logfile=logfile, save_name_model='convnet/stt_trainer7.pt', encoding_fn=Data.letters_encoding,
+                     metadata_file='_Data_metadata_letters_wav2vec.pk', config={'dropout': 0.25})
 
 
 if __name__ == "__main__":

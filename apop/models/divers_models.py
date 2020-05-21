@@ -80,7 +80,7 @@ class ConvLayer(nn.Module):
     strides = [2 if i < n_blocks_strided else 1 for i in range(n_blocks)]
     self.residual = residual
     self.embedder = embedder
-    self.input_proj = nn.Sequential(nn.Linear(n_input_feats, d_model), nn.ReLU(inplace=True), nn.LayerNorm(d_model))
+    self.input_proj = nn.Sequential(nn.Dropout(dropout), nn.Linear(n_input_feats, d_model), nn.ReLU(inplace=True), nn.LayerNorm(d_model))
     self.block_type = ConvSelfAttnBlock if block_type == 'self_attn' else ConvMultipleDilationBlock
     self.blocks = nn.ModuleList([self.block_type(d_model, n_heads, kernel_size, d_ff, dropout=dropout, only_see_past=only_see_past,
                                                  self_attn=True if i % 2 == 0 or full_att else False, stride=s)
@@ -135,8 +135,13 @@ class ConvSelfAttnBlock(nn.Module):
       self.attn = MultiHeadAttention(d_model, d_keys_vals, d_keys_vals, n_heads, dropout=dropout)
       self.attn_norm = nn.LayerNorm(d_model)
 
-      self.feed_forward = nn.Sequential(nn.Linear(d_model, d_ff), nn.ReLU(inplace=True),
-                                        nn.Linear(d_ff, d_model), nn.ReLU(inplace=True), nn.LayerNorm(d_model))
+      self.feed_forward = nn.Sequential(nn.Dropout(dropout),
+                                        nn.Linear(d_model, d_ff),
+                                        nn.ReLU(inplace=True),
+                                        nn.Dropout(dropout),
+                                        nn.Linear(d_ff, d_model),
+                                        nn.ReLU(inplace=True),
+                                        nn.LayerNorm(d_model))
   
   def forward(self, x, futur_mask=None, y=None):  # [batch_size, seq_len, d_model]
     x_pad = x
