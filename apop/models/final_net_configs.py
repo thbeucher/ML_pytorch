@@ -1,3 +1,6 @@
+import torch
+import pickle as pk
+import torch.nn.functional as F
 
 
 def get_encoder_config(config='base'):
@@ -217,4 +220,21 @@ def get_encoder_config(config='base'):
                       [('feed_forward', {'input_size': 3 * 512, 'output_size': 512, 'd_ff': 2048, 'dropout': 0.25})]
                     ]
                   ]
+  return cnet_config
+
+
+def get_decoder_config(config='transformer', metadata_file='../ASR/_Data_metadata_letters_wav2vec.pk'):
+  with open(metadata_file, 'rb') as f:
+    data = pk.load(f)
+
+  if config == 'transformer':
+    # n_blocks, d_model, d_keys, d_values, n_heads, d_ff, dropout
+    cnet_config = [6, 512, 64, 64, 8, 2048, 0.25, data['max_source_len'], len(data['idx_to_tokens'])]
+  elif config == 'css_decoder':
+    # output_dim, emb_dim, hid_dim, n_layers, kernel_size, dropout, pad_idx, device,
+    # max_seq_len=100, score_fn, scaling_energy, multi_head, d_keys_values
+    cnet_config = [len(data['idx_to_tokens']), 512, 1024, 6, 3, 0.25, 2, torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
+                   data['max_source_len'], F.softmax, True, True, 64]
+  else:
+    cnet_config = None
   return cnet_config

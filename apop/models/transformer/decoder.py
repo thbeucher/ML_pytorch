@@ -39,7 +39,7 @@ class DecoderBlock(nn.Module):
     save and aggregate can be set to True to speed up decoding phase (do not use it during training)
     '''
     # creates triangular mask to hide the futur
-    futur_padding_mask = u.create_futur_mask(x).to(self.device).unsqueeze(1)
+    futur_padding_mask = u.create_futur_mask(x).to(x.device).unsqueeze(1)
     # Apply attention to inputs
     att = self.masked_attention_head(x, x, x, mask=futur_padding_mask, aggregate=aggregate)
     x = self.layer_norm1(x + self.dropout(att))

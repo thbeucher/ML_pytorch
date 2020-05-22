@@ -1,11 +1,45 @@
 import os
 import sys
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 sys.path.append(os.path.abspath(__file__).replace('final_net.py', ''))
-from final_net_configs import get_encoder_config
+from conv_seqseq import Decoder as CSSDecoder
+from transformer.decoder import TransformerDecoder
+from transformer.attention import MultiHeadAttention
+from final_net_configs import get_encoder_config, get_decoder_config
+
+
+class PositionalEncoding(nn.Module):
+  # from https://pytorch.org/tutorials/beginner/transformer_tutorial.html
+  def __init__(self, d_model, dropout=0.1, max_len=5000):
+    super(PositionalEncoding, self).__init__()
+    self.dropout = nn.Dropout(p=dropout)
+
+    pe = torch.zeros(max_len, d_model)
+    position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+    div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+    pe[:, 0::2] = torch.sin(position * div_term)
+    pe[:, 1::2] = torch.cos(position * div_term)
+    pe = pe.unsqueeze(0)
+    self.register_buffer('pe', pe)
+
+  def forward(self, x):
+    x = x + self.pe[:, :x.size(1)]
+    return self.dropout(x)
+
+
+class TextEmbedder(nn.Module):
+  def __init__(self, n_embeddings, emb_dim=120, max_seq_len=600, dropout=0.1):
+    super().__init__()
+    self.token_embedding = nn.Embedding(n_embeddings, emb_dim)
+    self.positional_encoding = PositionalEncoding(emb_dim, dropout=dropout, max_len=max_seq_len)
+  
+  def forward(self, x):  # [batch_size, seq_len]
+    out = self.token_embedding(x)  # [batch_size, seq_len, emb_dim]
+    return self.positional_encoding(out)
 
 
 class ConvBlock(nn.Module):
@@ -80,6 +114,11 @@ class FeedForward(nn.Module):
 
 class Encoder(nn.Module):
   def __init__(self, config=None, residual=True, output_size=None):
+    '''
+    config = list of layer_config
+      layer_config = list of block_config
+        block_config = (block_type_name:str, block_configuration:dict)
+    '''
     super().__init__()
     self.config = config
     self.residual = residual
@@ -121,20 +160,52 @@ class Encoder(nn.Module):
 
 
 class Decoder(nn.Module):
-  def __init__(self):
+  def __init__(self, config=None, residual=True):
     super().__init__()
-  
-  def forward(self, x, y):
-    pass
+    self.config = config
+    if isinstance(config, list):
+      pass
+    elif config == 'css_decoder':
+      output_dim, emb_dim, hid_dim, n_layers, kernel_size, dropout, pad_idx, device, max_seq_len,\
+      score_fn, scaling_energy, multi_head, d_keys_values = get_decoder_config(config=config)
+      embedder = TextEmbedder(output_dim, emb_dim=emb_dim, max_seq_len=max_seq_len)
+      self.network = CSSDecoder(output_dim, emb_dim, hid_dim, n_layers, kernel_size, dropout, pad_idx, device, embedder=embedder,
+                                max_seq_len=max_seq_len, score_fn=score_fn, scaling_energy=scaling_energy, multi_head=multi_head,
+                                d_keys_values=d_keys_values)
+    else:
+      n_blocks, d_model, d_keys, d_values, n_heads, d_ff, dropout, max_seq_len, output_dim = get_decoder_config(config='transformer')
+      self.embedder = TextEmbedder(output_dim, emb_dim=d_model, max_seq_len=max_seq_len)
+      self.network = TransformerDecoder(n_blocks, d_model, d_keys, d_values, n_heads, d_ff, dropout=dropout)
+      self.output_proj = nn.Linear(d_model, output_dim)
+      
+  def forward(self, x, y):  # x = [batch_size, seq_len, n_feats] | y = [batch_size, seq_len]
+    if isinstance(self.config, list):
+      pass
+    elif self.config == 'css_decoder':
+      out, _ = self.network(y, x, x)
+    else:  # transformer decoder
+      y = self.embedder(y)
+      out = self.network(y, x)
+      out = self.output_proj(out)
+    return out
 
 
 if __name__ == "__main__":
-  encoder = Encoder(config=get_encoder_config('attention'))  # separable | attention | base
-  print(f'Number of parameters = {sum(p.numel() for p in encoder.parameters() if p.requires_grad):,}')
-  in_ = torch.randn(2, 1500, 512)
-  out = encoder(in_)
-  print(f'in_ = {in_.shape} | out = {out.shape}')
+  ## ENCODER
+  # encoder = Encoder(config=get_encoder_config('attention'))  # separable | attention | attention_glu | base
+  # print(f'Number of parameters = {sum(p.numel() for p in encoder.parameters() if p.requires_grad):,}')
+  # in_ = torch.randn(2, 1500, 512)
+  # out = encoder(in_)
+  # print(f'in_ = {in_.shape} | out = {out.shape}')
 
-  encoder = Encoder(config=get_encoder_config('attention'), output_size=31)
-  out = encoder(in_)
-  print(f'in_ = {in_.shape} | out = {out.shape}')
+  # encoder = Encoder(config=get_encoder_config('attention'), output_size=31)
+  # out = encoder(in_)
+  # print(f'in_ = {in_.shape} | out = {out.shape}')
+
+  ## DECODER
+  # decoder = Decoder(config='css_decoder')
+  # print(f'Number of parameters = {sum(p.numel() for p in decoder.parameters() if p.requires_grad):,}')
+  # enc_out = torch.randn(2, 375, 512)
+  # dec_in = torch.randint(0, 31, (2, 200))
+  # out = decoder(enc_out, dec_in)
+  # print(f'dec_in = {dec_in.shape} | out = {out.shape}')
