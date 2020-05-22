@@ -79,10 +79,11 @@ class FeedForward(nn.Module):
 
 
 class Encoder(nn.Module):
-  def __init__(self, config=None, residual=True):
+  def __init__(self, config=None, residual=True, output_size=None):
     super().__init__()
     self.config = config
     self.residual = residual
+    self.output_proj = None
     self.available_blocks = {'conv_block': ConvBlock, 'separable_conv_block': SeparableConvBlock,
                              'attention_conv_block': AttentionConvBlock, 'feed_forward': FeedForward}
     
@@ -99,6 +100,10 @@ class Encoder(nn.Module):
         blocks.append(nn.ModuleList(sub_blocks))
       layers.append(nn.ModuleList(blocks))
     self.network = nn.ModuleList(layers)
+
+    if output_size is not None:
+      key = [k for k in ['output_size', 'out_chan', 'in_chan'] if k in self.config[-1][-1][-1][1]][0]
+      self.output_proj = nn.Linear(self.config[-1][-1][-1][1][key], output_size)
   
   def forward(self, x):
     for i, layer in enumerate(self.network):
@@ -112,13 +117,24 @@ class Encoder(nn.Module):
             outs.append(sub_block(out))
         out = torch.cat(outs, dim=-1)
       x = x + out if self.residual and out.shape == x.shape else out
-    return x
+    return x if self.output_proj is None else self.output_proj(x)
 
+
+class Decoder(nn.Module):
+  def __init__(self):
+    super().__init__()
+  
+  def forward(self, x, y):
+    pass
 
 
 if __name__ == "__main__":
-  encoder = Encoder(config=get_encoder_config('attention_glu'))  # separable | attention | base
+  encoder = Encoder(config=get_encoder_config('attention'))  # separable | attention | base
   print(f'Number of parameters = {sum(p.numel() for p in encoder.parameters() if p.requires_grad):,}')
   in_ = torch.randn(2, 1500, 512)
+  out = encoder(in_)
+  print(f'in_ = {in_.shape} | out = {out.shape}')
+
+  encoder = Encoder(config=get_encoder_config('attention'), output_size=31)
   out = encoder(in_)
   print(f'in_ = {in_.shape} | out = {out.shape}')
