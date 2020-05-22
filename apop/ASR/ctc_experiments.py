@@ -19,17 +19,22 @@ sys.path.append(os.path.abspath(__file__).replace('ASR/ctc_experiments.py', ''))
 import utils as u
 
 from data import Data
+from models.final_net import Encoder
 from models.divers_models import ConvLayer
 from optimizer import CosineAnnealingWarmUpRestarts
+from models.final_net_configs import get_encoder_config
 
 
 class CTCModel(nn.Module):
   def __init__(self, output_dim, emb_dim, d_model, n_heads, d_ff, kernel_size, n_blocks, n_blocks_strided=None, dropout=0.,
-               block_type='dilated'):
+               block_type='dilated', network_type='conv_layer', network_config='attention_glu'):
     super().__init__()
     embedder = lambda x: x
-    self.net = ConvLayer(emb_dim, d_model, n_heads, d_ff, kernel_size, n_blocks, embedder, dropout=dropout,
-                         only_see_past=False, block_type=block_type, n_blocks_strided=n_blocks_strided)
+    if network_type == 'encoder_attention':
+      self.net = Encoder(config=get_encoder_config(config=network_config))
+    else:
+      self.net = ConvLayer(emb_dim, d_model, n_heads, d_ff, kernel_size, n_blocks, embedder, dropout=dropout,
+                          only_see_past=False, block_type=block_type, n_blocks_strided=n_blocks_strided)
     self.output_proj = nn.Linear(d_model, output_dim)
   
   def forward(self, x):
@@ -135,9 +140,9 @@ class CTCTrainer(object):
                                        shuffle=True, pin_memory=True)
   
   def instanciate_model(self, output_dim=32, emb_dim=512, d_model=512, n_heads=8, d_ff=2048, kernel_size=3, n_blocks=10,
-                        n_blocks_strided=None, dropout=0., block_type='dilated'):
+                        n_blocks_strided=None, dropout=0., block_type='dilated', **kwargs):
     return CTCModel(output_dim, emb_dim, d_model, n_heads, d_ff, kernel_size, n_blocks, n_blocks_strided=n_blocks_strided,
-                    dropout=dropout, block_type=block_type).to(self.device)
+                    dropout=dropout, block_type=block_type, **kwargs).to(self.device)
 
   def train(self):
     print('Start Training...')
@@ -263,6 +268,11 @@ class Experiment3(CTCTrainer):
   def __init__(self, logfile='_logs/_logs_CTC3.txt', save_name_model='convnet/ctc_convDilated3.pt'):
     super().__init__(logfile=logfile, save_name_model=save_name_model, batch_size=64,
                      config={'dropout': 0.25, 'block_type': 'dilated_bnd'})
+
+
+class Experiment4(CTCTrainer):
+  def __init__(self, logfile='_logs/_logs_CTC4.txt', save_name_model='convnet/ctc_attention4.pt'):
+    super().__init__(logfile=logfile, save_name_model=save_name_model, batch_size=128, config={'network_type': 'encoder_attention'})
 
 
 if __name__ == "__main__":
