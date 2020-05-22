@@ -1,7 +1,10 @@
+import os
+import sys
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+sys.path.append(os.path.abspath(__file__).replace('final_net.py', ''))
 from final_net_configs import get_encoder_config
 
 
@@ -96,7 +99,6 @@ class Encoder(nn.Module):
         blocks.append(nn.ModuleList(sub_blocks))
       layers.append(nn.ModuleList(blocks))
     self.network = nn.ModuleList(layers)
-    print(self.network)
   
   def forward(self, x):
     for i, layer in enumerate(self.network):
