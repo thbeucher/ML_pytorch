@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from final_net_configs import get_config
+from final_net_configs import get_encoder_config
 
 
 class ConvBlock(nn.Module):
@@ -11,7 +11,7 @@ class ConvBlock(nn.Module):
     assert k in [1, 2], 'Handle only k = 1 or 2'
     self.conv = nn.Sequential(nn.Conv1d(in_chan, out_chan, kernel, stride=stride, padding=pad, dilation=dil, groups=groups),
                               nn.BatchNorm1d(out_chan),
-                              nn.ReLU(inplace=True) if k == 1 else nn.GLU(),
+                              nn.ReLU(inplace=True) if k == 1 else nn.GLU(dim=1),
                               nn.Dropout(dropout))
   
   def forward(self, x):  # [batch_size, in_chan, seq_len]
@@ -24,7 +24,7 @@ class SeparableConvBlock(nn.Module):
     assert k in [1, 2], 'Handle only k = 1 or 2'
     self.conv = nn.Sequential(nn.Conv1d(in_chan, k * in_chan, kernel, stride=stride, padding=pad, dilation=dil, groups=in_chan),
                               nn.BatchNorm1d(k * in_chan),
-                              nn.ReLU(inplace=True) if k == 1 else nn.GLU(),
+                              nn.ReLU(inplace=True) if k == 1 else nn.GLU(dim=1),
                               nn.Dropout(dropout),
                               nn.Conv1d(k * in_chan, out_chan, 1),
                               nn.BatchNorm1d(out_chan),
@@ -84,7 +84,7 @@ class Encoder(nn.Module):
                              'attention_conv_block': AttentionConvBlock, 'feed_forward': FeedForward}
     
     if config is None:
-      self.config = get_config(config='base')
+      self.config = get_encoder_config(config='base')
     
     layers = []
     for layer in self.config:
@@ -115,7 +115,7 @@ class Encoder(nn.Module):
 
 
 if __name__ == "__main__":
-  encoder = Encoder(config=get_config('attention'))  # separable | attention | base
+  encoder = Encoder(config=get_encoder_config('attention_glu'))  # separable | attention | base
   print(f'Number of parameters = {sum(p.numel() for p in encoder.parameters() if p.requires_grad):,}')
   in_ = torch.randn(2, 1500, 512)
   out = encoder(in_)
