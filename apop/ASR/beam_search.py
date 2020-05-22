@@ -18,7 +18,7 @@ from multitasks_experiments import STTReviewTrainer2, Seq2SeqReview
 
 
 @torch.no_grad()
-def beam_search_experiment(beam_size=5):
+def beam_search_experiment(beam_size=10):
   exp = Experiment29(logfile='_DUMPS_logs.txt')
 
   u.load_model(exp.model, exp.save_name_model, restore_only_similars=True)
@@ -161,7 +161,7 @@ def test_utility_bs():
 
 
 if __name__ == "__main__":
-  # beam_search_experiment()
+  beam_search_experiment()
   # beam_search_experiment2()
 
-  test_utility_bs()
+  # test_utility_bs()

@@ -215,11 +215,38 @@ class CTCTrainer(object):
     return losses / len(self.train_data_loader), accs
   
   @staticmethod
-  def scorer(targets, predictions, idx_to_tokens, tokens_to_idx):
+  def reconstruct_sentences(targets, predictions, idx_to_tokens, tokens_to_idx):
     target_sentences = [''.join([idx_to_tokens[i] for i in t[:t.index(0) if 0 in t else None]]) for t in targets]
     predicted_sentences = [[i for i, _ in groupby(p)] for p in predictions]
     predicted_sentences = [''.join([idx_to_tokens[i] for i in p if i != 0]) for p in predicted_sentences]
+    return target_sentences, predicted_sentences
+
+  @staticmethod
+  def scorer(targets, predictions, idx_to_tokens, tokens_to_idx):
+    target_sentences, predicted_sentences = CTCTrainer.reconstruct_sentences(targets, predictions, idx_to_tokens, tokens_to_idx)
     return Data.compute_scores(targets=target_sentences, predictions=predicted_sentences, rec=False)
+  
+  @torch.no_grad()
+  def dump_predictions(self, save_file='_ctc_experiment_results.pk'):
+    all_targets, predictions = [], []
+    self.model.eval()
+
+    for inputs, targets, input_lens, target_lens in tqdm(self.test_data_loader):
+      input_lens = u.compute_out_conv(u.compute_out_conv(input_lens, kernel=3, stride=2, padding=1, dilation=1),
+                                      kernel=3, stride=2, padding=1, dilation=1)
+
+      inputs, targets = inputs.to(self.device), targets.to(self.device)
+      input_lens, target_lens = input_lens.to(self.device), target_lens.to(self.device)
+
+      preds = self.model(inputs)
+
+      all_targets += targets.tolist()
+      predictions += preds.softmax(-1).tolist()
+    
+    with open(save_file, 'wb') as f:
+      pk.dump({'targets': all_targets, 'predictions': predictions}, f)
+    
+    self.model.train()
 
 
 class Experiment1(CTCTrainer):
@@ -251,26 +278,5 @@ if __name__ == "__main__":
   exp = experiments[rep]()
   exp.train()
 
-
-## Maybe usefull
-# def retrieve_predictions(save_file='_ctc_exp2_predictions.pk'):
-#   ctc = CTCTrainer(logfile='_DUMPS_logs.txt', save_name_model='convnet/ctc_convDilated2.pt', config={'dropout': 0.25})
-#   all_targets, predictions = [], []
-
-#   with torch.no_grad():
-#     ctc.model.eval()
-
-#     for inputs, targets, input_lens, target_lens in tqdm(ctc.test_data_loader):
-#       input_lens = u.compute_out_conv(u.compute_out_conv(input_lens, kernel=3, stride=2, padding=1, dilation=1),
-#                                       kernel=3, stride=2, padding=1, dilation=1)
-
-#       inputs, targets = inputs.to(ctc.device), targets.to(ctc.device)
-#       input_lens, target_lens = input_lens.to(ctc.device), target_lens.to(ctc.device)
-
-#       preds = ctc.model(inputs)
-
-#       all_targets += targets.tolist()
-#       predictions += preds.softmax(-1).tolist()
-  
-#   with open(save_file, 'wb') as f:
-#     pk.dump({'targets': all_targets, 'predictions': predictions}, f)
+# from fast_ctc_decode import beam_search
+# seq, path = beam_search(posteriors, alphabet, beam_size=5)
