@@ -110,7 +110,9 @@ class CTCTrainer(object):
     self.criterion = nn.CTCLoss()
 
     if self.lr_scheduling:
-      self.lr_scheduler = CosineAnnealingWarmUpRestarts(self.optimizer, T_0=150, T_mult=1, eta_max=1e-2, T_up=10, gamma=0.5)
+      # self.lr_scheduler = CosineAnnealingWarmUpRestarts(self.optimizer, T_0=150, T_mult=1, eta_max=1e-2, T_up=10, gamma=0.5)
+      self.lr_scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='max', factor=0.1, patience=10, verbose=True,
+                                                               min_lr=1e-5, threshold_mode='abs', threshold=0.003)
 
     if load_model:
       u.load_model(self.model, self.save_name_model, restore_only_similars=True)
@@ -155,8 +157,8 @@ class CTCTrainer(object):
 
       oea = accs.get('word_accuracy', None)
 
-      if self.lr_scheduling:
-        self.lr_scheduler.step()
+      if self.lr_scheduling and oea is not None:
+        self.lr_scheduler.step(oea)
 
       if oea is not None and oea > eval_accuracy_memory:
         logging.info(f'Save model with eval_accuracy = {oea:.3f}')
@@ -273,6 +275,22 @@ class Experiment3(CTCTrainer):
 class Experiment4(CTCTrainer):
   def __init__(self, logfile='_logs/_logs_CTC4.txt', save_name_model='convnet/ctc_attention4.pt'):
     super().__init__(logfile=logfile, save_name_model=save_name_model, batch_size=128, config={'network_type': 'encoder_attention'})
+
+
+class Experiment5(CTCTrainer):
+  def __init__(self, logfile='_logs/_logs_CTC5.txt', save_name_model='convnet/ctc_attention5.pt'):
+    super().__init__(logfile=logfile, save_name_model=save_name_model, batch_size=128, lr=1e-2)
+  
+  def instanciate_model(self, **kwargs):
+    return Encoder(config=get_encoder_config(config='attention_glu'), output_size=kwargs['output_dim']).to(self.device)
+
+
+class Experiment6(CTCTrainer):
+  def __init__(self, logfile='_logs/_logs_CTC6.txt', save_name_model='convnet/ctc_DepthWise6.pt'):
+    super().__init__(logfile=logfile, save_name_model=save_name_model, batch_size=32, lr=1e-2)
+  
+  def instanciate_model(self, **kwargs):
+    return Encoder(config=get_encoder_config(config='separable'), output_size=kwargs['output_dim']).to(self.device)
 
 
 if __name__ == "__main__":

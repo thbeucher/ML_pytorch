@@ -192,20 +192,20 @@ class Decoder(nn.Module):
 
 if __name__ == "__main__":
   ## ENCODER
-  # encoder = Encoder(config=get_encoder_config('attention'))  # separable | attention | attention_glu | base
-  # print(f'Number of parameters = {sum(p.numel() for p in encoder.parameters() if p.requires_grad):,}')
-  # in_ = torch.randn(2, 1500, 512)
-  # out = encoder(in_)
-  # print(f'in_ = {in_.shape} | out = {out.shape}')
+  encoder = Encoder(config=get_encoder_config('attention'))  # separable | attention | attention_glu | base
+  print(f'Number of parameters = {sum(p.numel() for p in encoder.parameters() if p.requires_grad):,}')
+  in_ = torch.randn(2, 1500, 512)
+  out = encoder(in_)
+  print(f'in_ = {in_.shape} | out = {out.shape}')
 
-  # encoder = Encoder(config=get_encoder_config('attention'), output_size=31)
-  # out = encoder(in_)
-  # print(f'in_ = {in_.shape} | out = {out.shape}')
+  encoder = Encoder(config=get_encoder_config('attention'), output_size=31)
+  out = encoder(in_)
+  print(f'in_ = {in_.shape} | out = {out.shape}')
 
   ## DECODER
-  # decoder = Decoder(config='css_decoder')
-  # print(f'Number of parameters = {sum(p.numel() for p in decoder.parameters() if p.requires_grad):,}')
-  # enc_out = torch.randn(2, 375, 512)
-  # dec_in = torch.randint(0, 31, (2, 200))
-  # out = decoder(enc_out, dec_in)
-  # print(f'dec_in = {dec_in.shape} | out = {out.shape}')
+  decoder = Decoder(config='css_decoder')
+  print(f'Number of parameters = {sum(p.numel() for p in decoder.parameters() if p.requires_grad):,}')
+  enc_out = torch.randn(2, 375, 512)
+  dec_in = torch.randint(0, 31, (2, 200))
+  out = decoder(enc_out, dec_in)
+  print(f'dec_in = {dec_in.shape} | out = {out.shape}')
