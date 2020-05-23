@@ -160,20 +160,23 @@ class Encoder(nn.Module):
 
 
 class Decoder(nn.Module):
-  def __init__(self, config=None, residual=True):
+  def __init__(self, config=None, residual=True, embed_x=False, **kwargs):
     super().__init__()
     self.config = config
+    self.embed_x = embed_x
+
     if isinstance(config, list):
       pass
     elif config == 'css_decoder':
       output_dim, emb_dim, hid_dim, n_layers, kernel_size, dropout, pad_idx, device, max_seq_len,\
-      score_fn, scaling_energy, multi_head, d_keys_values = get_decoder_config(config=config)
+      score_fn, scaling_energy, multi_head, d_keys_values = get_decoder_config(config=config, **kwargs)
       embedder = TextEmbedder(output_dim, emb_dim=emb_dim, max_seq_len=max_seq_len)
       self.network = CSSDecoder(output_dim, emb_dim, hid_dim, n_layers, kernel_size, dropout, pad_idx, device, embedder=embedder,
                                 max_seq_len=max_seq_len, score_fn=score_fn, scaling_energy=scaling_energy, multi_head=multi_head,
                                 d_keys_values=d_keys_values)
     else:
-      n_blocks, d_model, d_keys, d_values, n_heads, d_ff, dropout, max_seq_len, output_dim = get_decoder_config(config='transformer')
+      n_blocks, d_model, d_keys, d_values, n_heads, d_ff, dropout, max_seq_len, output_dim = get_decoder_config(config='transformer',
+                                                                                                                **kwargs)
       self.embedder = TextEmbedder(output_dim, emb_dim=d_model, max_seq_len=max_seq_len)
       self.network = TransformerDecoder(n_blocks, d_model, d_keys, d_values, n_heads, d_ff, dropout=dropout)
       self.output_proj = nn.Linear(d_model, output_dim)
@@ -182,8 +185,12 @@ class Decoder(nn.Module):
     if isinstance(self.config, list):
       pass
     elif self.config == 'css_decoder':
+      if self.embed_x:
+        x = self.network.embedder(x)
       out, _ = self.network(y, x, x)
     else:  # transformer decoder
+      if self.embed_x:
+        x = self.embedder(x)
       y = self.embedder(y)
       out = self.network(y, x)
       out = self.output_proj(out)
@@ -192,6 +199,7 @@ class Decoder(nn.Module):
 
 if __name__ == "__main__":
   ## ENCODER
+  print('ENCODER')
   encoder = Encoder(config=get_encoder_config('attention'))  # separable | attention | attention_glu | base
   print(f'Number of parameters = {sum(p.numel() for p in encoder.parameters() if p.requires_grad):,}')
   in_ = torch.randn(2, 1500, 512)
@@ -203,7 +211,8 @@ if __name__ == "__main__":
   print(f'in_ = {in_.shape} | out = {out.shape}')
 
   ## DECODER
-  decoder = Decoder(config='css_decoder')
+  print('DECODER')
+  decoder = Decoder(config='transformer')
   print(f'Number of parameters = {sum(p.numel() for p in decoder.parameters() if p.requires_grad):,}')
   enc_out = torch.randn(2, 375, 512)
   dec_in = torch.randint(0, 31, (2, 200))

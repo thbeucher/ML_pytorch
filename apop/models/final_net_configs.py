@@ -223,7 +223,7 @@ def get_encoder_config(config='base'):
   return cnet_config
 
 
-def get_decoder_config(config='transformer', metadata_file='../ASR/_Data_metadata_letters_wav2vec.pk'):
+def get_decoder_config(config='transformer', metadata_file='../ASR/_Data_metadata_letters_wav2vec.pk', **kwargs):
   with open(metadata_file, 'rb') as f:
     data = pk.load(f)
 
