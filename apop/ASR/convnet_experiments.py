@@ -163,6 +163,7 @@ class Experiment28(ConvnetTrainer):
                      hop_length=hop_length, scorer=scorer, multi_head=multi_head, metadata_file=metadata_file, encoding_fn=encoding_fn)
 
 
+## STATUS = finished, Best: word_accuracy = 0.629, greedy_word_accuracy = 0.587, WER=0.192, greedy_WER = 0.227
 class Experiment29(ConvnetTrainer):
   '''Convnet letters prediction, adam, CrossEntropy loss, wav2letter, MultiHead'''
   def __init__(self, logfile='_logs/_logs_experiment29.txt', save_name_model='convnet/convnet_experiment29.pt', batch_size=8,
