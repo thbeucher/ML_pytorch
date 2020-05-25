@@ -130,6 +130,7 @@ class Encoder(nn.Module):
     config = list of layer_config
       layer_config = list of block_config
         block_config = (block_type_name:str, block_configuration:dict)
+    one_pred : Boolean, extract last output before feeding to ouput_proj layer
     '''
     super().__init__()
     self.config = config
@@ -138,7 +139,7 @@ class Encoder(nn.Module):
     self.one_pred = one_pred
     self.available_blocks = {'conv_block': ConvBlock, 'separable_conv_block': SeparableConvBlock,
                              'attention_conv_block': AttentionConvBlock, 'feed_forward': FeedForward,
-                             'conv_attention_conv_block': ConvAttentionConvBlock}
+                             'conv_attention_conv_block': ConvAttentionConvBlock, 'gru': nn.GRU}
     
     if config is None:
       self.config = get_encoder_config(config='base')
@@ -155,11 +156,8 @@ class Encoder(nn.Module):
     self.network = nn.ModuleList(layers)
 
     if output_size is not None:
-      key = [k for k in ['output_size', 'out_chan', 'in_chan'] if k in self.config[-1][-1][-1][1]][0]
-      if one_pred:
-        self.output_proj = nn.GRU(input_size=self.config[-1][-1][-1][1][key], hidden_size=output_size, batch_first=True)
-      else:
-        self.output_proj = nn.Linear(self.config[-1][-1][-1][1][key], output_size)
+      key = [k for k in ['output_size', 'out_chan', 'in_chan', 'input_size'] if k in self.config[-1][-1][-1][1]][0]
+      self.output_proj = nn.Linear(self.config[-1][-1][-1][1][key], output_size)
   
   def forward(self, x):
     for i, layer in enumerate(self.network):
@@ -169,17 +167,18 @@ class Encoder(nn.Module):
         for k, sub_block in enumerate(block):
           if 'conv' in self.config[i][j][k][0]:
             outs.append(sub_block(out.permute(0, 2, 1)).permute(0, 2, 1))
+          elif 'gru' in self.config[i][j][k][0]:
+            sub_block.flatten_parameters()
+            outs.append(sub_block(out)[0])
           else:
             outs.append(sub_block(out))
         out = torch.cat(outs, dim=-1)
       x = x + out if self.residual and out.shape == x.shape else out
-    
+
     if self.output_proj is not None:
       if self.one_pred:
-        out, _ = self.output_proj(x)
-        x = out[:, -1]
-      else:
-        x = self.output_proj(x)
+        x = x[:, -1]
+      x = self.output_proj(x)
     return x
 
 

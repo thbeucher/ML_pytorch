@@ -238,6 +238,77 @@ def get_encoder_config(config='base'):
                       [('feed_forward', {'input_size': 3 * 512, 'output_size': 512, 'd_ff': 2048, 'dropout': 0.25})]
                     ]
                   ]
+  elif config == 'rnn_base':
+    cnet_config = [
+                    [
+                      [
+                        ('conv_block', {'in_chan': 512, 'out_chan': 512, 'kernel': 3, 'stride': 1, 'pad': 1, 'dil': 1,
+                                        'dropout': 0.25, 'groups': 1, 'k': 1}),
+                        ('conv_block', {'in_chan': 512, 'out_chan': 512, 'kernel': 3, 'stride': 1, 'pad': 2, 'dil': 2,
+                                        'dropout': 0.25, 'groups': 1, 'k': 1}),
+                        ('conv_block', {'in_chan': 512, 'out_chan': 512, 'kernel': 3, 'stride': 1, 'pad': 3, 'dil': 3,
+                                        'dropout': 0.25, 'groups': 1, 'k': 1})
+                      ],
+                      [('feed_forward', {'input_size': 3 * 512, 'output_size': 512, 'd_ff': 2048, 'dropout': 0.25})]
+                    ],
+                    [
+                      [
+                        ('conv_block', {'in_chan': 512, 'out_chan': 512, 'kernel': 3, 'stride': 2, 'pad': 1, 'dil': 1,
+                                        'dropout': 0.25, 'groups': 1, 'k': 1}),
+                        ('conv_block', {'in_chan': 512, 'out_chan': 512, 'kernel': 3, 'stride': 2, 'pad': 2, 'dil': 2,
+                                        'dropout': 0.25, 'groups': 1, 'k': 1}),
+                        ('conv_block', {'in_chan': 512, 'out_chan': 512, 'kernel': 3, 'stride': 2, 'pad': 3, 'dil': 3,
+                                        'dropout': 0.25, 'groups': 1, 'k': 1})
+                      ],
+                      [('feed_forward', {'input_size': 3 * 512, 'output_size': 512, 'd_ff': 2048, 'dropout': 0.25})]
+                    ],
+                    [
+                      [
+                        ('conv_block', {'in_chan': 512, 'out_chan': 512, 'kernel': 3, 'stride': 1, 'pad': 1, 'dil': 1,
+                                        'dropout': 0.25, 'groups': 1, 'k': 1}),
+                        ('conv_block', {'in_chan': 512, 'out_chan': 512, 'kernel': 3, 'stride': 1, 'pad': 2, 'dil': 2,
+                                        'dropout': 0.25, 'groups': 1, 'k': 1}),
+                        ('conv_block', {'in_chan': 512, 'out_chan': 512, 'kernel': 3, 'stride': 1, 'pad': 3, 'dil': 3,
+                                        'dropout': 0.25, 'groups': 1, 'k': 1})
+                      ],
+                      [('feed_forward', {'input_size': 3 * 512, 'output_size': 512, 'd_ff': 2048, 'dropout': 0.25})]
+                    ],
+                    [
+                      [
+                        ('conv_block', {'in_chan': 512, 'out_chan': 512, 'kernel': 3, 'stride': 2, 'pad': 1, 'dil': 1,
+                                        'dropout': 0.25, 'groups': 1, 'k': 1}),
+                        ('conv_block', {'in_chan': 512, 'out_chan': 512, 'kernel': 3, 'stride': 2, 'pad': 2, 'dil': 2,
+                                        'dropout': 0.25, 'groups': 1, 'k': 1}),
+                        ('conv_block', {'in_chan': 512, 'out_chan': 512, 'kernel': 3, 'stride': 2, 'pad': 3, 'dil': 3,
+                                        'dropout': 0.25, 'groups': 1, 'k': 1})
+                      ],
+                      [('feed_forward', {'input_size': 3 * 512, 'output_size': 512, 'd_ff': 2048, 'dropout': 0.25})]
+                    ],
+                    [
+                      [
+                        ('conv_block', {'in_chan': 512, 'out_chan': 512, 'kernel': 3, 'stride': 1, 'pad': 1, 'dil': 1,
+                                        'dropout': 0.25, 'groups': 1, 'k': 1}),
+                        ('conv_block', {'in_chan': 512, 'out_chan': 512, 'kernel': 3, 'stride': 1, 'pad': 2, 'dil': 2,
+                                        'dropout': 0.25, 'groups': 1, 'k': 1}),
+                        ('conv_block', {'in_chan': 512, 'out_chan': 512, 'kernel': 3, 'stride': 1, 'pad': 3, 'dil': 3,
+                                        'dropout': 0.25, 'groups': 1, 'k': 1})
+                      ],
+                      [('feed_forward', {'input_size': 3 * 512, 'output_size': 512, 'd_ff': 2048, 'dropout': 0.25})]
+                    ],
+                    [
+                      [
+                        ('conv_block', {'in_chan': 512, 'out_chan': 512, 'kernel': 3, 'stride': 1, 'pad': 1, 'dil': 1,
+                                        'dropout': 0.25, 'groups': 1, 'k': 1}),
+                        ('conv_block', {'in_chan': 512, 'out_chan': 512, 'kernel': 3, 'stride': 1, 'pad': 2, 'dil': 2,
+                                        'dropout': 0.25, 'groups': 1, 'k': 1}),
+                        ('conv_block', {'in_chan': 512, 'out_chan': 512, 'kernel': 3, 'stride': 1, 'pad': 3, 'dil': 3,
+                                        'dropout': 0.25, 'groups': 1, 'k': 1})
+                      ],
+                      [('feed_forward', {'input_size': 3 * 512, 'output_size': 512, 'd_ff': 2048, 'dropout': 0.25})],
+                      [('gru', {'input_size': 512, 'hidden_size': 256, 'num_layers': 2, 'batch_first': True, 'dropout': 0.25,
+                                'bidirectional': True})]
+                    ]
+                  ]
   else:
     cnet_config = [
                     [

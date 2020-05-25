@@ -269,7 +269,7 @@ class Experiment2(CTCTrainer):
 
 
 class Experiment3(CTCTrainer):
-  '''Epoch 281: train_word_acc=0.797, test_word_acc=0.676, test_WER=0.159'''
+  '''Epoch 492: train_word_acc=0.853, test_word_acc=0.69, test_WER=0.15'''
   def __init__(self, logfile='_logs/_logs_CTC3.txt', save_name_model='convnet/ctc_convDilated3.pt'):
     super().__init__(logfile=logfile, save_name_model=save_name_model, batch_size=64,
                      config={'dropout': 0.25, 'block_type': 'dilated_bnd'})
@@ -298,10 +298,18 @@ class Experiment6(CTCTrainer):
 
 class Experiment7(CTCTrainer):
   def __init__(self, logfile='_logs/_logs_CTC7.txt', save_name_model='convnet/ctc_conv_attention7.pt'):
-    super().__init__(logfile=logfile, save_name_model=save_name_model, batch_size=32, lr=1e-2)
+    super().__init__(logfile=logfile, save_name_model=save_name_model, batch_size=32, lr=1e-4)
   
   def instanciate_model(self, **kwargs):
     return Encoder(config=get_encoder_config(config='conv_attention'), output_size=kwargs['output_dim']).to(self.device)
+
+
+class Experiment8(CTCTrainer):
+  def __init__(self, logfile='_logs/_logs_CTC8.txt', save_name_model='convnet/ctc_conv_gru8.pt'):
+    super().__init__(logfile=logfile, save_name_model=save_name_model, batch_size=32, lr=1e-4, lr_scheduling=False)
+  
+  def instanciate_model(self, **kwargs):
+    return Encoder(config=get_encoder_config(config='rnn_base'), output_size=kwargs['output_dim']).to(self.device)
 
 
 if __name__ == "__main__":
