@@ -9,7 +9,7 @@ sys.path.append(os.path.abspath(__file__).replace('final_net.py', ''))
 from conv_seqseq import Decoder as CSSDecoder
 from transformer.decoder import TransformerDecoder
 from transformer.attention import MultiHeadAttention
-from final_net_configs import get_encoder_config, get_decoder_config
+from final_net_configs import get_encoder_config, get_decoder_config, get_input_proj_layer
 
 
 class PositionalEncoding(nn.Module):
@@ -125,7 +125,7 @@ class FeedForward(nn.Module):
 
 
 class Encoder(nn.Module):
-  def __init__(self, config=None, residual=True, output_size=None, one_pred=False):
+  def __init__(self, config=None, residual=True, output_size=None, one_pred=False, input_proj=None):
     '''
     config = list of layer_config
       layer_config = list of block_config
@@ -137,9 +137,13 @@ class Encoder(nn.Module):
     self.residual = residual
     self.output_proj = None
     self.one_pred = one_pred
+    self.input_proj = None
     self.available_blocks = {'conv_block': ConvBlock, 'separable_conv_block': SeparableConvBlock,
                              'attention_conv_block': AttentionConvBlock, 'feed_forward': FeedForward,
-                             'conv_attention_conv_block': ConvAttentionConvBlock, 'gru': nn.GRU}
+                             'conv_attention_conv_block': ConvAttentionConvBlock, 'lstm': nn.LSTM}
+    
+    if input_proj is not None:
+      self.input_proj = get_input_proj_layer(config=input_proj)
     
     if config is None:
       self.config = get_encoder_config(config='base')
@@ -160,6 +164,9 @@ class Encoder(nn.Module):
       self.output_proj = nn.Linear(self.config[-1][-1][-1][1][key], output_size)
   
   def forward(self, x):
+    if self.input_proj is not None:
+      x = self.input_proj(x)
+      
     for i, layer in enumerate(self.network):
       out = x
       for j, block in enumerate(layer):
@@ -167,7 +174,7 @@ class Encoder(nn.Module):
         for k, sub_block in enumerate(block):
           if 'conv' in self.config[i][j][k][0]:
             outs.append(sub_block(out.permute(0, 2, 1)).permute(0, 2, 1))
-          elif 'gru' in self.config[i][j][k][0]:
+          elif 'lstm' in self.config[i][j][k][0]:
             sub_block.flatten_parameters()
             outs.append(sub_block(out)[0])
           else:

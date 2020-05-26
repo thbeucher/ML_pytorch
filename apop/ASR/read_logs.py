@@ -1,4 +1,5 @@
 import os
+import re
 import ast
 import sys
 import argparse
@@ -22,35 +23,23 @@ def fix_logfile(filename):
     f.write('\n'.join(data))
 
 
-def get_train_test_epoch_acc(filename, read_from_new=True):
+def get_train_test_epoch_acc(filename, pattern=r'word_accuracy = 0.\d+'):
+  # pattern = r'greedy_word_accuracy = 0.\d+' | r'Word accuracy = 0.\d+'
   print(f'Handle {filename}')
   with open(filename, 'r') as f:
     data = f.read().splitlines()
   
-  if read_from_new:
-    ## READ multitasks_experiment logs
-    train_lines = [el for el in data if 'train_' in el and '_acc' in el]
-    train_epoch_acc = [(int(el.split(' | ')[0].split('Epoch ')[-1]), round(float(el.split('| word_accuracy = ')[-1].split(' | ')[0]), 3))
+  train_lines = [el for el in data if 'train_' in el and '_acc' in el]
+  train_epoch_acc = [(int(el.split(' | ')[0].split('Epoch ')[-1]),
+                      round(float(re.search(pattern, el).group(0).split(' = ')[-1]), 3))
                         for el in train_lines]
-    train_epoch_acc = train_epoch_acc[[i for i, (e, acc) in enumerate(train_epoch_acc) if e == 0][-1]:]
+  train_epoch_acc = train_epoch_acc[[i for i, (e, acc) in enumerate(train_epoch_acc) if e == 0][-1]:]
 
-    # test_lines = [el for el in data if 'test_' in el and not 'None' in el and 'greedy_word_accuracy' in el]
-    # test_epoch_acc = [(int(el.split(' | ')[0].split('Epoch ')[-1]), round(float(el.split(' = ')[-1]), 3))
-    #                     for el in test_lines]
-    test_lines = [el for el in data if 'test_' in el and not 'None' in el and 'accuracy' in el]
-    test_epoch_acc = [(int(el.split(' | ')[0].split('Epoch ')[-1]), round(float(el.split('| word_accuracy = ')[-1].split(' | ')[0]), 3))
+  test_lines = [el for el in data if 'test_' in el and not 'None' in el and 'accuracy' in el]
+  test_epoch_acc = [(int(el.split(' | ')[0].split('Epoch ')[-1]),
+                      round(float(re.search(pattern, el).group(0).split(' = ')[-1]), 3))
                         for el in test_lines]
-    test_epoch_acc = test_epoch_acc[[i for i, (e, acc) in enumerate(test_epoch_acc) if e == 0][-1]:]
-  else:
-    # READ _OLD_LOGS/ from convnet_experiments and convnet_experiment_feedback
-    train_acc = [el for el in data if 'Train Word acc' in el]
-    train_epoch_acc = [(int(el.split('EPOCH ')[-1].split(' : ')[0]), float(el.split('Word accuracy = ')[-1].split(' | ')[0]))
-                        for el in train_acc]
-    train_epoch_acc = train_epoch_acc[[i for i, (e, acc) in enumerate(train_epoch_acc) if e == 0][-1]:]
-
-    test_acc = [el for el in data if 'TEST word acc' in el]
-    test_epoch_acc = [(int(el.split(' - TEST')[0].split('Epoch ')[-1]), float(el.split(' | ')[0].split(' = ')[-1])) for el in test_acc]
-    test_epoch_acc = test_epoch_acc[[i for i, (e, acc) in enumerate(test_epoch_acc) if e == 0][-1]:]
+  test_epoch_acc = test_epoch_acc[[i for i, (e, acc) in enumerate(test_epoch_acc) if e == 0][-1]:]
   
 
   return train_epoch_acc, test_epoch_acc
@@ -66,7 +55,7 @@ def align_train_test_epochs(train_epoch_acc, test_epoch_acc):
 def analyze(filename):
   print(f'Handle {filename}')
 
-  train_epoch_acc, test_epoch_acc = get_train_test_epoch_acc(filename)
+  train_epoch_acc, test_epoch_acc = get_train_test_epoch_acc(filename, pattern=r'Word accuracy = 0.\d+')
   epochs, train_acc, test_acc = align_train_test_epochs(train_epoch_acc, test_epoch_acc)
 
   ## DUMP train & test accuracy
@@ -85,7 +74,7 @@ def analyze(filename):
   plt.show()
 
 
-def compare_all(folder, read_from_new):
+def compare_all(folder, read_from_new=True):
   df_data = defaultdict(list)
   top = defaultdict(list)
   names = []
@@ -100,7 +89,7 @@ def compare_all(folder, read_from_new):
     print(f'Reading results from {name}')
 
     try:
-      train_epoch_acc, test_epoch_acc = get_train_test_epoch_acc(f'{folder}{fname}', read_from_new)
+      train_epoch_acc, test_epoch_acc = get_train_test_epoch_acc(f'{folder}{fname}', pattern=r'word_accuracy = 0.\d+')
       epochs, train_acc, test_acc = align_train_test_epochs(train_epoch_acc, test_epoch_acc)
     except:
       continue

@@ -1,5 +1,6 @@
 import torch
 import pickle as pk
+import torch.nn as nn
 import torch.nn.functional as F
 
 
@@ -305,8 +306,8 @@ def get_encoder_config(config='base'):
                                         'dropout': 0.25, 'groups': 1, 'k': 1})
                       ],
                       [('feed_forward', {'input_size': 3 * 512, 'output_size': 512, 'd_ff': 2048, 'dropout': 0.25})],
-                      [('gru', {'input_size': 512, 'hidden_size': 256, 'num_layers': 2, 'batch_first': True, 'dropout': 0.25,
-                                'bidirectional': True})]
+                      [('lstm', {'input_size': 512, 'hidden_size': 256, 'num_layers': 2, 'batch_first': True, 'dropout': 0.25,
+                                 'bidirectional': True})]
                     ]
                   ]
   else:
@@ -399,3 +400,11 @@ def get_decoder_config(config='transformer', metadata_file='../ASR/_Data_metadat
   else:
     cnet_config = None
   return cnet_config
+
+
+def get_input_proj_layer(config='base'):
+  input_proj = nn.Sequential(nn.Dropout(0.25),
+                             nn.Linear(512, 512),
+                             nn.ReLU(inplace=True),
+                             nn.LayerNorm(512))
+  return input_proj

@@ -370,7 +370,7 @@ class CTCAttentionCollator(object):
 
 class CTCAttentionTrainer(object):
   def __init__(self, device=None, logfile='_logs/_logs_CTCAttn.txt', metadata_file='_Data_metadata_letters_wav2vec.pk',
-               batch_size=64, lr=1e-4, load_model=True, n_epochs=500, save_name_model='convnet/ctc_attn.pt', config={},
+               batch_size=60, lr=1e-4, load_model=True, n_epochs=500, save_name_model='convnet/ctc_attn.pt', config={},
                lambda_ctc=0.7, lambda_attn=0.3, smoothing_eps=0.1):
     logging.basicConfig(filename=logfile, filemode='a', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') if device is None else device

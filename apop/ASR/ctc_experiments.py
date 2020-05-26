@@ -355,6 +355,15 @@ class Experiment9(CTCTrainer):
                  'ids_to_audiofile_test': self.ids_to_audiofile_test}, f)
 
 
+class Experiment10(CTCTrainer):
+  def __init__(self, logfile='_logs/_logs_CTC10.txt', save_name_model='convnet/ctc_conv_attention10.pt'):
+    super().__init__(logfile=logfile, save_name_model=save_name_model, batch_size=32, lr=1e-4)
+  
+  def instanciate_model(self, **kwargs):
+    return Encoder(config=get_encoder_config(config='conv_attention'), output_size=kwargs['output_dim'],
+                   input_proj='base').to(self.device)
+
+
 def read_preds_greedy_n_beam_search(res_file='_ctc_exp3_predictions.pk', data_file='_Data_metadata_letters_wav2vec.pk', beam_size=10):
   from fast_ctc_decode import beam_search
 
