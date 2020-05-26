@@ -314,26 +314,45 @@ class Experiment8(CTCTrainer):
 
 
 class Experiment9(CTCTrainer):
-  def __init__(self, logfile='_logs/_logs_CTC9.txt', save_name_model='convnet/ctc_conv9.pt'):
+  def __init__(self, logfile='_logs/_logs_CTC9.txt', save_name_model='convnet/ctc_conv9.pt', new_metadata_file='_CTC_EXP9_metadata.pk'):
+    self.new_metadata_file = new_metadata_file
     super().__init__(logfile=logfile, save_name_model=save_name_model, batch_size=64, lr=1e-4, lr_scheduling=False)
   
   def instanciate_model(self, **kwargs):
-    return Encoder(config=get_encoder_config(config='base'), output_size=kwargs['output_dim']).to(self.device)
+    return Encoder(config=get_encoder_config(config='conv_attention'), output_size=kwargs['output_dim']).to(self.device)
   
   def set_metadata(self, metadata_file):
-    wav2vec = Data.get_wav2vec_model()
-    data = Data()
-    data.load_metadata(save_name=metadata_file)
-    data.data_augmentation_create_n_add(wav2vec_model=wav2vec, save_features=True)
+    if os.path.isfile(self.new_metadata_file):
+      with open(self.new_metadata_file, 'rb') as f:
+        data = pk.load(f)
+      self.idx_to_tokens = data['idx_to_tokens']
+      self.tokens_to_idx = data['tokens_to_idx']
+      self.ids_to_encodedsources_train = data['ids_to_encodedsources_train']
+      self.ids_to_encodedsources_test = data['ids_to_encodedsources_test']
+      self.ids_to_audiofile_train = data['ids_to_audiofile_train']
+      self.ids_to_audiofile_test = data['ids_to_audiofile_test']
+    else:
+      data = Data()
+      data.load_metadata(save_name=metadata_file)
 
-    self.idx_to_tokens = ['<blank>'] + data.idx_to_tokens[3:]
-    self.tokens_to_idx = {t: i for i, t in enumerate(self.idx_to_tokens)}
+      wav2vec = Data.get_wav2vec_model()
+      data.data_augmentation_create_n_add(wav2vec_model=wav2vec, save_features=True)
 
-    self.ids_to_encodedsources_train = {k: (np.array(v[1:-1])-2).tolist() for k, v in data.ids_to_encodedsources_train.items()}
-    self.ids_to_encodedsources_test = {k: (np.array(v[1:-1])-2).tolist() for k, v in data.ids_to_encodedsources_test.items()}
+      self.idx_to_tokens = ['<blank>'] + data.idx_to_tokens[3:]
+      self.tokens_to_idx = {t: i for i, t in enumerate(self.idx_to_tokens)}
 
-    self.ids_to_audiofile_train = data.ids_to_audiofile_train
-    self.ids_to_audiofile_test = data.ids_to_audiofile_test
+      self.ids_to_encodedsources_train = {k: (np.array(v[1:-1])-2).tolist() for k, v in data.ids_to_encodedsources_train.items()}
+      self.ids_to_encodedsources_test = {k: (np.array(v[1:-1])-2).tolist() for k, v in data.ids_to_encodedsources_test.items()}
+
+      self.ids_to_audiofile_train = data.ids_to_audiofile_train
+      self.ids_to_audiofile_test = data.ids_to_audiofile_test
+
+      with open(self.new_metadata_file, 'wb') as f:
+        pk.dump({'idx_to_tokens': self.idx_to_tokens, 'tokens_to_idx': self.tokens_to_idx,
+                 'ids_to_encodedsources_train': self.ids_to_encodedsources_train,
+                 'ids_to_encodedsources_test': self.ids_to_encodedsources_test,
+                 'ids_to_audiofile_train': self.ids_to_audiofile_train,
+                 'ids_to_audiofile_test': self.ids_to_audiofile_test}, f)
 
 
 def read_preds_greedy_n_beam_search(res_file='_ctc_exp3_predictions.pk', data_file='_Data_metadata_letters_wav2vec.pk', beam_size=10):

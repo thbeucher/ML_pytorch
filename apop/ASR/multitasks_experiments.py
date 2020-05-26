@@ -348,7 +348,7 @@ class CTCAttentionDataset(Dataset):
     ctc_target = torch.LongTensor(self.ids_to_encodedsources_ctc[self.identities[idx]])
     attn_target = torch.LongTensor(self.ids_to_encodedsources_attn[self.identities[idx]])
     input_len = len(input_)
-    target_len = len(target)
+    target_len = len(ctc_target)
     return input_, ctc_target, input_len, target_len, attn_target
 
 
@@ -422,7 +422,7 @@ class CTCAttentionTrainer(object):
                                        shuffle=True, pin_memory=True)
   
   def instanciate_model(self, **kwargs):
-    enc_config = kwargs.get('encoder_config', 'conv_attention')
+    enc_config = kwargs.get('encoder_config', 'base')
     dec_config = kwargs.get('decoder_config', 'multihead_objective_decoder')
     decoder_config = get_decoder_config(config=dec_config, metadata_file=self.metadata_file)
     return EncoderMultiHeadObjective(encoder_config=get_encoder_config(config=enc_config), output_size=len(self.idx_to_tokens),
@@ -499,9 +499,9 @@ class CTCAttentionTrainer(object):
       
       ctc_preds, attn_pred = self.model(inputs, attn_targets[:, :-1])  # [batch_size, seq_len, output_dim]
 
-      ctc_loss = self.ctc_criterion(ctc_preds.permute(1, 0, 2).log_softmax(-1), ctc_targets, input_lens, target_lens).item()
+      ctc_loss = self.ctc_criterion(ctc_preds.permute(1, 0, 2).log_softmax(-1), ctc_targets, input_lens, target_lens)
       attn_loss = self.attn_criterion(attn_pred.reshape(-1, attn_pred.shape[-1]), attn_targets[:, 1:].reshape(-1),
-                                      epsilon=self.smoothing_eps).item()
+                                      epsilon=self.smoothing_eps)
       current_loss = self.lambda_ctc * ctc_loss + self.lambda_attn * attn_loss
 
       ctc_all_targets += ctc_targets.tolist()
