@@ -19,7 +19,8 @@ sys.path.append(os.path.abspath(__file__).replace('ASR/multitasks_experiments.py
 import utils as u
 
 from data import Data
-from models.final_net import Decoder, Encoder
+from ctc_experiments import CTCTrainer
+from models.final_net import Decoder, Encoder, EncoderMultiHeadObjective
 from models.final_net_configs import get_decoder_config, get_encoder_config
 
 
@@ -205,7 +206,7 @@ class AudioReaderCollator(object):
 class ReaderRecognitionTrainer(object):
   def __init__(self, device=None, logfile='_logs/_logs_reader_recognition.txt', metadata_file='_Data_metadata_letters_wav2vec.pk',
                train_folder='../../../datasets/openslr/LibriSpeech/train-clean-100/', n_epochs=500, load_model=True,
-               test_folder='../../../datasets/openslr/LibriSpeech/test-clean/', batch_size=32, lr=1e-3, smoothing_eps=0.,
+               test_folder='../../../datasets/openslr/LibriSpeech/test-clean/', batch_size=32, lr=1e-4, smoothing_eps=0.,
                save_name_model='convnet/reader_recognizer.pt', list_files_fn=Data.get_openslr_files,
                process_file_fn=Data.read_and_slice_signal):
     logging.basicConfig(filename=logfile, filemode='a', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -264,7 +265,7 @@ class ReaderRecognitionTrainer(object):
     self.test_data_loader = DataLoader(test_dataset, batch_size=self.batch_size, num_workers=4, collate_fn=collator, pin_memory=True)
   
   def instanciate_model(self):
-    return Encoder(config=get_encoder_config(config='base'), output_size=len(self.readers), one_pred=True).to(self.device)
+    return Encoder(config=get_encoder_config(config='rnn_base'), output_size=len(self.readers), one_pred=True).to(self.device)
   
   def train(self):
     print('Start Training...')
@@ -325,6 +326,203 @@ class ReaderRecognitionTrainer(object):
     return losses / len(self.test_data_loader), accuracy
 
 
+class CTCAttentionDataset(Dataset):
+  def __init__(self, ids_to_audiofile, ids_to_encodedsources_ctc, ids_to_encodedsources_attn, sort_by_target_len=True):
+    self.ids_to_audiofilefeatures = {i: f.replace('.flac', '.features.npy') for i, f in ids_to_audiofile.items()}
+    self.ids_to_encodedsources_ctc = ids_to_encodedsources_ctc
+    self.ids_to_encodedsources_attn = ids_to_encodedsources_attn
+    self.identities = list(sorted(ids_to_encodedsources_ctc.keys()))
+
+    if sort_by_target_len:
+      self.identities = CTCAttentionDataset._sort_by_targets_len(self.identities, ids_to_encodedsources_ctc)
+  
+  @staticmethod
+  def _sort_by_targets_len(ids, ids2es):
+    return list(map(lambda x: x[0], sorted([(i, len(ids2es[i])) for i in ids], key=lambda x: x[1])))
+  
+  def __len__(self):
+    return len(self.identities)
+  
+  def __getitem__(self, idx):
+    input_ = torch.tensor(np.load(self.ids_to_audiofilefeatures[self.identities[idx]]))
+    ctc_target = torch.LongTensor(self.ids_to_encodedsources_ctc[self.identities[idx]])
+    attn_target = torch.LongTensor(self.ids_to_encodedsources_attn[self.identities[idx]])
+    input_len = len(input_)
+    target_len = len(target)
+    return input_, ctc_target, input_len, target_len, attn_target
+
+
+class CTCAttentionCollator(object):
+  def __init__(self, audio_pad, ctc_text_pad, attn_text_pad):
+    self.audio_pad = audio_pad
+    self.ctc_text_pad = ctc_text_pad
+    self.attn_text_pad = attn_text_pad
+
+  def __call__(self, batch):
+    inputs, ctc_targets, input_lens, target_lens, attn_targets = zip(*batch)
+    inputs_batch = pad_sequence(inputs, batch_first=True, padding_value=self.audio_pad).float()
+    ctc_targets_batch = pad_sequence(ctc_targets, batch_first=True, padding_value=self.ctc_text_pad)
+    attn_targets_batch = pad_sequence(attn_targets, batch_first=True, padding_value=self.attn_text_pad)
+    input_lens = torch.LongTensor(input_lens)
+    target_lens = torch.LongTensor(target_lens)
+    return inputs_batch, ctc_targets_batch, input_lens, target_lens, attn_targets_batch
+
+
+class CTCAttentionTrainer(object):
+  def __init__(self, device=None, logfile='_logs/_logs_CTCAttn.txt', metadata_file='_Data_metadata_letters_wav2vec.pk',
+               batch_size=64, lr=1e-4, load_model=True, n_epochs=500, save_name_model='convnet/ctc_attn.pt', config={},
+               lambda_ctc=0.7, lambda_attn=0.3, smoothing_eps=0.1):
+    logging.basicConfig(filename=logfile, filemode='a', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') if device is None else device
+    self.batch_size = batch_size
+    self.n_epochs = n_epochs
+    self.save_name_model = save_name_model
+    self.metadata_file = metadata_file
+    self.lambda_ctc = lambda_ctc
+    self.lambda_attn = lambda_attn
+    self.smoothing_eps = smoothing_eps
+
+    self.set_data()
+    self.set_data_loader()
+
+    self.model = self.instanciate_model(**config)
+    self.model = nn.DataParallel(self.model)
+
+    logging.info(self.model)
+    logging.info(f'The model has {u.count_trainable_parameters(self.model):,} trainable parameters')
+
+    self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
+    self.ctc_criterion = nn.CTCLoss()
+    self.attn_criterion = u.CrossEntropyLoss(self.data.tokens_to_idx['<pad>'])
+
+    if load_model:
+      u.load_model(self.model, self.save_name_model, restore_only_similars=True)
+  
+  def set_data(self):
+    self.data = Data()
+    self.data.load_metadata(save_name=self.metadata_file)
+
+    self.idx_to_tokens = ['<blank>'] + self.data.idx_to_tokens[3:]
+    self.tokens_to_idx = {t: i for i, t in enumerate(self.idx_to_tokens)}
+
+    self.ids_to_encodedsources_train = {k: (np.array(v[1:-1])-2).tolist() for k, v in self.data.ids_to_encodedsources_train.items()}
+    self.ids_to_encodedsources_test = {k: (np.array(v[1:-1])-2).tolist() for k, v in self.data.ids_to_encodedsources_test.items()}
+  
+  def set_data_loader(self):
+    train_dataset = CTCAttentionDataset(self.data.ids_to_audiofile_train, self.ids_to_encodedsources_train,
+                                        self.data.ids_to_encodedsources_train)
+    test_dataset = CTCAttentionDataset(self.data.ids_to_audiofile_test, self.ids_to_encodedsources_test,
+                                       self.data.ids_to_encodedsources_test)
+
+    collator = CTCAttentionCollator(0, 0, self.data.tokens_to_idx['<pad>'])
+
+    self.train_data_loader = DataLoader(train_dataset, batch_size=self.batch_size, num_workers=4, collate_fn=collator,
+                                        shuffle=True, pin_memory=True)
+    self.test_data_loader = DataLoader(test_dataset, batch_size=self.batch_size, num_workers=4, collate_fn=collator,
+                                       shuffle=True, pin_memory=True)
+  
+  def instanciate_model(self, **kwargs):
+    enc_config = kwargs.get('encoder_config', 'conv_attention')
+    dec_config = kwargs.get('decoder_config', 'multihead_objective_decoder')
+    decoder_config = get_decoder_config(config=dec_config, metadata_file=self.metadata_file)
+    return EncoderMultiHeadObjective(encoder_config=get_encoder_config(config=enc_config), output_size=len(self.idx_to_tokens),
+                                     decoder_config=decoder_config).to(self.device)
+  
+  def train(self):
+    print('Start Training...')
+    eval_accuracy_memory = 0
+    for epoch in tqdm(range(self.n_epochs)):
+      epoch_loss, accs = self.train_pass()
+      logging.info(f"Epoch {epoch} | train_loss = {epoch_loss:.3f} | {' | '.join([f'{k} = {v:.3f}' for k, v in accs.items()])}")
+      eval_loss, accs = self.evaluation()
+      logging.info(f"Epoch {epoch} | test_loss = {eval_loss:.3f} | {' | '.join([f'{k} = {v:.3f}' for k, v in accs.items()])}")
+
+      oea = accs.get('ctc_word_accuracy', None)
+
+      if oea is not None and oea > eval_accuracy_memory:
+        logging.info(f'Save model with eval_accuracy = {oea:.3f}')
+        u.save_checkpoint(self.model, None, self.save_name_model)
+        eval_accuracy_memory = oea
+
+  def train_pass(self):
+    losses, accs = 0, {}
+    ctc_all_targets, ctc_all_preds = [], []
+    attn_all_targets, attn_all_preds = [], []
+
+    for inputs, ctc_targets, input_lens, target_lens, attn_targets in tqdm(self.train_data_loader):
+      input_lens = u.compute_out_conv(u.compute_out_conv(input_lens, kernel=3, stride=2, padding=1, dilation=1),
+                                      kernel=3, stride=2, padding=1, dilation=1)
+
+      inputs, ctc_targets, attn_targets = inputs.to(self.device), ctc_targets.to(self.device), attn_targets.to(self.device)
+      input_lens, target_lens = input_lens.to(self.device), target_lens.to(self.device)
+      
+      ctc_preds, attn_pred = self.model(inputs, attn_targets[:, :-1])  # [batch_size, seq_len, output_dim]
+
+      self.optimizer.zero_grad()
+      ctc_loss = self.ctc_criterion(ctc_preds.permute(1, 0, 2).log_softmax(-1), ctc_targets, input_lens, target_lens)
+      attn_loss = self.attn_criterion(attn_pred.reshape(-1, attn_pred.shape[-1]), attn_targets[:, 1:].reshape(-1),
+                                      epsilon=self.smoothing_eps)
+      current_loss = self.lambda_ctc * ctc_loss + self.lambda_attn * attn_loss
+      current_loss.backward()
+      self.optimizer.step()
+
+      ctc_all_targets += ctc_targets.tolist()
+      ctc_all_preds += ctc_preds.argmax(dim=-1).tolist()
+
+      attn_all_targets += attn_targets[:, 1:].tolist()
+      attn_all_preds += attn_pred.argmax(dim=-1).tolist()
+
+      losses += current_loss.item()
+
+    ctc_accs = CTCTrainer.scorer(ctc_all_targets, ctc_all_preds, self.idx_to_tokens, self.tokens_to_idx)
+    attn_accs = Data.compute_scores(targets=attn_all_targets, predictions=attn_all_preds, eos_idx=self.data.tokens_to_idx['<eos>'],
+                                    idx_to_tokens=self.data.idx_to_tokens)
+    accs = {f'ctc_{k}': v for k, v in ctc_accs.items()}
+    accs = {**accs, **{f'attn_{k}': v for k, v in attn_accs.items()}}
+    
+    return losses / len(self.train_data_loader), accs
+  
+  @torch.no_grad()
+  def evaluation(self):
+    losses, accs = 0, {}
+    ctc_all_targets, ctc_all_preds = [], []
+    attn_all_targets, attn_all_preds = [], []
+
+    self.model.eval()
+
+    for inputs, ctc_targets, input_lens, target_lens, attn_targets in tqdm(self.test_data_loader):
+      input_lens = u.compute_out_conv(u.compute_out_conv(input_lens, kernel=3, stride=2, padding=1, dilation=1),
+                                      kernel=3, stride=2, padding=1, dilation=1)
+
+      inputs, ctc_targets, attn_targets = inputs.to(self.device), ctc_targets.to(self.device), attn_targets.to(self.device)
+      input_lens, target_lens = input_lens.to(self.device), target_lens.to(self.device)
+      
+      ctc_preds, attn_pred = self.model(inputs, attn_targets[:, :-1])  # [batch_size, seq_len, output_dim]
+
+      ctc_loss = self.ctc_criterion(ctc_preds.permute(1, 0, 2).log_softmax(-1), ctc_targets, input_lens, target_lens).item()
+      attn_loss = self.attn_criterion(attn_pred.reshape(-1, attn_pred.shape[-1]), attn_targets[:, 1:].reshape(-1),
+                                      epsilon=self.smoothing_eps).item()
+      current_loss = self.lambda_ctc * ctc_loss + self.lambda_attn * attn_loss
+
+      ctc_all_targets += ctc_targets.tolist()
+      ctc_all_preds += ctc_preds.argmax(dim=-1).tolist()
+
+      attn_all_targets += attn_targets[:, 1:].tolist()
+      attn_all_preds += attn_pred.argmax(dim=-1).tolist()
+
+      losses += current_loss.item()
+    
+    self.model.train()
+
+    ctc_accs = CTCTrainer.scorer(ctc_all_targets, ctc_all_preds, self.idx_to_tokens, self.tokens_to_idx)
+    attn_accs = Data.compute_scores(targets=attn_all_targets, predictions=attn_all_preds, eos_idx=self.data.tokens_to_idx['<eos>'],
+                                    idx_to_tokens=self.data.idx_to_tokens)
+    accs = {f'ctc_{k}': v for k, v in ctc_accs.items()}
+    accs = {**accs, **{f'attn_{k}': v for k, v in attn_accs.items()}}
+    
+    return losses / len(self.test_data_loader), accs
+
+
 if __name__ == "__main__":
   ## SEEDING FOR REPRODUCIBILITY
   SEED = 42
@@ -341,3 +539,8 @@ if __name__ == "__main__":
   if rep == 'y':
     reader_recog = ReaderRecognitionTrainer()
     reader_recog.train()
+  
+  rep = input('Train CTC Attention Model? (y or n): ')
+  if rep == 'y':
+    ctc_attn = CTCAttentionTrainer()
+    ctc_attn.train()

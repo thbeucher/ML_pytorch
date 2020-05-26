@@ -220,6 +220,32 @@ class Decoder(nn.Module):
     return out
 
 
+class EncoderMultiHeadObjective(nn.Module):
+  '''
+  Will instanciates an Encoder with the output layer that will be used for CTC-Loss
+  and a small decoder (Embedder + MultiHeadAttention + Linear) for Cross-Entropy-Loss
+  '''
+  def __init__(self, encoder_config=None, residual=True, output_size=None, decoder_config=None, **kwargs):
+    super().__init__()
+    self.encoder = Encoder(config=encoder_config, residual=residual)
+    self.encoder_proj = nn.Linear(decoder_config['d_model'], output_size)
+
+    if decoder_config is None:
+      decoder_config = get_decoder_config(config='multihead_objective_decoder', **kwargs)
+
+    self.decoder_embedder = TextEmbedder(decoder_config['n_embeddings'], decoder_config['emb_dim'], decoder_config['max_seq_len'],
+                                         dropout=decoder_config['embedder_dropout'])
+    self.decoder_attn = MultiHeadAttention(decoder_config['d_model'], decoder_config['d_keys'], decoder_config['d_values'],
+                                           decoder_config['n_heads'], dropout=decoder_config['mha_dropout'])
+    self.decoder_proj = nn.Linear(decoder_config['d_model'], decoder_config['n_embeddings'])
+  
+  def forward(self, x, y):  # x = [batch_size, seq_len, n_feats] | y = [batch_size, seq_len]
+    enc_out = self.encoder(x)
+    dec_out = self.decoder_embedder(y)
+    attn_out = self.decoder_attn(dec_out, enc_out, enc_out)
+    return self.encoder_proj(enc_out), self.decoder_proj(attn_out)
+
+
 if __name__ == "__main__":
   ## ENCODER
   print('ENCODER')

@@ -99,8 +99,11 @@ def compare_all(folder, read_from_new):
       name = fname.replace('_convnet_experiments_', '').replace('.txt', '')  # READ _OLD_LOGS/
     print(f'Reading results from {name}')
 
-    train_epoch_acc, test_epoch_acc = get_train_test_epoch_acc(f'{folder}{fname}', read_from_new)
-    epochs, train_acc, test_acc = align_train_test_epochs(train_epoch_acc, test_epoch_acc)
+    try:
+      train_epoch_acc, test_epoch_acc = get_train_test_epoch_acc(f'{folder}{fname}', read_from_new)
+      epochs, train_acc, test_acc = align_train_test_epochs(train_epoch_acc, test_epoch_acc)
+    except:
+      continue
     
     df_data['epoch'] += epochs + epochs
     df_data['accuracy'] += train_acc
@@ -116,6 +119,7 @@ def compare_all(folder, read_from_new):
   top = {names.index(k): v + [0] * (max_len - len(v)) for k, v in top.items()}
   u.board_printing(top)
   print({k: i for i, k in enumerate(names)})
+  print({names[k]: max(v) for k, v in top.items() if '_test' in names[k]})
   
   df = pd.DataFrame.from_dict(df_data)
 

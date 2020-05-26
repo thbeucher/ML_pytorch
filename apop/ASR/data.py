@@ -11,8 +11,10 @@ import soundfile as sf
 from tqdm import tqdm
 from g2p_en import G2p
 from scipy.signal import stft
+from pydub import AudioSegment
 from jiwer import wer as wer_compute
 from torch.nn.utils.rnn import pad_sequence
+from fairseq.models.wav2vec import Wav2VecModel
 from torch.utils.data import Dataset, DataLoader, Subset
 
 sys.path.append(os.path.abspath(__file__).replace('ASR/data.py', ''))
@@ -141,6 +143,20 @@ class Data(object):
     for k, v in metadata.items():
       setattr(self, k, v)
   
+  @staticmethod
+  def speed_perturb(filename, speed_changes=[0.75, 1.5], save_names=None):
+    if save_names is None:
+      save_names = [filename.replace('.flac', f'_{int(speed * 100)}.flac') for speed in speed_changes]
+    else:
+      assert len(save_names) == len(speed_changes), 'len(save_names) must be equal to len(speed_changes)'
+
+    signal = AudioSegment.from_file(filename)
+
+    for speed, save_name in zip(speed_changes, save_names):
+      swafr = signal._spawn(signal.raw_data, overrides={'frame_rate': int(signal.frame_rate * speed)})
+      out = swafr.set_frame_rate(signal.frame_rate)
+      out.export(save_name, format='flac')
+
   @staticmethod
   def get_openslr_files(folder):
     '''
@@ -292,7 +308,7 @@ class Data(object):
       c = np.load(filename.replace('.flac', '.features.npy'))
       return c
 
-    assert wav2vec_model is not None, 'wav2vec_model need to be given'
+    assert wav2vec_model is not None, 'You must provide wav2vec_model'
 
     with torch.no_grad():
       z = wav2vec_model.feature_extractor(torch.Tensor(signal).reshape(1, -1))
@@ -303,6 +319,14 @@ class Data(object):
       np.save(filename.replace('.flac', '.features.npy'), c.numpy())
 
     return c
+  
+  @staticmethod
+  def get_wav2vec_model(filename='wav2vec_large.pt'):
+    cp = torch.load(filename)
+    wav2vec_model = Wav2VecModel.build_model(cp['args'], task=None)
+    wav2vec_model.load_state_dict(cp['model'])
+    wav2vec_model.eval()
+    return wav2vec_model
 
   @staticmethod
   def read_and_slice_signal(filename, slice_fn=None, **kwargs):
@@ -747,3 +771,38 @@ class Data(object):
     wer = np.mean(wers)
 
     return {'character_accuracy': character_accuracy, 'sentence_accuracy': sentence_accuracy, 'wer': wer, 'word_accuracy': word_accuracy}
+
+  def data_augmentation_create_n_add(self, save_path='../../../datasets/openslr/LibriSpeech/train-clean-100-augmented/',
+                                     list_files_fn=None, slice_fn=None, process_file_fn=None, **kwargs):
+    '''To use after calling set_audio_metadata and process_all_transcripts.'''
+    list_files_fn = Data.get_openslr_files if list_files_fn is None else list_files_fn
+    process_file_fn = Data.read_and_slice_signal if process_file_fn is None else process_file_fn
+    slice_fn = Data.wav2vec_extraction if slice_fn is None else slice_fn
+    speed_changes = kwargs.get('speed_changes', [0.75, 1.5])
+
+    if not os.path.isdir(save_path):
+      os.makedirs(save_path)
+    
+    print('Data augmentation processing...')
+    new_ids_to_audiofile_train = {}
+    new_ids_to_encodedsources_train = {}
+    new_ids_to_transcript_train = {}
+    for id_, fname in tqdm(self.ids_to_audiofile_train.items()):
+      save_names = [os.path.join(save_path, fname.split('/')[-1].replace('.flac', f'_{int(speed * 100)}.flac'))
+                      for speed in speed_changes]
+
+      if not all([os.path.isfile(save_name) for save_name in save_names]):
+        Data.speed_perturb(fname, speed_changes=speed_changes, save_names=save_names)
+      
+      for save_name in save_names:
+        new_id = save_name.split('/')[-1].split('.')[0]
+        new_ids_to_audiofile_train[new_id] = save_name
+        new_ids_to_encodedsources_train[new_id] = self.ids_to_encodedsources_train[id_]
+        new_ids_to_transcript_train[new_id] = self.ids_to_transcript_train[id_]
+
+        features = process_file_fn(save_name, slice_fn=slice_fn, **kwargs)
+        self.max_signal_len = max(self.max_signal_len, features.shape[0])
+    
+    self.ids_to_audiofile_train = {**self.ids_to_audiofile_train, **new_ids_to_audiofile_train}
+    self.ids_to_encodedsources_train = {**self.ids_to_encodedsources_train, **new_ids_to_encodedsources_train}
+    self.ids_to_transcript_train = {**self.ids_to_transcript_train, **new_ids_to_transcript_train}

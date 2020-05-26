@@ -393,6 +393,9 @@ def get_decoder_config(config='transformer', metadata_file='../ASR/_Data_metadat
     # max_seq_len=100, score_fn, scaling_energy, multi_head, d_keys_values
     cnet_config = [len(data['idx_to_tokens']), 512, 1024, 6, 3, 0.25, 2, torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
                    data['max_source_len'], F.softmax, True, True, 64]
+  elif config == 'multihead_objective_decoder':
+    cnet_config = {'n_embeddings': len(data['idx_to_tokens']), 'emb_dim': 512, 'max_seq_len': data['max_source_len'],
+                   'embedder_dropout': 0.25, 'd_model': 512, 'd_keys': 64, 'd_values': 64, 'n_heads': 8, 'mha_dropout': 0.25}
   else:
     cnet_config = None
   return cnet_config

@@ -229,9 +229,10 @@ class CTCTrainer(object):
     return target_sentences, predicted_sentences
 
   @staticmethod
-  def scorer(targets, predictions, idx_to_tokens, tokens_to_idx):
-    target_sentences, predicted_sentences = CTCTrainer.reconstruct_sentences(targets, predictions, idx_to_tokens, tokens_to_idx)
-    return Data.compute_scores(targets=target_sentences, predictions=predicted_sentences, rec=False)
+  def scorer(targets, predictions, idx_to_tokens=None, tokens_to_idx=None, rec=True):
+    if rec:
+      targets, predictions = CTCTrainer.reconstruct_sentences(targets, predictions, idx_to_tokens, tokens_to_idx)
+    return Data.compute_scores(targets=targets, predictions=predictions, rec=False)
   
   @torch.no_grad()
   def dump_predictions(self, save_file='_ctc_experiment_results.pk'):
@@ -312,6 +313,53 @@ class Experiment8(CTCTrainer):
     return Encoder(config=get_encoder_config(config='rnn_base'), output_size=kwargs['output_dim']).to(self.device)
 
 
+class Experiment9(CTCTrainer):
+  def __init__(self, logfile='_logs/_logs_CTC9.txt', save_name_model='convnet/ctc_conv9.pt'):
+    super().__init__(logfile=logfile, save_name_model=save_name_model, batch_size=64, lr=1e-4, lr_scheduling=False)
+  
+  def instanciate_model(self, **kwargs):
+    return Encoder(config=get_encoder_config(config='base'), output_size=kwargs['output_dim']).to(self.device)
+  
+  def set_metadata(self, metadata_file):
+    wav2vec = Data.get_wav2vec_model()
+    data = Data()
+    data.load_metadata(save_name=metadata_file)
+    data.data_augmentation_create_n_add(wav2vec_model=wav2vec, save_features=True)
+
+    self.idx_to_tokens = ['<blank>'] + data.idx_to_tokens[3:]
+    self.tokens_to_idx = {t: i for i, t in enumerate(self.idx_to_tokens)}
+
+    self.ids_to_encodedsources_train = {k: (np.array(v[1:-1])-2).tolist() for k, v in data.ids_to_encodedsources_train.items()}
+    self.ids_to_encodedsources_test = {k: (np.array(v[1:-1])-2).tolist() for k, v in data.ids_to_encodedsources_test.items()}
+
+    self.ids_to_audiofile_train = data.ids_to_audiofile_train
+    self.ids_to_audiofile_test = data.ids_to_audiofile_test
+
+
+def read_preds_greedy_n_beam_search(res_file='_ctc_exp3_predictions.pk', data_file='_Data_metadata_letters_wav2vec.pk', beam_size=10):
+  from fast_ctc_decode import beam_search
+
+  with open(data_file, 'rb') as f:
+    data = pk.load(f)
+  
+  with open(res_file, 'rb') as f:
+    res = pk.load(f)
+  
+  idx_to_tokens = ['<blank>'] + data['idx_to_tokens'][3:]
+  tokens_to_idx = {t: i for i, t in enumerate(idx_to_tokens)}
+
+  greedy_preds = [np.array(p).argmax(-1).tolist() for p in res['predictions']]
+
+  print('Beam search...')
+  bs_res = [beam_search(np.array(p, dtype=np.float32), idx_to_tokens, beam_size=beam_size) for p in tqdm(res['predictions'])]
+  bs_s = [el[0] for el in bs_res]
+
+  targets, _ = CTCTrainer.reconstruct_sentences(res['targets'], res['targets'], idx_to_tokens, tokens_to_idx)
+
+  print(f'GREEDY PREDICTION SCORES:\n{CTCTrainer.scorer(res["targets"], greedy_preds, idx_to_tokens, tokens_to_idx)}\n')
+  print(f'BEAM SEARCH PREDICTION SCORES:\n{CTCTrainer.scorer(targets, bs_s, rec=False)}')
+
+
 if __name__ == "__main__":
   ## SEEDING FOR REPRODUCIBILITY
   SEED = 42
@@ -324,6 +372,3 @@ if __name__ == "__main__":
   rep = input(f'Which Experiment do you want to start? ({",".join(experiments.keys())}): ')
   exp = experiments[rep]()
   exp.train()
-
-# from fast_ctc_decode import beam_search
-# seq, path = beam_search(posteriors, alphabet, beam_size=5)
