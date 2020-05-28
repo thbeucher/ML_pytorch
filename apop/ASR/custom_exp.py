@@ -136,7 +136,7 @@ class Recognizer(nn.Module):
     self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') if device is None else device
     audio_embedder = AudioEmbedder(input_size=input_size, n_feats=emb_dim, kernel=kernel, stride=stride, dropout=enc_dropout,
                                    max_seq_len=enc_max_seq_len)
-    self.encoder = css.Encoder(emb_dim, enc_hid_dim, enc_n_layers, kernel, enc_dropout, self.device, embedder=audio_embedder)
+    self.encoder = css.Encoder(emb_dim, enc_hid_dim, enc_n_layers, kernel, enc_dropout, embedder=audio_embedder)
     self.decoder = Decoder(output_size, output_size, n_blocks=dec_n_layers, emb_dim=emb_dim, n_heads=dec_n_heads, d_model=dec_d_model,
                            d_ff=dec_d_ff, max_seq_len=dec_max_seq_len, dropout=dec_dropout)
   

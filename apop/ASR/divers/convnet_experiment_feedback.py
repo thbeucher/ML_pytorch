@@ -18,15 +18,14 @@ import models.conv_seqseq as css
 
 
 class DecoderFeedback(nn.Module):
-  def __init__(self, output_dim, emb_dim, hid_dim, n_layers, kernel_size, dropout, pad_idx, device, embedder=None, max_seq_len=100):
+  def __init__(self, output_dim, emb_dim, hid_dim, n_layers, kernel_size, dropout, pad_idx, embedder=None, max_seq_len=100):
     super().__init__()
-    self.scale = torch.sqrt(torch.FloatTensor([0.5])).to(device)
     self.dropout = nn.Dropout(dropout)
 
-    self.embedder = css.DecoderEmbedder(output_dim, emb_dim, max_seq_len, dropout, device) if embedder is None else embedder
+    self.embedder = css.DecoderEmbedder(output_dim, emb_dim, max_seq_len, dropout) if embedder is None else embedder
 
     self.emb2hid = nn.Linear(emb_dim, hid_dim)
-    self.decoders = nn.ModuleList([DecoderBlockFeedback(hid_dim, emb_dim, kernel_size, pad_idx, dropout, device) for _ in range(n_layers)])
+    self.decoders = nn.ModuleList([DecoderBlockFeedback(hid_dim, emb_dim, kernel_size, pad_idx, dropout) for _ in range(n_layers)])
     self.hid2emb = nn.Linear(hid_dim, emb_dim)
 
     self.out = nn.Linear(emb_dim, output_dim)
@@ -54,35 +53,34 @@ class DecoderFeedback(nn.Module):
 
 
 class DecoderBlockFeedback(nn.Module):
-  def __init__(self, hid_dim, emb_dim, kernel_size, pad_idx, dropout, device):
+  def __init__(self, hid_dim, emb_dim, kernel_size, pad_idx, dropout):
     super().__init__()
-    self.scale = torch.sqrt(torch.FloatTensor([0.5])).to(device)
+    self.scale = torch.sqrt(torch.FloatTensor([0.5]))
     self.dropout = nn.Dropout(dropout)
 
     self.kernel_size = kernel_size
     self.pad_idx = pad_idx
-    self.device = device
 
     # nf_out = (nf_in + 2 * padding - dilation * (kernel_size -1) - 1) / stride + 1
     self.conv = nn.Conv1d(in_channels=hid_dim, out_channels=2 * hid_dim, kernel_size=kernel_size)
 
-    self.attention = AttentionFeedback(hid_dim, emb_dim, device)
+    self.attention = AttentionFeedback(hid_dim, emb_dim)
   
   def forward(self, embedded, conv_in, encoder_conved, encoder_combined, pred_conved, pred_combined):
     conv_in = self.dropout(conv_in)  # [batch_size, hid_dim, seq_len]
-    padding = torch.zeros(conv_in.shape[0], conv_in.shape[1], self.kernel_size - 1).fill_(self.pad_idx).to(self.device)
+    padding = torch.zeros(conv_in.shape[0], conv_in.shape[1], self.kernel_size - 1).fill_(self.pad_idx).to(conv_in.device)
     padded_conv_in = torch.cat((padding, conv_in), dim=2)  # [batch_size, hid_dim, seq_len + kernel_size - 1]
     conved = self.conv(padded_conv_in)  # [batch_size, 2 * hid_dim, seq_len]
     conved = F.glu(conved, dim=1)  # [batch_size, hid_dim, seq_len]
     attention, conved = self.attention(embedded, conved, encoder_conved, encoder_combined, pred_conved, pred_combined)
-    conved = (conved + conv_in) * self.scale  # residual connection
+    conved = (conved + conv_in) * self.scale.to(conved.device)  # residual connection
     return attention, conved
 
 
 class AttentionFeedback(nn.Module):
-  def __init__(self, hid_dim, emb_dim, device):
+  def __init__(self, hid_dim, emb_dim):
     super().__init__()
-    self.scale = torch.sqrt(torch.FloatTensor([0.5])).to(device)
+    self.scale = torch.sqrt(torch.FloatTensor([0.5]))
 
     self.attention_hid2emb = nn.Linear(hid_dim, emb_dim)
     self.attention_emb2hid = nn.Linear(emb_dim, hid_dim)
@@ -99,33 +97,32 @@ class AttentionFeedback(nn.Module):
       * pred_combined : [batch_size, dec_seq_len, emb_dim]
     '''
     conved_emb = self.attention_hid2emb(conved.permute(0, 2, 1))  # [batch_size, dec_seq_len, emb_dim]
-    combined = (embedded + conved_emb) * self.scale
+    combined = (embedded + conved_emb) * self.scale.to(embedded.device)
 
     # Alignment Attention of encoder input for decoding prediction
     energy = combined.matmul(encoder_conved.permute(0, 2, 1))  # [batch_size, dec_seq_len, enc_seq_len]
     attention = F.softmax(energy, dim=2)
     attented_encoding = attention.matmul(encoder_combined)  # [batch_size, dec_seq_len, emb_dim]
     attented_encoding = self.attention_emb2hid(attented_encoding)  # [batch_size, dec_seq_len, hid_dim]
-    attented_combined = (conved + attented_encoding.permute(0, 2, 1)) * self.scale  # [batch_size, hid_dim, dec_seq_len]
+    attented_combined = (conved + attented_encoding.permute(0, 2, 1)) * self.scale.to(conved.device)  # [batch_size, hid_dim, dec_seq_len]
 
     # Alignment Attention of decoder prediction for final decoding prediction
     p_energy = combined.matmul(pred_conved.permute(0, 2, 1))
     p_attention = F.softmax(p_energy, dim=2)
     p_attented_encoding = p_attention.matmul(pred_combined)
     p_attented_encoding = self.p_attention_emb2hid(p_attented_encoding)
-    p_attented_encoding = (conved + p_attented_encoding.permute(0, 2, 1)) * self.scale
+    p_attented_encoding = (conved + p_attented_encoding.permute(0, 2, 1)) * self.scale.to(conved.device)
 
     return p_attention, attented_combined + p_attented_encoding
 
 
 class Seq2SeqFeedback(nn.Module):
-  def __init__(self, encoder, decoder, p_encoder, p_decoder, device):
+  def __init__(self, encoder, decoder, p_encoder, p_decoder):
     super().__init__()
     self.encoder = encoder
     self.decoder = decoder
     self.p_encoder = p_encoder
     self.p_decoder = p_decoder
-    self.device = device
   
   def forward(self, enc_in, dec_in, warmup=False):
     encoder_conved, encoder_combined = self.encoder(enc_in)
@@ -150,7 +147,7 @@ class Seq2SeqFeedback(nn.Module):
 
     batch_size = enc_in.shape[0]
 
-    dec_in = torch.LongTensor(batch_size, 1).fill_(sos_idx).to(self.device)
+    dec_in = torch.LongTensor(batch_size, 1).fill_(sos_idx).to(encoder_conved.device)
 
     finished = [False] * batch_size
 
@@ -199,21 +196,21 @@ def instanciate_model(enc_input_dim=80, dec_input_dim=100, enc_max_seq_len=1100,
                       p_dec_layers=6, p_dec_kernel_size=3, p_dec_dropout=0.25):
   device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu') if device is None else device
 
-  enc_embedder = css.EncoderEmbedder(enc_input_dim, emb_dim, hid_dim, enc_max_seq_len, enc_dropout, device, reduce_dim=reduce_dim)
-  dec_embedder = css.DecoderEmbedder(dec_input_dim, emb_dim, dec_max_seq_len, dec_dropout, device)
+  enc_embedder = css.EncoderEmbedder(enc_input_dim, emb_dim, hid_dim, enc_max_seq_len, enc_dropout, reduce_dim=reduce_dim)
+  dec_embedder = css.DecoderEmbedder(dec_input_dim, emb_dim, dec_max_seq_len, dec_dropout)
 
-  enc = css.Encoder(emb_dim, hid_dim, enc_layers, enc_kernel_size, enc_dropout, device, embedder=enc_embedder)
-  dec = css.Decoder(output_size, emb_dim, hid_dim, dec_layers, dec_kernel_size, dec_dropout, pad_idx, device, embedder=dec_embedder)
+  enc = css.Encoder(emb_dim, hid_dim, enc_layers, enc_kernel_size, enc_dropout, embedder=enc_embedder)
+  dec = css.Decoder(output_size, emb_dim, hid_dim, dec_layers, dec_kernel_size, dec_dropout, pad_idx, embedder=dec_embedder)
 
-  p_enc_embedder = css.DecoderEmbedder(dec_input_dim, emb_dim, dec_max_seq_len, dec_dropout, device)
-  p_dec_embedder = css.DecoderEmbedder(dec_input_dim, emb_dim, dec_max_seq_len, dec_dropout, device)
+  p_enc_embedder = css.DecoderEmbedder(dec_input_dim, emb_dim, dec_max_seq_len, dec_dropout)
+  p_dec_embedder = css.DecoderEmbedder(dec_input_dim, emb_dim, dec_max_seq_len, dec_dropout)
 
-  p_enc = css.Encoder(emb_dim, hid_dim, p_enc_layers, p_enc_kernel_size, p_enc_dropout, device, embedder=p_enc_embedder)
-  p_dec = DecoderFeedback(output_size, emb_dim, hid_dim, p_dec_layers, p_dec_kernel_size, p_dec_dropout, pad_idx, device,
+  p_enc = css.Encoder(emb_dim, hid_dim, p_enc_layers, p_enc_kernel_size, p_enc_dropout, embedder=p_enc_embedder)
+  p_dec = DecoderFeedback(output_size, emb_dim, hid_dim, p_dec_layers, p_dec_kernel_size, p_dec_dropout, pad_idx,
                           embedder=p_dec_embedder)
 
-  return Seq2SeqFeedback(enc, dec, p_enc, p_dec, device).to(device)
-  # return css.Seq2SeqFeedback(enc, dec, dec_embedder, p_dec, device).to(device)
+  return Seq2SeqFeedback(enc, dec, p_enc, p_dec).to(device)
+  # return css.Seq2SeqFeedback(enc, dec, dec_embedder, p_dec).to(device)
 
 
 def train_pass(model, optimizer, metadata, settings, epoch):

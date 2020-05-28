@@ -36,20 +36,20 @@ def instanciate_model(settings, enc_input_dim=80, dec_input_dim=100, enc_max_seq
   device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu') if device is None else device
 
   
-  enc_embedder = css.EncoderEmbedder(enc_input_dim, emb_dim, hid_dim, enc_max_seq_len, enc_dropout, device, reduce_dim=reduce_dim)
-  dec_embedder = css.DecoderEmbedder(dec_input_dim, emb_dim, dec_max_seq_len, dec_dropout, device)
+  enc_embedder = css.EncoderEmbedder(enc_input_dim, emb_dim, hid_dim, enc_max_seq_len, enc_dropout, reduce_dim=reduce_dim)
+  dec_embedder = css.DecoderEmbedder(dec_input_dim, emb_dim, dec_max_seq_len, dec_dropout)
 
   if settings['relu']:
     if settings['enc_mix_kernel']:
-      enc = css.EncoderMixKernelRelu(emb_dim, hid_dim, [4, 4, 4], [3, 5, 7], enc_dropout, device, embedder=enc_embedder)
+      enc = css.EncoderMixKernelRelu(emb_dim, hid_dim, [4, 4, 4], [3, 5, 7], enc_dropout, embedder=enc_embedder)
     else:
-      enc = css.EncoderRelu(emb_dim, hid_dim, enc_layers, enc_kernel_size, enc_dropout, device, embedder=enc_embedder)
-    dec = css.DecoderRelu(output_size, emb_dim, hid_dim, dec_layers, dec_kernel_size, dec_dropout, pad_idx, device, embedder=dec_embedder)
+      enc = css.EncoderRelu(emb_dim, hid_dim, enc_layers, enc_kernel_size, enc_dropout, embedder=enc_embedder)
+    dec = css.DecoderRelu(output_size, emb_dim, hid_dim, dec_layers, dec_kernel_size, dec_dropout, pad_idx, embedder=dec_embedder)
   else:
-    enc = css.Encoder(emb_dim, hid_dim, enc_layers, enc_kernel_size, enc_dropout, device, embedder=enc_embedder)
-    dec = css.Decoder(output_size, emb_dim, hid_dim, dec_layers, dec_kernel_size, dec_dropout, pad_idx, device, embedder=dec_embedder)
+    enc = css.Encoder(emb_dim, hid_dim, enc_layers, enc_kernel_size, enc_dropout, embedder=enc_embedder)
+    dec = css.Decoder(output_size, emb_dim, hid_dim, dec_layers, dec_kernel_size, dec_dropout, pad_idx, embedder=dec_embedder)
 
-  return css.Seq2Seq(enc, dec, device).to(device)
+  return css.Seq2Seq(enc, dec).to(device)
 
 
 def train_pass(model, optimizer, metadata, settings):

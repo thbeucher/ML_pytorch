@@ -415,7 +415,7 @@ class Experiment11(CTCTrainer):
 
 class Experiment12(CTCTrainer):
   def __init__(self, logfile='_logs/_logs_CTC12.txt', save_name_model='convnet/ctc_conv_dilated12.pt'):
-    super().__init__(logfile=logfile, save_name_model=save_name_model, batch_size=64, lr=1e-4, patience=75, augmented=True,
+    super().__init__(logfile=logfile, save_name_model=save_name_model, batch_size=48, lr=1e-4, patience=75, augmented=True,
                      new_metadata_file='_CTC_EXP9_metadata.pk')
   
   def instanciate_model(self, **kwargs):

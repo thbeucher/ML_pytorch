@@ -374,24 +374,24 @@ class ConvnetFeedbackExperiments(ConvnetTrainer):
                         enc_layers=10, dec_layers=10, enc_kernel_size=3, dec_kernel_size=3, enc_dropout=0.25, dec_dropout=0.25,
                         emb_dim=256, hid_dim=512, reduce_dim=False, pad_idx=2, score_fn=torch.softmax, multi_head=False, d_keys_values=64,
                         encoder_embedder=css.EncoderEmbedder, decoder_embedder=css.DecoderEmbedder):
-    enc_embedder = encoder_embedder(enc_input_dim, emb_dim, hid_dim, enc_max_seq_len, enc_dropout, self.device, reduce_dim=reduce_dim)
-    dec_embedder = decoder_embedder(dec_input_dim, emb_dim, dec_max_seq_len, dec_dropout, self.device)
+    enc_embedder = encoder_embedder(enc_input_dim, emb_dim, hid_dim, enc_max_seq_len, enc_dropout, reduce_dim=reduce_dim)
+    dec_embedder = decoder_embedder(dec_input_dim, emb_dim, dec_max_seq_len, dec_dropout)
 
     if self.relu:
-      enc = css.EncoderRelu(emb_dim, hid_dim, enc_layers, enc_kernel_size, enc_dropout, self.device, embedder=enc_embedder)
-      dec = css.DecoderRelu(output_size, emb_dim, hid_dim, dec_layers, dec_kernel_size, dec_dropout, pad_idx, self.device,
+      enc = css.EncoderRelu(emb_dim, hid_dim, enc_layers, enc_kernel_size, enc_dropout, embedder=enc_embedder)
+      dec = css.DecoderRelu(output_size, emb_dim, hid_dim, dec_layers, dec_kernel_size, dec_dropout, pad_idx,
                             embedder=dec_embedder, score_fn=score_fn, multi_head=multi_head, d_keys_values=d_keys_values)
     else:
-      enc = css.Encoder(emb_dim, hid_dim, enc_layers, enc_kernel_size, enc_dropout, self.device, embedder=enc_embedder)
-      dec = css.Decoder(output_size, emb_dim, hid_dim, dec_layers, dec_kernel_size, dec_dropout, pad_idx, self.device,
+      enc = css.Encoder(emb_dim, hid_dim, enc_layers, enc_kernel_size, enc_dropout, embedder=enc_embedder)
+      dec = css.Decoder(output_size, emb_dim, hid_dim, dec_layers, dec_kernel_size, dec_dropout, pad_idx,
                         embedder=dec_embedder, score_fn=score_fn, multi_head=multi_head, d_keys_values=d_keys_values)
     
-    p_enc_embedder = encoder_embedder(dec_input_dim, emb_dim, hid_dim, dec_max_seq_len, enc_dropout, self.device)
-    p_encoder = css.Encoder(emb_dim, hid_dim, 2, enc_kernel_size, enc_dropout, self.device, embedder=p_enc_embedder)
-    p_decoder = css.DecoderFeedback(output_size, emb_dim, hid_dim, 2, dec_kernel_size, dec_dropout, pad_idx, self.device,
+    p_enc_embedder = encoder_embedder(dec_input_dim, emb_dim, hid_dim, dec_max_seq_len, enc_dropout)
+    p_encoder = css.Encoder(emb_dim, hid_dim, 2, enc_kernel_size, enc_dropout, embedder=p_enc_embedder)
+    p_decoder = css.DecoderFeedback(output_size, emb_dim, hid_dim, 2, dec_kernel_size, dec_dropout, pad_idx,
                                     embedder=dec_embedder, score_fn=score_fn, multi_head=multi_head, d_keys_values=d_keys_values)
 
-    return css.Seq2SeqFeedback(enc, dec, p_encoder, p_decoder, self.device).to(self.device)
+    return css.Seq2SeqFeedback(enc, dec, p_encoder, p_decoder).to(self.device)
 
   def train_pass(self, only_loss=True):
     losses, accs = 0, {}
@@ -505,8 +505,8 @@ class ConvnetTransformerExperiments(TransformerExperiments):
                         enc_layers=10, enc_kernel_size=3, dec_max_seq_len=600, dec_input_dim=31, d_model=256, output_size=31,
                         dec_layers=10, d_keys_values=64, n_heads=4, d_ff=512, dec_dropout=0.25, dec_reduce_dim=False, scaling=True,
                         encoder_embedder=css.EncoderEmbedder, dec_emb_dim=100, **kwargs):
-    enc_embedder = encoder_embedder(enc_input_dim, emb_dim, hid_dim, enc_max_seq_len, enc_dropout, self.device, reduce_dim=enc_reduce_dim)
-    enc = css.Encoder(emb_dim, hid_dim, enc_layers, enc_kernel_size, enc_dropout, self.device, embedder=enc_embedder)
+    enc_embedder = encoder_embedder(enc_input_dim, emb_dim, hid_dim, enc_max_seq_len, enc_dropout, reduce_dim=enc_reduce_dim)
+    enc = css.Encoder(emb_dim, hid_dim, enc_layers, enc_kernel_size, enc_dropout, embedder=enc_embedder)
 
     decoder_embedder = PositionalEmbedder(dec_max_seq_len, dec_emb_dim, d_model, output_size=output_size, device=self.device,
                                           dropout=dec_dropout)

@@ -520,11 +520,10 @@ class MultigramsGame(object):
                         d_ff=512, d_model=256, d_keys=64, d_values=64, n_heads=4, attn_dropout=0.1, out_proj=384, n_letters=31,
                         n_bigrams=294, n_trigrams=1500, n_words=3000, action_space=4, dec_out_attn_proj_inner=2048,
                         proj_n_blocks=4, proj_dropout=0.25):
-    enc_embedder = css.EncoderEmbedder(enc_input_dim, emb_dim, hid_dim, enc_max_seq_len, enc_dropout, self.device, reduce_dim=reduce_dim)
-    self.encoder = css.Encoder(emb_dim, hid_dim, enc_layers, enc_kernel_size, enc_dropout,
-                               self.device, embedder=enc_embedder).to(self.device)
+    enc_embedder = css.EncoderEmbedder(enc_input_dim, emb_dim, hid_dim, enc_max_seq_len, enc_dropout, reduce_dim=reduce_dim)
+    self.encoder = css.Encoder(emb_dim, hid_dim, enc_layers, enc_kernel_size, enc_dropout, embedder=enc_embedder).to(self.device)
 
-    self.dec_embedder = css.DecoderEmbedder(dec_input_dim, emb_dim, dec_max_seq_len, dec_dropout, self.device).to(self.device)
+    self.dec_embedder = css.DecoderEmbedder(dec_input_dim, emb_dim, dec_max_seq_len, dec_dropout).to(self.device)
     self.self_attn_dec_in = TransformerEncoder(dec_n_blocks, d_model, d_keys, d_values, n_heads, d_ff,
                                                dropout=dec_dropout, act_fn='relu', block_type='standard').to(self.device)
     self.enc_in_dec_in_attention = MultiHeadAttention(d_model, d_keys, d_values, n_heads, dropout=attn_dropout).to(self.device)

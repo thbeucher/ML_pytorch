@@ -390,8 +390,8 @@ class CTCAttentionTrainer(object):
     self.set_data_loader()
 
     self.model = self.instanciate_model(**config)
-    # self.model = nn.DataParallel(self.model)
-
+    self.model = nn.DataParallel(self.model)
+    
     logging.info(self.model)
     logging.info(f'The model has {u.count_trainable_parameters(self.model):,} trainable parameters')
 
@@ -400,7 +400,7 @@ class CTCAttentionTrainer(object):
     self.attn_criterion = u.CrossEntropyLoss(self.data.tokens_to_idx['<pad>'])
 
     if load_model:
-      u.load_model(self.model.decoder, 'convnet/masked_language_model.pt', restore_only_similars=True)
+      u.load_model(self.model.module.decoder, 'convnet/masked_language_model.pt', restore_only_similars=True)
       u.load_model(self.model, self.save_name_model, restore_only_similars=True)
   
   def set_data(self):

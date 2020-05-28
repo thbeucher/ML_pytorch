@@ -131,7 +131,7 @@ class ConvModel(torch.nn.Module):
                max_seq_len=600, scaling_energy=True, multi_head=True, d_keys_values=64):
     super().__init__()
     self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') if device is None else device
-    self.decoder = css.Decoder(output_dim, emb_dim, hid_dim, n_layers, kernel_size, dropout, pad_idx, self.device, max_seq_len=max_seq_len,
+    self.decoder = css.Decoder(output_dim, emb_dim, hid_dim, n_layers, kernel_size, dropout, pad_idx, max_seq_len=max_seq_len,
                                multi_head=multi_head, d_keys_values=d_keys_values, scaling_energy=scaling_energy)
     self.encoder = torch.nn.Sequential(torch.nn.Conv1d(12, 80, 6, stride=3), torch.nn.ReLU(inplace=True),
                                        torch.nn.Conv1d(80, 80, 4, stride=2), torch.nn.ReLU(inplace=True),
