@@ -83,8 +83,8 @@ class CustomCollator(object):
 class CTCTrainer(object):
   # ratios audio_len/text_len -> min = 4.75 | max = 9.29 | mean = 5.96
   def __init__(self, device=None, logfile='_logs/_logs_CTC.txt', metadata_file='_Data_metadata_letters_wav2vec.pk', batch_size=64,
-               lr=1e-2, load_model=True, n_epochs=500, eval_step=1, config={}, save_name_model='convnet/ctc_convDilated.pt',
-               lr_scheduling=True):
+               lr=1e-4, load_model=True, n_epochs=500, eval_step=1, config={}, save_name_model='convnet/ctc_convDilated.pt',
+               lr_scheduling=True, lr_scheduler_type='plateau', **kwargs):
     logging.basicConfig(filename=logfile, filemode='a', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') if device is None else device
     self.batch_size = batch_size
@@ -93,7 +93,12 @@ class CTCTrainer(object):
     self.save_name_model = save_name_model
     self.lr_scheduling = lr_scheduling
 
-    self.set_metadata(metadata_file)
+    if kwargs.get('augmented', False):
+      self.new_metadata_file = kwargs.get('new_metadata_file', None)
+      assert self.new_metadata_file is not None, 'new_metadata_file must be provide'
+      self.set_metadata_augmented(metadata_file)
+    else:
+      self.set_metadata(metadata_file)
     self.set_data_loader()
 
     self.config = {'output_dim': len(self.idx_to_tokens), 'emb_dim': 512, 'd_model': 512, 'n_heads': 8, 'd_ff': 1024,
@@ -107,12 +112,15 @@ class CTCTrainer(object):
     logging.info(f'The model has {u.count_trainable_parameters(self.model):,} trainable parameters')
 
     self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
-    self.criterion = nn.CTCLoss()
+    self.criterion = nn.CTCLoss(zero_infinity=True)
 
     if self.lr_scheduling:
-      # self.lr_scheduler = CosineAnnealingWarmUpRestarts(self.optimizer, T_0=150, T_mult=1, eta_max=1e-2, T_up=10, gamma=0.5)
-      self.lr_scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='max', factor=0.1, patience=50, verbose=True,
-                                                               min_lr=1e-5, threshold_mode='abs', threshold=0.003)
+      if lr_scheduler_type == 'cosine':
+        self.lr_scheduler = CosineAnnealingWarmUpRestarts(self.optimizer, T_0=150, T_mult=2, eta_max=1e-2, T_up=50, gamma=0.5)
+      else:
+        patience, min_lr, threshold = kwargs.get('patience', 50), kwargs.get('min_lr', 1e-5), kwargs.get('lr_threshold', 0.003)
+        self.lr_scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='max', factor=0.1, patience=patience, verbose=True,
+                                                                 min_lr=min_lr, threshold_mode='abs', threshold=threshold)
 
     if load_model:
       u.load_model(self.model, self.save_name_model, restore_only_similars=True)
@@ -129,6 +137,39 @@ class CTCTrainer(object):
 
     self.ids_to_audiofile_train = data['ids_to_audiofile_train']
     self.ids_to_audiofile_test = data['ids_to_audiofile_test']
+  
+  def set_metadata_augmented(self, metadata_file):
+    if os.path.isfile(self.new_metadata_file):
+      with open(self.new_metadata_file, 'rb') as f:
+        data = pk.load(f)
+      self.idx_to_tokens = data['idx_to_tokens']
+      self.tokens_to_idx = data['tokens_to_idx']
+      self.ids_to_encodedsources_train = data['ids_to_encodedsources_train']
+      self.ids_to_encodedsources_test = data['ids_to_encodedsources_test']
+      self.ids_to_audiofile_train = data['ids_to_audiofile_train']
+      self.ids_to_audiofile_test = data['ids_to_audiofile_test']
+    else:
+      data = Data()
+      data.load_metadata(save_name=metadata_file)
+
+      wav2vec = Data.get_wav2vec_model()
+      data.data_augmentation_create_n_add(wav2vec_model=wav2vec, save_features=True)
+
+      self.idx_to_tokens = ['<blank>'] + data.idx_to_tokens[3:]
+      self.tokens_to_idx = {t: i for i, t in enumerate(self.idx_to_tokens)}
+
+      self.ids_to_encodedsources_train = {k: (np.array(v[1:-1])-2).tolist() for k, v in data.ids_to_encodedsources_train.items()}
+      self.ids_to_encodedsources_test = {k: (np.array(v[1:-1])-2).tolist() for k, v in data.ids_to_encodedsources_test.items()}
+
+      self.ids_to_audiofile_train = data.ids_to_audiofile_train
+      self.ids_to_audiofile_test = data.ids_to_audiofile_test
+
+      with open(self.new_metadata_file, 'wb') as f:
+        pk.dump({'idx_to_tokens': self.idx_to_tokens, 'tokens_to_idx': self.tokens_to_idx,
+                 'ids_to_encodedsources_train': self.ids_to_encodedsources_train,
+                 'ids_to_encodedsources_test': self.ids_to_encodedsources_test,
+                 'ids_to_audiofile_train': self.ids_to_audiofile_train,
+                 'ids_to_audiofile_test': self.ids_to_audiofile_test}, f)
   
   def set_data_loader(self):
     train_dataset = CustomDataset(self.ids_to_audiofile_train, self.ids_to_encodedsources_train)
@@ -316,7 +357,7 @@ class Experiment8(CTCTrainer):
 class Experiment9(CTCTrainer):
   def __init__(self, logfile='_logs/_logs_CTC9.txt', save_name_model='convnet/ctc_conv9.pt', new_metadata_file='_CTC_EXP9_metadata.pk'):
     self.new_metadata_file = new_metadata_file
-    super().__init__(logfile=logfile, save_name_model=save_name_model, batch_size=64, lr=1e-4, lr_scheduling=False)
+    super().__init__(logfile=logfile, save_name_model=save_name_model, batch_size=32, lr=1e-4, lr_scheduling=False)
   
   def instanciate_model(self, **kwargs):
     return Encoder(config=get_encoder_config(config='conv_attention'), output_size=kwargs['output_dim']).to(self.device)
@@ -362,6 +403,23 @@ class Experiment10(CTCTrainer):
   def instanciate_model(self, **kwargs):
     return Encoder(config=get_encoder_config(config='conv_attention'), output_size=kwargs['output_dim'],
                    input_proj='base').to(self.device)
+
+
+class Experiment11(CTCTrainer):
+  def __init__(self, logfile='_logs/_logs_CTC11.txt', save_name_model='convnet/ctc_conv_dilated11.pt'):
+    super().__init__(logfile=logfile, save_name_model=save_name_model, batch_size=64, lr=1e-5, lr_scheduler_type='cosine')
+  
+  def instanciate_model(self, **kwargs):
+    return Encoder(config=get_encoder_config(config='base'), output_size=kwargs['output_dim'], input_proj='base').to(self.device)
+
+
+class Experiment12(CTCTrainer):
+  def __init__(self, logfile='_logs/_logs_CTC12.txt', save_name_model='convnet/ctc_conv_dilated12.pt'):
+    super().__init__(logfile=logfile, save_name_model=save_name_model, batch_size=64, lr=1e-4, patience=75, augmented=True,
+                     new_metadata_file='_CTC_EXP9_metadata.pk')
+  
+  def instanciate_model(self, **kwargs):
+    return Encoder(config=get_encoder_config(config='base'), output_size=kwargs['output_dim'], input_proj='base').to(self.device)
 
 
 def read_preds_greedy_n_beam_search(res_file='_ctc_exp3_predictions.pk', data_file='_Data_metadata_letters_wav2vec.pk', beam_size=10):

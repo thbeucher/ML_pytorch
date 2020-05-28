@@ -166,7 +166,7 @@ class Encoder(nn.Module):
   def forward(self, x):
     if self.input_proj is not None:
       x = self.input_proj(x)
-      
+
     for i, layer in enumerate(self.network):
       out = x
       for j, block in enumerate(layer):
@@ -198,18 +198,18 @@ class Decoder(nn.Module):
     if isinstance(config, list):
       pass
     elif config == 'css_decoder':
-      output_dim, emb_dim, hid_dim, n_layers, kernel_size, dropout, pad_idx, device, max_seq_len,\
-      score_fn, scaling_energy, multi_head, d_keys_values = get_decoder_config(config=config, **kwargs)
-      embedder = TextEmbedder(output_dim, emb_dim=emb_dim, max_seq_len=max_seq_len)
-      self.network = CSSDecoder(output_dim, emb_dim, hid_dim, n_layers, kernel_size, dropout, pad_idx, device, embedder=embedder,
-                                max_seq_len=max_seq_len, score_fn=score_fn, scaling_energy=scaling_energy, multi_head=multi_head,
-                                d_keys_values=d_keys_values)
+      conf = get_decoder_config(config=config, **kwargs)
+      embedder = TextEmbedder(conf['output_dim'], emb_dim=conf['emb_dim'], max_seq_len=conf['max_seq_len'])
+      self.network = CSSDecoder(conf['output_dim'], conf['emb_dim'], conf['hid_dim'], conf['n_layers'], conf['kernel_size'],
+                                conf['dropout'], conf['pad_idx'], conf['device'], embedder=embedder, score_fn=conf['score_fn'],
+                                max_seq_len=conf['max_seq_len'], scaling_energy=conf['scaling_energy'], multi_head=conf['multi_head'],
+                                d_keys_values=conf['d_keys_values'])
     else:
-      n_blocks, d_model, d_keys, d_values, n_heads, d_ff, dropout, max_seq_len, output_dim = get_decoder_config(config='transformer',
-                                                                                                                **kwargs)
-      self.embedder = TextEmbedder(output_dim, emb_dim=d_model, max_seq_len=max_seq_len)
-      self.network = TransformerDecoder(n_blocks, d_model, d_keys, d_values, n_heads, d_ff, dropout=dropout)
-      self.output_proj = nn.Linear(d_model, output_dim)
+      conf = get_decoder_config(config='transformer', **kwargs)
+      self.embedder = TextEmbedder(conf['output_dim'], emb_dim=conf['d_model'], max_seq_len=conf['max_seq_len'])
+      self.network = TransformerDecoder(conf['n_blocks'], conf['d_model'], conf['d_keys'], conf['d_values'], conf['n_heads'],
+                                        conf['n_heads'], conf['d_ff'], dropout=conf['dropout'])
+      self.output_proj = nn.Linear(conf['d_model'], conf['output_dim'])
       
   def forward(self, x, y):  # x = [batch_size, seq_len, n_feats] | y = [batch_size, seq_len]
     if isinstance(self.config, list):
@@ -228,29 +228,17 @@ class Decoder(nn.Module):
 
 
 class EncoderMultiHeadObjective(nn.Module):
-  '''
-  Will instanciates an Encoder with the output layer that will be used for CTC-Loss
-  and a small decoder (Embedder + MultiHeadAttention + Linear) for Cross-Entropy-Loss
-  '''
   def __init__(self, encoder_config=None, residual=True, output_size=None, decoder_config=None, **kwargs):
     super().__init__()
     self.encoder = Encoder(config=encoder_config, residual=residual)
-    self.encoder_proj = nn.Linear(decoder_config['d_model'], output_size)
+    key = [k for k in ['output_size', 'out_chan', 'in_chan', 'input_size'] if k in self.encoder.config[-1][-1][-1][1]][0]
+    self.encoder_proj = nn.Linear(self.encoder.config[-1][-1][-1][1][key], output_size)
 
-    if decoder_config is None:
-      decoder_config = get_decoder_config(config='multihead_objective_decoder', **kwargs)
-
-    self.decoder_embedder = TextEmbedder(decoder_config['n_embeddings'], decoder_config['emb_dim'], decoder_config['max_seq_len'],
-                                         dropout=decoder_config['embedder_dropout'])
-    self.decoder_attn = MultiHeadAttention(decoder_config['d_model'], decoder_config['d_keys'], decoder_config['d_values'],
-                                           decoder_config['n_heads'], dropout=decoder_config['mha_dropout'])
-    self.decoder_proj = nn.Linear(decoder_config['d_model'], decoder_config['n_embeddings'])
+    self.decoder = Decoder(config=decoder_config, **kwargs)
   
   def forward(self, x, y):  # x = [batch_size, seq_len, n_feats] | y = [batch_size, seq_len]
-    enc_out = self.encoder(x)
-    dec_out = self.decoder_embedder(y)
-    attn_out = self.decoder_attn(dec_out, enc_out, enc_out)
-    return self.encoder_proj(enc_out), self.decoder_proj(attn_out)
+    x = self.encoder(x)
+    return self.encoder_proj(x), self.decoder(x, y)
 
 
 if __name__ == "__main__":

@@ -387,13 +387,13 @@ def get_decoder_config(config='transformer', metadata_file='../ASR/_Data_metadat
     data = pk.load(f)
 
   if config == 'transformer':
-    # n_blocks, d_model, d_keys, d_values, n_heads, d_ff, dropout
-    cnet_config = [6, 512, 64, 64, 8, 2048, 0.25, data['max_source_len'], len(data['idx_to_tokens'])]
+    cnet_config = {'n_blocks': 6, 'd_model': 512, 'd_keys': 64, 'd_values': 64, 'n_heads': 8, 'd_ff': 2048, 'dropout': 0.25,
+                   'max_seq_len': data['max_source_len'], 'output_dim': len(data['idx_to_tokens'])}
   elif config == 'css_decoder':
-    # output_dim, emb_dim, hid_dim, n_layers, kernel_size, dropout, pad_idx, device,
-    # max_seq_len=100, score_fn, scaling_energy, multi_head, d_keys_values
-    cnet_config = [len(data['idx_to_tokens']), 512, 1024, 6, 3, 0.25, 2, torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
-                   data['max_source_len'], F.softmax, True, True, 64]
+    cnet_config = {'output_dim': len(data['idx_to_tokens']), 'emb_dim': 512, 'hid_dim': 1024, 'n_layers': 6, 'kernel_size': 3,
+                   'dropout': 0.25, 'pad_idx': data['tokens_to_idx']['<pad>'], 'max_seq_len': data['max_source_len'],
+                   'device': torch.device('cuda' if torch.cuda.is_available() else 'cpu'), 'score_fn': F.softmax,
+                   'scaling_energy': True, 'multi_head': True, 'd_keys_values': 64}
   elif config == 'multihead_objective_decoder':
     cnet_config = {'n_embeddings': len(data['idx_to_tokens']), 'emb_dim': 512, 'max_seq_len': data['max_source_len'],
                    'embedder_dropout': 0.25, 'd_model': 512, 'd_keys': 64, 'd_values': 64, 'n_heads': 8, 'mha_dropout': 0.25}

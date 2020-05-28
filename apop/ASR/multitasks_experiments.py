@@ -25,11 +25,12 @@ from models.final_net_configs import get_decoder_config, get_encoder_config
 
 
 class TextDataset(Dataset):
-  def __init__(self, ids_to_encodedsources, pad_idx, mask_idx, mask_percent=0.15, sort_by_target_len=True):
+  def __init__(self, ids_to_encodedsources, pad_idx, mask_idx, mask_percent=0.15, sort_by_target_len=True, seed=None):
     self.ids_to_encodedsources = ids_to_encodedsources
     self.pad_idx = pad_idx
     self.mask_idx = mask_idx
     self.mask_percent = mask_percent
+    self.seed = seed
     self.identities = list(sorted(ids_to_encodedsources.keys()))
 
     if sort_by_target_len:
@@ -43,6 +44,9 @@ class TextDataset(Dataset):
     return len(self.identities)
   
   def __getitem__(self, idx):
+    if self.seed is not None:
+      random.seed(self.seed + idx)
+
     input_source = torch.LongTensor(self.ids_to_encodedsources[self.identities[idx]])
     target = input_source.clone()
 
@@ -70,7 +74,7 @@ class TextCollator(object):
 class MaskedLanguageModelTrainer(object):
   def __init__(self, device=None, logfile='_logs/_logs_masked_language_model.txt', metadata_file='_Data_metadata_letters.pk',
                train_folder='../../../datasets/openslr/LibriSpeech/train-clean-100/', encoding_fn=Data.letters_encoding,
-               test_folder='../../../datasets/openslr/LibriSpeech/test-clean/', batch_size=32, lr=1e-3, smoothing_eps=0.1,
+               test_folder='../../../datasets/openslr/LibriSpeech/test-clean/', batch_size=32, lr=1e-4, smoothing_eps=0.1,
                save_name_model='convnet/masked_language_model.pt', n_epochs=5000, load_model=True):
     logging.basicConfig(filename=logfile, filemode='a', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') if device is None else device
@@ -116,7 +120,7 @@ class MaskedLanguageModelTrainer(object):
     self.test_data_loader = DataLoader(test_dataset, batch_size=self.batch_size, num_workers=4, collate_fn=collator, pin_memory=True)
   
   def instanciate_model(self):
-    return Decoder(config='transformer', embed_x=True, metadata_file=self.metadata_file).to(self.device)
+    return Decoder(config='css_decoder', embed_x=True, metadata_file=self.metadata_file).to(self.device)
   
   def train(self):
     print('Start Training...')
@@ -370,8 +374,8 @@ class CTCAttentionCollator(object):
 
 class CTCAttentionTrainer(object):
   def __init__(self, device=None, logfile='_logs/_logs_CTCAttn.txt', metadata_file='_Data_metadata_letters_wav2vec.pk',
-               batch_size=60, lr=1e-4, load_model=True, n_epochs=500, save_name_model='convnet/ctc_attn.pt', config={},
-               lambda_ctc=0.7, lambda_attn=0.3, smoothing_eps=0.1):
+               batch_size=32, lr=1e-4, load_model=True, n_epochs=500, save_name_model='convnet/ctc_attn.pt', config={},
+               lambda_ctc=1., lambda_attn=1., smoothing_eps=0.1):
     logging.basicConfig(filename=logfile, filemode='a', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') if device is None else device
     self.batch_size = batch_size
@@ -386,7 +390,7 @@ class CTCAttentionTrainer(object):
     self.set_data_loader()
 
     self.model = self.instanciate_model(**config)
-    self.model = nn.DataParallel(self.model)
+    # self.model = nn.DataParallel(self.model)
 
     logging.info(self.model)
     logging.info(f'The model has {u.count_trainable_parameters(self.model):,} trainable parameters')
@@ -396,6 +400,7 @@ class CTCAttentionTrainer(object):
     self.attn_criterion = u.CrossEntropyLoss(self.data.tokens_to_idx['<pad>'])
 
     if load_model:
+      u.load_model(self.model.decoder, 'convnet/masked_language_model.pt', restore_only_similars=True)
       u.load_model(self.model, self.save_name_model, restore_only_similars=True)
   
   def set_data(self):
@@ -423,10 +428,9 @@ class CTCAttentionTrainer(object):
   
   def instanciate_model(self, **kwargs):
     enc_config = kwargs.get('encoder_config', 'base')
-    dec_config = kwargs.get('decoder_config', 'multihead_objective_decoder')
-    decoder_config = get_decoder_config(config=dec_config, metadata_file=self.metadata_file)
+    decoder_config = kwargs.get('decoder_config', 'css_decoder')
     return EncoderMultiHeadObjective(encoder_config=get_encoder_config(config=enc_config), output_size=len(self.idx_to_tokens),
-                                     decoder_config=decoder_config).to(self.device)
+                                     decoder_config=decoder_config, metadata_file=self.metadata_file).to(self.device)
   
   def train(self):
     print('Start Training...')
