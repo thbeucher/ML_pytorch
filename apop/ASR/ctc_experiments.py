@@ -396,7 +396,8 @@ class Experiment9(CTCTrainer):
                  'ids_to_audiofile_test': self.ids_to_audiofile_test}, f)
 
 
-class Experiment10(CTCTrainer):
+class Experiment10(CTCTrainer):  # better than Exp7
+  '''EPOCH 367: Train_word_acc = 0.934, Test_word_acc = 0.683, WER = 0.148'''
   def __init__(self, logfile='_logs/_logs_CTC10.txt', save_name_model='convnet/ctc_conv_attention10.pt'):
     super().__init__(logfile=logfile, save_name_model=save_name_model, batch_size=32, lr=1e-4)
   
@@ -422,6 +423,43 @@ class Experiment12(CTCTrainer):
     return Encoder(config=get_encoder_config(config='base'), output_size=kwargs['output_dim'], input_proj='base').to(self.device)
 
 
+class Experiment13(CTCTrainer):
+  def __init__(self, logfile='_logs/_logs_CTC13.txt', save_name_model='convnet/ctc_conv_attention13.pt',
+               metadata_file='_Data_metadata_multigrams_wav2vec.pk'):
+    super().__init__(logfile=logfile, save_name_model=save_name_model, metadata_file=metadata_file, batch_size=48, lr=1e-4)
+  
+  def instanciate_model(self, **kwargs):
+    return Encoder(config=get_encoder_config(config='conv_attention'), output_size=kwargs['output_dim'],
+                   input_proj='base').to(self.device)
+
+
+class Experiment14(CTCTrainer):
+  def __init__(self, logfile='_logs/_logs_CTC14.txt', save_name_model='convnet/ctc_conv_attention14.pt'):
+    super().__init__(logfile=logfile, save_name_model=save_name_model, batch_size=32, lr=1e-4)
+  
+  def instanciate_model(self, **kwargs):
+    return Encoder(config=get_encoder_config(config='conv_attention_large'), output_size=kwargs['output_dim'],
+                   input_proj='base').to(self.device)
+
+
+class Experiment15(CTCTrainer):
+  def __init__(self, logfile='_logs/_logs_CTC15.txt', save_name_model='convnet/ctc_conv_dilated15.pt'):
+    super().__init__(logfile=logfile, save_name_model=save_name_model, batch_size=48, lr=1e-4, patience=75, augmented=True,
+                     new_metadata_file='_CTC_EXP9_metadata.pk')
+  
+  def instanciate_model(self, **kwargs):
+    return Encoder(config=get_encoder_config(config='conv_attention'), output_size=kwargs['output_dim'], input_proj='base').to(self.device)
+
+
+class Experiment16(CTCTrainer):
+  def __init__(self, logfile='_logs/_logs_CTC16.txt', save_name_model='convnet/ctc_conv_attention16.pt'):
+    super().__init__(logfile=logfile, save_name_model=save_name_model, batch_size=32, lr=1e-4)
+  
+  def instanciate_model(self, **kwargs):
+    return Encoder(config=get_encoder_config(config='conv_transformer'), output_size=kwargs['output_dim'],
+                   input_proj='base').to(self.device)
+
+
 def read_preds_greedy_n_beam_search(res_file='_ctc_exp3_predictions.pk', data_file='_Data_metadata_letters_wav2vec.pk', beam_size=10):
   from fast_ctc_decode import beam_search
 
@@ -436,7 +474,7 @@ def read_preds_greedy_n_beam_search(res_file='_ctc_exp3_predictions.pk', data_fi
 
   greedy_preds = [np.array(p).argmax(-1).tolist() for p in res['predictions']]
 
-  print('Beam search...')
+  print('Beam search...')  # beam_cut_threshold
   bs_res = [beam_search(np.array(p, dtype=np.float32), idx_to_tokens, beam_size=beam_size) for p in tqdm(res['predictions'])]
   bs_s = [el[0] for el in bs_res]
 

@@ -7,7 +7,7 @@ from attention import MultiHeadAttention
 
 class GatedEncoderBlock(nn.Module):
   '''Modify Architecture according to paper https://arxiv.org/pdf/1910.06764.pdf'''
-  def __init__(self, d_model, d_keys, d_values, n_heads, d_ff, dropout=0.1, act_fn='relu', mode='output'):
+  def __init__(self, d_model, d_keys, d_values, n_heads, d_ff, dropout=0.1, act_fn='relu', mode='output', **kwargs):
     super().__init__()
     self.attention_head = MultiHeadAttention(d_model, d_keys, d_values, n_heads, dropout=dropout)
 
@@ -100,7 +100,7 @@ class GatedEncoderBlock(nn.Module):
 
 
 class EncoderBlock(nn.Module):
-  def __init__(self, d_model, d_keys, d_values, n_heads, d_ff, dropout=0.1, act_fn='relu'):
+  def __init__(self, d_model, d_keys, d_values, n_heads, d_ff, dropout=0.1, act_fn='relu', **kwargs):
     super().__init__()
     self.attention_head = MultiHeadAttention(d_model, d_keys, d_values, n_heads, dropout=dropout)
     self.feed_forward = nn.Sequential(
@@ -124,10 +124,11 @@ class EncoderBlock(nn.Module):
 
 
 class TransformerEncoder(nn.Module):
-  def __init__(self, n_blocks, d_model, d_keys, d_values, n_heads, d_ff, dropout=0.1, act_fn='relu', block_type='standard'):
+  def __init__(self, n_blocks=6, d_model=512, d_keys=64, d_values=64, n_heads=8, d_ff=1024,
+               dropout=0.1, act_fn='relu', block_type='standard', **kwargs):
     super().__init__()
     block = {'standard': EncoderBlock, 'gated': GatedEncoderBlock}
-    self.encoders = nn.ModuleList([block[block_type](d_model, d_keys, d_values, n_heads, d_ff, dropout=dropout, act_fn=act_fn)
+    self.encoders = nn.ModuleList([block[block_type](d_model, d_keys, d_values, n_heads, d_ff, dropout=dropout, act_fn=act_fn, **kwargs)
                                     for _ in range(n_blocks)])
     
   def forward(self, x, padding_mask=None):

@@ -375,7 +375,7 @@ class CTCAttentionCollator(object):
 class CTCAttentionTrainer(object):
   def __init__(self, device=None, logfile='_logs/_logs_CTCAttn.txt', metadata_file='_Data_metadata_letters_wav2vec.pk',
                batch_size=32, lr=1e-4, load_model=True, n_epochs=500, save_name_model='convnet/ctc_attn.pt', config={},
-               lambda_ctc=1., lambda_attn=1., smoothing_eps=0.1):
+               lambda_ctc=0.2, lambda_attn=0.8, smoothing_eps=0.1):
     logging.basicConfig(filename=logfile, filemode='a', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') if device is None else device
     self.batch_size = batch_size
@@ -423,8 +423,7 @@ class CTCAttentionTrainer(object):
 
     self.train_data_loader = DataLoader(train_dataset, batch_size=self.batch_size, num_workers=4, collate_fn=collator,
                                         shuffle=True, pin_memory=True)
-    self.test_data_loader = DataLoader(test_dataset, batch_size=self.batch_size, num_workers=4, collate_fn=collator,
-                                       shuffle=True, pin_memory=True)
+    self.test_data_loader = DataLoader(test_dataset, batch_size=self.batch_size, num_workers=4, collate_fn=collator, pin_memory=True)
   
   def instanciate_model(self, **kwargs):
     enc_config = kwargs.get('encoder_config', 'base')
@@ -441,7 +440,7 @@ class CTCAttentionTrainer(object):
       eval_loss, accs = self.evaluation()
       logging.info(f"Epoch {epoch} | test_loss = {eval_loss:.3f} | {' | '.join([f'{k} = {v:.3f}' for k, v in accs.items()])}")
 
-      oea = accs.get('ctc_word_accuracy', None)
+      oea = accs.get('attn_word_accuracy', None)
 
       if oea is not None and oea > eval_accuracy_memory:
         logging.info(f'Save model with eval_accuracy = {oea:.3f}')
@@ -527,6 +526,181 @@ class CTCAttentionTrainer(object):
     return losses / len(self.test_data_loader), accs
 
 
+class AttentionOP(nn.Module):
+  def __init__(self, n_heads, max_source_len, max_signal_len, output_size, d_model, bias=True):
+    super().__init__()
+    self.max_source_len = max_source_len
+    self.n_heads = n_heads
+    self.bias = bias
+    self.encoder = Encoder(config=get_encoder_config(config='base'), input_proj='base')
+    self.w_soft = nn.Parameter(torch.Tensor(n_heads * max_source_len, max_signal_len))
+    nn.init.xavier_uniform_(self.w_soft)
+    self.w_proj = nn.Parameter(torch.Tensor(output_size, d_model * n_heads))
+    nn.init.xavier_uniform_(self.w_proj)
+    if self.bias:
+      self.b_proj = nn.Parameter(torch.Tensor(output_size))
+      nn.init.constant_(self.b_proj, 0.)
+  
+  def forward(self, x, t=None):  # x = [batch_size, signal_len, n_feats] | t = batch_source_len
+    t = self.max_source_len if t is None else t
+    x = self.encoder(x)  # [batch_size, signal_len, n_feats]
+    x = self.w_soft[:t*self.n_heads, :x.size(1)].softmax(-1).matmul(x)  # [batch_size, t * n_heads, n_feats]
+    x = x.reshape(x.size(0), t, -1).matmul(self.w_proj.t())  # [batch_size, t, output_size]
+    if self.bias:
+      x = x + self.b_proj
+    return x
+
+
+class AttentionDataset(Dataset):
+  def __init__(self, ids_to_audiofile, ids_to_encodedsources, sort_by_target_len=True):
+    self.ids_to_audiofilefeatures = {i: f.replace('.flac', '.features.npy') for i, f in ids_to_audiofile.items()}
+    self.ids_to_encodedsources = ids_to_encodedsources
+    self.identities = list(sorted(ids_to_encodedsources.keys()))
+
+    if sort_by_target_len:
+      self.identities = AttentionDataset._sort_by_targets_len(self.identities, ids_to_encodedsources)
+  
+  @staticmethod
+  def _sort_by_targets_len(ids, ids2es):
+    return list(map(lambda x: x[0], sorted([(i, len(ids2es[i])) for i in ids], key=lambda x: x[1])))
+  
+  def __len__(self):
+    return len(self.identities)
+  
+  def __getitem__(self, idx):
+    input_ = torch.tensor(np.load(self.ids_to_audiofilefeatures[self.identities[idx]]))
+    target = torch.LongTensor(self.ids_to_encodedsources[self.identities[idx]])
+    return input_, target
+
+
+class AttentionCollator(object):
+  def __init__(self, audio_pad, text_pad):
+    self.audio_pad = audio_pad
+    self.text_pad = text_pad
+
+  def __call__(self, batch):
+    inputs, targets = zip(*batch)
+    inputs_batch = pad_sequence(inputs, batch_first=True, padding_value=self.audio_pad).float()
+    targets_batch = pad_sequence(targets, batch_first=True, padding_value=self.text_pad)
+    return inputs_batch, targets_batch
+
+
+class AttentionTrainer(object):
+  def __init__(self, device=None, logfile='_logs/_logs_Attn.txt', metadata_file='_Data_metadata_letters_wav2vec.pk',
+               batch_size=64, lr=1e-4, load_model=True, n_epochs=500, save_name_model='convnet/attn.pt', config={}):
+    logging.basicConfig(filename=logfile, filemode='a', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') if device is None else device
+    self.batch_size = batch_size
+    self.n_epochs = n_epochs
+    self.save_name_model = save_name_model
+    self.metadata_file = metadata_file
+    self.smoothing_eps = 0.1
+
+    self.set_data()
+    self.set_data_loader()
+
+    self.model = self.instanciate_model(**config)
+    self.model = nn.DataParallel(self.model)
+
+    logging.info(self.model)
+    logging.info(f'The model has {u.count_trainable_parameters(self.model):,} trainable parameters')
+
+    self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
+    self.criterion = u.CrossEntropyLoss(self.tokens_to_idx['<pad>'])
+
+    if load_model:
+      u.load_model(self.model, self.save_name_model, restore_only_similars=True)
+      # u.load_model(self.model.module.encoder, 'convnet/ctc_conv_dilated12.pt', restore_only_similars=True)
+  
+  def set_data(self):
+    self.data = Data()
+    self.data.load_metadata(save_name=self.metadata_file)
+
+    self.idx_to_tokens = self.data.idx_to_tokens[1:]
+    self.tokens_to_idx = {t: i for i, t in enumerate(self.idx_to_tokens)}
+
+    self.ids_to_encodedsources_train = {k: (np.array(v[1:])-1).tolist() for k, v in self.data.ids_to_encodedsources_train.items()}
+    self.ids_to_encodedsources_test = {k: (np.array(v[1:])-1).tolist() for k, v in self.data.ids_to_encodedsources_test.items()}
+  
+  def set_data_loader(self):
+    train_dataset = AttentionDataset(self.data.ids_to_audiofile_train, self.ids_to_encodedsources_train)
+    test_dataset = AttentionDataset(self.data.ids_to_audiofile_test, self.ids_to_encodedsources_test)
+
+    collator = AttentionCollator(0, self.tokens_to_idx['<pad>'])
+
+    self.train_data_loader = DataLoader(train_dataset, batch_size=self.batch_size, num_workers=4, collate_fn=collator,
+                                        shuffle=True, pin_memory=True)
+    self.test_data_loader = DataLoader(test_dataset, batch_size=self.batch_size, num_workers=4, collate_fn=collator, pin_memory=True)
+  
+  def instanciate_model(self, **kwargs):
+    return AttentionOP(kwargs.get('n_heads', 8), self.data.max_source_len, self.data.max_signal_len,
+                       len(self.idx_to_tokens), kwargs.get('d_model', 512)).to(self.device)
+  
+  def train(self):
+    print('Start Training...')
+    eval_accuracy_memory = 0
+    for epoch in tqdm(range(self.n_epochs)):
+      epoch_loss, accs = self.train_pass()
+      logging.info(f"Epoch {epoch} | train_loss = {epoch_loss:.3f} | {' | '.join([f'{k} = {v:.3f}' for k, v in accs.items()])}")
+      eval_loss, accs = self.evaluation()
+      logging.info(f"Epoch {epoch} | test_loss = {eval_loss:.3f} | {' | '.join([f'{k} = {v:.3f}' for k, v in accs.items()])}")
+
+      oea = accs.get('word_accuracy', None)
+
+      if oea is not None and oea > eval_accuracy_memory:
+        logging.info(f'Save model with eval_accuracy = {oea:.3f}')
+        u.save_checkpoint(self.model, None, self.save_name_model)
+        eval_accuracy_memory = oea
+  
+  def train_pass(self):
+    losses, accs = 0, {}
+    all_targets, all_preds = [], []
+
+    for inputs, targets in tqdm(self.train_data_loader):
+      inputs, targets = inputs.to(self.device), targets.to(self.device)
+      
+      preds = self.model(inputs, t=targets.size(1))  # [batch_size, seq_len, output_dim]
+
+      self.optimizer.zero_grad()
+      current_loss = self.criterion(preds.reshape(-1, preds.shape[-1]), targets.reshape(-1), epsilon=self.smoothing_eps)
+      current_loss.backward()
+      self.optimizer.step()
+
+      all_targets += targets.tolist()
+      all_preds += preds.argmax(dim=-1).tolist()
+
+      losses += current_loss.item()
+
+    accs = Data.compute_scores(targets=all_targets, predictions=all_preds, eos_idx=self.tokens_to_idx['<eos>'],
+                               idx_to_tokens=self.idx_to_tokens)
+    
+    return losses / len(self.train_data_loader), accs
+  
+  @torch.no_grad()
+  def evaluation(self):
+    losses, accs = 0, {}
+    all_targets, all_preds = [], []
+
+    self.model.eval()
+
+    for inputs, targets in tqdm(self.test_data_loader):
+      inputs, targets = inputs.to(self.device), targets.to(self.device)
+      
+      preds = self.model(inputs, t=targets.size(1))  # [batch_size, seq_len, output_dim]
+
+      losses = self.criterion(preds.reshape(-1, preds.shape[-1]), targets.reshape(-1), epsilon=self.smoothing_eps).item()
+
+      all_targets += targets.tolist()
+      all_preds += preds.argmax(dim=-1).tolist()
+    
+    self.model.train()
+
+    accs = Data.compute_scores(targets=all_targets, predictions=all_preds, eos_idx=self.tokens_to_idx['<eos>'],
+                               idx_to_tokens=self.idx_to_tokens)
+    
+    return losses / len(self.test_data_loader), accs
+
+
 if __name__ == "__main__":
   ## SEEDING FOR REPRODUCIBILITY
   SEED = 42
@@ -548,3 +722,8 @@ if __name__ == "__main__":
   if rep == 'y':
     ctc_attn = CTCAttentionTrainer()
     ctc_attn.train()
+  
+  rep = input('Train Attention Model? (y or n): ')
+  if rep == 'y':
+    attn = AttentionTrainer()
+    attn.train()

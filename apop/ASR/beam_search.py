@@ -5,8 +5,10 @@ import math
 import torch
 import numpy as np
 import pickle as pk
+import editdistance as ed
 
 from tqdm import tqdm
+from itertools import groupby
 
 sys.path.append(os.path.abspath(__file__).replace('ASR/beam_search.py', ''))
 import utils as u
@@ -14,7 +16,7 @@ import utils as u
 from data import Data
 from convnet_experiments import Experiment29
 from ngrams_experiments import ngrams_encoding
-from multitasks_experiments import STTReviewTrainer2, Seq2SeqReview
+# from multitasks_experiments import STTReviewTrainer2, Seq2SeqReview
 
 
 @torch.no_grad()
@@ -160,8 +162,88 @@ def test_utility_bs():
   print(f'ok -> {sum(rep)} / {len(rep)}')
 
 
+def bs_test(model_name='bert-large-uncased-whole-word-masking'):  # distilbert-base-uncased
+  sys.path.append('/Users/i350230/GITHUB/CTCDecoder/src/')
+  import editdistance as ed
+  from BKTree import BKTree
+  from collections import defaultdict
+  # from transformers import AutoModelWithLMHead, AutoTokenizer
+
+  # tokenizer = AutoTokenizer.from_pretrained(model_name)
+  # model = AutoModelWithLMHead.from_pretrained(model_name)
+
+  with open('_Data_metadata_letters_wav2vec.pk', 'rb') as f:
+    data = pk.load(f)
+  
+  with open('_ctc_exp3_predictions.pk', 'rb') as f:
+    res = pk.load(f)
+  
+  idx_to_tokens = ['<blank>'] + data['idx_to_tokens'][3:]
+  tokens_to_idx = {t: i for i, t in enumerate(idx_to_tokens)}
+  
+  greedy_preds = [np.array(p).argmax(-1).tolist() for p in res['predictions']]
+  target_sentences = [''.join([idx_to_tokens[i] for i in t[:t.index(0) if 0 in t else None]]) for t in res['targets']]
+  greedy_preds_sentences = [[i for i, _ in groupby(p)] for p in greedy_preds]
+  greedy_preds_sentences = [''.join([idx_to_tokens[i] for i in p if i != 0]) for p in greedy_preds_sentences]
+  print(Data.compute_scores(targets=target_sentences, predictions=greedy_preds_sentences, rec=False))
+
+  vocabs = list(set([w for s in data['ids_to_transcript_train'].values() for w in s.lower().split(' ')]))
+  vocabs += list(set([w for s in data['ids_to_transcript_test'].values() for w in s.lower().split(' ')]))
+  # bk_tree = BKTree(vocabs)
+  vocabs_set = set(vocabs)
+  print(f'Vocab size = {len(vocabs_set)}')
+
+  for t, p in zip(target_sentences, greedy_preds_sentences):
+    if t != p:
+      for tw, pw in zip(t.split(' '), p.split(' ')):
+        if tw != pw and pw not in vocabs_set:
+
+          candidats = defaultdict(list)
+          best_d = 100
+          for w in vocabs_set:
+            d = ed.eval(w, pw)
+            if d == best_d:
+              candidats[d].append(w)
+            elif d < best_d:
+              candidats = defaultdict(list)
+              candidats[d].append(w)
+              best_d = d
+            else:
+              continue
+          print(f'target = {tw} | pred = {pw}')
+          input(candidats)
+
+          # resp = bk_tree.query(pw, 2)
+          # input(f'{tw} | {pw}\n{resp}')
+  
+  # lm_preds = []
+  # for t, p in tqdm(zip(target_sentences, greedy_preds_sentences), total=len(target_sentences)):
+  #   new_source = p
+  #   pw = p.split(' ')
+  #   if any([w not in vocabs_set for w in pw]):
+  #     source = ' '.join([tokenizer.mask_token if w not in vocabs_set else w for w in pw])
+  #     enc_source = tokenizer.encode(source, return_tensors='pt')
+  #     mask_token_index = torch.where(enc_source == tokenizer.mask_token_id)[1]
+
+  #     token_logits = model(enc_source)[0]
+  #     mask_token_logits = token_logits[0, mask_token_index, :]
+
+  #     top_5_tokens = torch.topk(mask_token_logits, 5, dim=1).indices[0].tolist()
+
+  #     for token in top_5_tokens:
+  #       if tokenizer.decode([token]) in vocabs_set:
+  #         new_source = source.replace(tokenizer.mask_token, tokenizer.decode([token]))
+  #         break
+  #     # new_source = source.replace(tokenizer.mask_token, tokenizer.decode([top_5_tokens[0]]))
+  #   lm_preds.append(new_source)
+  
+  # print(Data.compute_scores(targets=target_sentences, predictions=lm_preds, rec=False))
+
+
+
 if __name__ == "__main__":
-  beam_search_experiment()
+  # beam_search_experiment()
   # beam_search_experiment2()
 
   # test_utility_bs()
+  bs_test()

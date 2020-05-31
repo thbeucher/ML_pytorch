@@ -116,6 +116,8 @@ def compare_all(folder, read_from_new=True):
   ax[0].title.set_text('Train')
   sns.lineplot(x='epoch', y='accuracy', hue='label', data=df[df['tr_te']=='train'], ax=ax[0])
   ax[1].title.set_text('Test')
+  ax[1].set_yticks([i*0.02 for i in range(51)], minor=True)
+  ax[1].grid(b=True, which='both')
   sns.lineplot(x='epoch', y='accuracy', hue='label', data=df[df['tr_te']=='test'], ax=ax[1])
   plt.show()
 

@@ -239,6 +239,93 @@ def get_encoder_config(config='base'):
                       [('feed_forward', {'input_size': 3 * 512, 'output_size': 512, 'd_ff': 2048, 'dropout': 0.25})]
                     ]
                   ]
+  elif config == 'conv_attention_large':
+    cnet_config = [
+                    [
+                      [
+                        ('conv_attention_conv_block', {'in_chan': 512, 'out_chan': 512, 'kernel_conv': 3, 'stride_conv': 2, 'pad_conv': 1,
+                                                       'dil_conv': 1, 'dropout_conv': 0.25, 'groups': 1, 'k': 1, 'n_heads': 32,
+                                                       'kernel_attn': 3, 'dropout_attn': 0.25, 'pad_attn': 1, 'bias': True}),
+                        ('conv_attention_conv_block', {'in_chan': 512, 'out_chan': 512, 'kernel_conv': 3, 'stride_conv': 2, 'pad_conv': 2,
+                                                       'dil_conv': 2, 'dropout_conv': 0.25, 'groups': 1, 'k': 1, 'n_heads': 32,
+                                                       'kernel_attn': 3, 'dropout_attn': 0.25, 'pad_attn': 1, 'bias': True}),
+                        ('conv_attention_conv_block', {'in_chan': 512, 'out_chan': 512, 'kernel_conv': 3, 'stride_conv': 2, 'pad_conv': 3,
+                                                       'dil_conv': 3, 'dropout_conv': 0.25, 'groups': 1, 'k': 1, 'n_heads': 32,
+                                                       'kernel_attn': 3, 'dropout_attn': 0.25, 'pad_attn': 1, 'bias': True})
+                      ],
+                      [('feed_forward', {'input_size': 3 * 512, 'output_size': 512, 'd_ff': 2048, 'dropout': 0.25})]
+                    ],
+                    [
+                      [
+                        ('conv_attention_conv_block', {'in_chan': 512, 'out_chan': 544, 'kernel_conv': 5, 'stride_conv': 2, 'pad_conv': 2,
+                                                       'dil_conv': 1, 'dropout_conv': 0.25, 'groups': 1, 'k': 1, 'n_heads': 32,
+                                                       'kernel_attn': 3, 'dropout_attn': 0.25, 'pad_attn': 1, 'bias': True}),
+                        ('conv_attention_conv_block', {'in_chan': 512, 'out_chan': 544, 'kernel_conv': 5, 'stride_conv': 2, 'pad_conv': 4,
+                                                       'dil_conv': 2, 'dropout_conv': 0.25, 'groups': 1, 'k': 1, 'n_heads': 32,
+                                                       'kernel_attn': 3, 'dropout_attn': 0.25, 'pad_attn': 1, 'bias': True}),
+                        ('conv_attention_conv_block', {'in_chan': 512, 'out_chan': 544, 'kernel_conv': 5, 'stride_conv': 2, 'pad_conv': 6,
+                                                       'dil_conv': 3, 'dropout_conv': 0.25, 'groups': 1, 'k': 1, 'n_heads': 32,
+                                                       'kernel_attn': 3, 'dropout_attn': 0.25, 'pad_attn': 1, 'bias': True})
+                      ],
+                      [('feed_forward', {'input_size': 3 * 544, 'output_size': 544, 'd_ff': 2048, 'dropout': 0.25})]
+                    ],
+                    [
+                      [
+                        ('conv_attention_conv_block', {'in_chan': 544, 'out_chan': 576, 'kernel_conv': 7, 'stride_conv': 1, 'pad_conv': 3,
+                                                       'dil_conv': 1, 'dropout_conv': 0.25, 'groups': 1, 'k': 1, 'n_heads': 32,
+                                                       'kernel_attn': 3, 'dropout_attn': 0.25, 'pad_attn': 1, 'bias': True}),
+                        ('conv_attention_conv_block', {'in_chan': 544, 'out_chan': 576, 'kernel_conv': 7, 'stride_conv': 1, 'pad_conv': 6,
+                                                       'dil_conv': 2, 'dropout_conv': 0.25, 'groups': 1, 'k': 1, 'n_heads': 32,
+                                                       'kernel_attn': 3, 'dropout_attn': 0.25, 'pad_attn': 1, 'bias': True}),
+                        ('conv_attention_conv_block', {'in_chan': 544, 'out_chan': 576, 'kernel_conv': 7, 'stride_conv': 1, 'pad_conv': 9,
+                                                       'dil_conv': 3, 'dropout_conv': 0.25, 'groups': 1, 'k': 1, 'n_heads': 32,
+                                                       'kernel_attn': 3, 'dropout_attn': 0.25, 'pad_attn': 1, 'bias': True})
+                      ],
+                      [('feed_forward', {'input_size': 3 * 576, 'output_size': 576, 'd_ff': 2048, 'dropout': 0.25})]
+                    ],
+                    [
+                      [
+                        ('conv_attention_conv_block', {'in_chan': 576, 'out_chan': 608, 'kernel_conv': 9, 'stride_conv': 1, 'pad_conv': 4,
+                                                       'dil_conv': 1, 'dropout_conv': 0.25, 'groups': 1, 'k': 1, 'n_heads': 32,
+                                                       'kernel_attn': 3, 'dropout_attn': 0.25, 'pad_attn': 1, 'bias': True}),
+                        ('conv_attention_conv_block', {'in_chan': 576, 'out_chan': 608, 'kernel_conv': 9, 'stride_conv': 1, 'pad_conv': 8,
+                                                       'dil_conv': 2, 'dropout_conv': 0.25, 'groups': 1, 'k': 1, 'n_heads': 32,
+                                                       'kernel_attn': 3, 'dropout_attn': 0.25, 'pad_attn': 1, 'bias': True}),
+                        ('conv_attention_conv_block', {'in_chan': 576, 'out_chan': 608, 'kernel_conv': 9, 'stride_conv': 1, 'pad_conv': 12,
+                                                       'dil_conv': 3, 'dropout_conv': 0.25, 'groups': 1, 'k': 1, 'n_heads': 32,
+                                                       'kernel_attn': 3, 'dropout_attn': 0.25, 'pad_attn': 1, 'bias': True})
+                      ],
+                      [('feed_forward', {'input_size': 3 * 608, 'output_size': 608, 'd_ff': 2048, 'dropout': 0.25})]
+                    ],
+                    [
+                      [
+                        ('conv_attention_conv_block', {'in_chan': 608, 'out_chan': 640, 'kernel_conv': 11, 'stride_conv': 1, 'pad_conv': 5,
+                                                       'dil_conv': 1, 'dropout_conv': 0.25, 'groups': 1, 'k': 1, 'n_heads': 32,
+                                                       'kernel_attn': 3, 'dropout_attn': 0.25, 'pad_attn': 1, 'bias': True}),
+                        ('conv_attention_conv_block', {'in_chan': 608, 'out_chan': 640, 'kernel_conv': 11, 'stride_conv': 1, 'pad_conv': 10,
+                                                       'dil_conv': 2, 'dropout_conv': 0.25, 'groups': 1, 'k': 1, 'n_heads': 32,
+                                                       'kernel_attn': 3, 'dropout_attn': 0.25, 'pad_attn': 1, 'bias': True}),
+                        ('conv_attention_conv_block', {'in_chan': 608, 'out_chan': 640, 'kernel_conv': 11, 'stride_conv': 1, 'pad_conv': 15,
+                                                       'dil_conv': 3, 'dropout_conv': 0.25, 'groups': 1, 'k': 1, 'n_heads': 32,
+                                                       'kernel_attn': 3, 'dropout_attn': 0.25, 'pad_attn': 1, 'bias': True})
+                      ],
+                      [('feed_forward', {'input_size': 3 * 640, 'output_size': 640, 'd_ff': 2048, 'dropout': 0.25})]
+                    ],
+                    [
+                      [
+                        ('conv_attention_conv_block', {'in_chan': 640, 'out_chan': 672, 'kernel_conv': 15, 'stride_conv': 1, 'pad_conv': 7,
+                                                       'dil_conv': 1, 'dropout_conv': 0.25, 'groups': 1, 'k': 1, 'n_heads': 32,
+                                                       'kernel_attn': 3, 'dropout_attn': 0.25, 'pad_attn': 1, 'bias': True}),
+                        ('conv_attention_conv_block', {'in_chan': 640, 'out_chan': 672, 'kernel_conv': 15, 'stride_conv': 1, 'pad_conv': 14,
+                                                       'dil_conv': 2, 'dropout_conv': 0.25, 'groups': 1, 'k': 1, 'n_heads': 32,
+                                                       'kernel_attn': 3, 'dropout_attn': 0.25, 'pad_attn': 1, 'bias': True}),
+                        ('conv_attention_conv_block', {'in_chan': 640, 'out_chan': 672, 'kernel_conv': 15, 'stride_conv': 1, 'pad_conv': 21,
+                                                       'dil_conv': 3, 'dropout_conv': 0.25, 'groups': 1, 'k': 1, 'n_heads': 32,
+                                                       'kernel_attn': 3, 'dropout_attn': 0.25, 'pad_attn': 1, 'bias': True})
+                      ],
+                      [('feed_forward', {'input_size': 3 * 672, 'output_size': 672, 'd_ff': 2048, 'dropout': 0.25})]
+                    ]
+                  ]
   elif config == 'rnn_base':
     cnet_config = [
                     [
@@ -308,6 +395,41 @@ def get_encoder_config(config='base'):
                       [('feed_forward', {'input_size': 3 * 512, 'output_size': 512, 'd_ff': 2048, 'dropout': 0.25})],
                       [('lstm', {'input_size': 512, 'hidden_size': 256, 'num_layers': 2, 'batch_first': True, 'dropout': 0.25,
                                  'bidirectional': True})]
+                    ]
+                  ]
+  elif config == 'conv_transformer':
+    cnet_config = [
+                    [
+                      [
+                        ('conv_attention_conv_block', {'in_chan': 512, 'out_chan': 512, 'kernel_conv': 3, 'stride_conv': 2, 'pad_conv': 1,
+                                                       'dil_conv': 1, 'dropout_conv': 0.25, 'groups': 1, 'k': 1, 'n_heads': 32,
+                                                       'kernel_attn': 3, 'dropout_attn': 0.25, 'pad_attn': 1, 'bias': True}),
+                        ('conv_attention_conv_block', {'in_chan': 512, 'out_chan': 512, 'kernel_conv': 3, 'stride_conv': 2, 'pad_conv': 2,
+                                                       'dil_conv': 2, 'dropout_conv': 0.25, 'groups': 1, 'k': 1, 'n_heads': 32,
+                                                       'kernel_attn': 3, 'dropout_attn': 0.25, 'pad_attn': 1, 'bias': True}),
+                        ('conv_attention_conv_block', {'in_chan': 512, 'out_chan': 512, 'kernel_conv': 3, 'stride_conv': 2, 'pad_conv': 3,
+                                                       'dil_conv': 3, 'dropout_conv': 0.25, 'groups': 1, 'k': 1, 'n_heads': 32,
+                                                       'kernel_attn': 3, 'dropout_attn': 0.25, 'pad_attn': 1, 'bias': True})
+                      ],
+                      [('feed_forward', {'input_size': 3 * 512, 'output_size': 512, 'd_ff': 2048, 'dropout': 0.25})]
+                    ],
+                    [
+                      [
+                        ('conv_attention_conv_block', {'in_chan': 512, 'out_chan': 512, 'kernel_conv': 3, 'stride_conv': 2, 'pad_conv': 1,
+                                                       'dil_conv': 1, 'dropout_conv': 0.25, 'groups': 1, 'k': 1, 'n_heads': 32,
+                                                       'kernel_attn': 3, 'dropout_attn': 0.25, 'pad_attn': 1, 'bias': True}),
+                        ('conv_attention_conv_block', {'in_chan': 512, 'out_chan': 512, 'kernel_conv': 3, 'stride_conv': 2, 'pad_conv': 2,
+                                                       'dil_conv': 2, 'dropout_conv': 0.25, 'groups': 1, 'k': 1, 'n_heads': 32,
+                                                       'kernel_attn': 3, 'dropout_attn': 0.25, 'pad_attn': 1, 'bias': True}),
+                        ('conv_attention_conv_block', {'in_chan': 512, 'out_chan': 512, 'kernel_conv': 3, 'stride_conv': 2, 'pad_conv': 3,
+                                                       'dil_conv': 3, 'dropout_conv': 0.25, 'groups': 1, 'k': 1, 'n_heads': 32,
+                                                       'kernel_attn': 3, 'dropout_attn': 0.25, 'pad_attn': 1, 'bias': True})
+                      ],
+                      [('feed_forward', {'input_size': 3 * 512, 'output_size': 512, 'd_ff': 2048, 'dropout': 0.25})]
+                    ],
+                    [
+                      [('transformer', {'n_blocks': 4, 'd_model': 512, 'd_keys': 32, 'd_values': 32, 'n_heads': 16, 'd_ff': 2048,
+                                        'dropout': 0.25, 'act_fn': 'relu', 'block_type': 'standard'})]
                     ]
                   ]
   else:

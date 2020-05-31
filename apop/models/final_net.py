@@ -7,6 +7,7 @@ import torch.nn.functional as F
 
 sys.path.append(os.path.abspath(__file__).replace('final_net.py', ''))
 from conv_seqseq import Decoder as CSSDecoder
+from transformer.encoder import TransformerEncoder
 from transformer.decoder import TransformerDecoder
 from transformer.attention import MultiHeadAttention
 from final_net_configs import get_encoder_config, get_decoder_config, get_input_proj_layer
@@ -140,7 +141,8 @@ class Encoder(nn.Module):
     self.input_proj = None
     self.available_blocks = {'conv_block': ConvBlock, 'separable_conv_block': SeparableConvBlock,
                              'attention_conv_block': AttentionConvBlock, 'feed_forward': FeedForward,
-                             'conv_attention_conv_block': ConvAttentionConvBlock, 'lstm': nn.LSTM}
+                             'conv_attention_conv_block': ConvAttentionConvBlock, 'lstm': nn.LSTM,
+                             'transformer': TransformerEncoder}
     
     if input_proj is not None:
       self.input_proj = get_input_proj_layer(config=input_proj)
@@ -160,7 +162,7 @@ class Encoder(nn.Module):
     self.network = nn.ModuleList(layers)
 
     if output_size is not None:
-      key = [k for k in ['output_size', 'out_chan', 'in_chan', 'input_size'] if k in self.config[-1][-1][-1][1]][0]
+      key = [k for k in ['output_size', 'out_chan', 'in_chan', 'input_size', 'd_model'] if k in self.config[-1][-1][-1][1]][0]
       self.output_proj = nn.Linear(self.config[-1][-1][-1][1][key], output_size)
   
   def forward(self, x):
@@ -201,14 +203,14 @@ class Decoder(nn.Module):
       conf = get_decoder_config(config=config, **kwargs)
       embedder = TextEmbedder(conf['output_dim'], emb_dim=conf['emb_dim'], max_seq_len=conf['max_seq_len'])
       self.network = CSSDecoder(conf['output_dim'], conf['emb_dim'], conf['hid_dim'], conf['n_layers'], conf['kernel_size'],
-                                conf['dropout'], conf['pad_idx'], conf['device'], embedder=embedder, score_fn=conf['score_fn'],
+                                conf['dropout'], conf['pad_idx'], embedder=embedder, score_fn=conf['score_fn'],
                                 max_seq_len=conf['max_seq_len'], scaling_energy=conf['scaling_energy'], multi_head=conf['multi_head'],
                                 d_keys_values=conf['d_keys_values'])
     else:
       conf = get_decoder_config(config='transformer', **kwargs)
       self.embedder = TextEmbedder(conf['output_dim'], emb_dim=conf['d_model'], max_seq_len=conf['max_seq_len'])
       self.network = TransformerDecoder(conf['n_blocks'], conf['d_model'], conf['d_keys'], conf['d_values'], conf['n_heads'],
-                                        conf['n_heads'], conf['d_ff'], dropout=conf['dropout'])
+                                        conf['d_ff'], dropout=conf['dropout'])
       self.output_proj = nn.Linear(conf['d_model'], conf['output_dim'])
       
   def forward(self, x, y):  # x = [batch_size, seq_len, n_feats] | y = [batch_size, seq_len]
@@ -262,3 +264,19 @@ if __name__ == "__main__":
   dec_in = torch.randint(0, 31, (2, 200))
   out = decoder(enc_out, dec_in)
   print(f'dec_in = {dec_in.shape} | out = {out.shape}')
+
+  ## MODEL SIZES
+  print('MODEL SIZES')
+  import pandas as pd
+  from tabulate import tabulate
+  confs = ['separable', 'attention', 'attention_glu', 'conv_attention', 'conv_attention_large', 'rnn_base',
+           'conv_transformer', 'base', 'conv_gated_transformer']
+  res = []
+  for conf in confs:
+    model = Encoder(config=get_encoder_config(config=conf))
+    res.append((conf, f'{sum(p.numel() for p in model.parameters() if p.requires_grad):,}'))
+  res = sorted(res, key=lambda x: x[1])
+  models, n_params = zip(*res)
+  res = {'model': list(models), 'n_params': list(n_params)}
+  df = pd.DataFrame.from_dict(res)
+  print(tabulate(df, headers='keys', tablefmt='psql'))
