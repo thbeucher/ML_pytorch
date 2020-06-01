@@ -1,6 +1,7 @@
 import os
 import re
 import sys
+import h5py
 import torch
 import random
 import librosa
@@ -182,7 +183,7 @@ class Data(object):
               filename = os.path.join(full_path_f2name, f3name)
               if '.flac' in f3name:
                 dataset_filelist['audio'].append(filename)
-              elif '.npy' in f3name:
+              elif '.npy' in f3name or '.h5' in f3name:
                 dataset_filelist['features'].append(filename)
               elif '.txt' in f3name:
                 dataset_filelist['transcript'].append(filename)
@@ -303,10 +304,19 @@ class Data(object):
     return librosa.feature.mfcc(y=signal, sr=sample_rate, dct_type=dct_type, n_mfcc=n_mfcc, hop_length=hop_length, n_fft=n_fft).T
   
   @staticmethod
-  def wav2vec_extraction(signal, wav2vec_model=None, filename='', save_features=False, **kwargs):
-    if save_features and os.path.isfile(filename.replace('.flac', '.features.npy')):
-      c = np.load(filename.replace('.flac', '.features.npy'))
-      return c
+  def wav2vec_extraction(signal, wav2vec_model=None, filename='', save_features=False, save_method='npy', **kwargs):
+    if save_features:
+      if save_method == 'h5':
+        fname = filename.replace('.flac', '.features.h5')
+        if os.path.isfile(fname):
+          with h5py.File(fname, 'r') as hf:
+            c = hf['features'][()]
+            return c
+      else:
+        fname = filename.replace('.flac', '.features.npy')
+        if os.path.isfile(fname):
+          c = np.load(fname)
+          return c
 
     assert wav2vec_model is not None, 'You must provide wav2vec_model'
 
@@ -316,7 +326,11 @@ class Data(object):
       c = c.squeeze(0).T
     
     if save_features:
-      np.save(filename.replace('.flac', '.features.npy'), c.numpy())
+      if save_method == 'h5':
+        with h5py.File(filename.replace('.flac', '.features.h5'), 'w') as hf:
+          hf.create_dataset('features', data=c.numpy(), compression='gzip', compression_opts=9)
+      else:
+        np.save(filename.replace('.flac', '.features.npy'), c.numpy())
 
     return c
   
