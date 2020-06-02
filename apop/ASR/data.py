@@ -304,31 +304,28 @@ class Data(object):
     return librosa.feature.mfcc(y=signal, sr=sample_rate, dct_type=dct_type, n_mfcc=n_mfcc, hop_length=hop_length, n_fft=n_fft).T
   
   @staticmethod
-  def wav2vec_extraction(signal, wav2vec_model=None, filename='', save_features=False, save_method='npy', **kwargs):
+  def wav2vec_extraction(signal, wav2vec_model=None, filename='', save_features=False, save_method='h5', to_gpu=True, **kwargs):
     if save_features:
-      if save_method == 'h5':
-        fname = filename.replace('.flac', '.features.h5')
-        if os.path.isfile(fname):
-          with h5py.File(fname, 'r') as hf:
-            c = hf['features'][()]
-            return c
-      else:
-        fname = filename.replace('.flac', '.features.npy')
-        if os.path.isfile(fname):
-          c = np.load(fname)
+      if save_method == 'h5' and os.path.isfile(filename.replace('.flac', '.features.h5')):
+        with h5py.File(filename.replace('.flac', '.features.h5'), 'r') as hf:
+          c = hf['features'][()]
           return c
+      elif os.path.isfile(filename.replace('.flac', '.features.npy')):
+        c = np.load(filename.replace('.flac', '.features.npy'))
+        return c
 
     assert wav2vec_model is not None, 'You must provide wav2vec_model'
 
     with torch.no_grad():
-      z = wav2vec_model.feature_extractor(torch.Tensor(signal).reshape(1, -1))
+      signal = torch.Tensor(signal).reshape(1, -1)
+      z = wav2vec_model.feature_extractor(signal.cuda() if to_gpu else signal)
       c = wav2vec_model.feature_aggregator(z)
       c = c.squeeze(0).T
     
     if save_features:
       if save_method == 'h5':
         with h5py.File(filename.replace('.flac', '.features.h5'), 'w') as hf:
-          hf.create_dataset('features', data=c.numpy(), compression='gzip', compression_opts=9)
+          hf.create_dataset('features', data=c.cpu().numpy(), compression='gzip', compression_opts=9)
       else:
         np.save(filename.replace('.flac', '.features.npy'), c.numpy())
 
@@ -590,13 +587,22 @@ class Data(object):
     encoding_fn = Data.letters_encoding if encoding_fn is None else encoding_fn
 
     print('Processing training & testing transcripts files...')
-    self.get_transcripts(train_folder, var_name='ids_to_transcript_train')
-    ids_train, sources_train = zip(*[(k, v) for k, v in self.ids_to_transcript_train.items()])
+    if isinstance(train_folder, str):
+      self.get_transcripts(train_folder, var_name='ids_to_transcript_train')
+      ids_train, sources_train = zip(*[(k, v) for k, v in self.ids_to_transcript_train.items()])
+    else:
+      ids_train, sources_train = [], []
+      for tf in train_folder:
+        self.get_transcripts(tf, var_name='ids_to_transcript_train')
+        ids_train_tmp, sources_train_tmp = zip(*[(k, v) for k, v in self.ids_to_transcript_train.items()])
+        ids_train += ids_train_tmp
+        sources_train += sources_train_tmp
+      self.ids_to_transcript_train = {i: s for i, s in zip(ids_train, sources_train)}
 
     self.get_transcripts(test_folder, var_name='ids_to_transcript_test')
     ids_test, sources_test = zip(*[(k, v) for k, v in self.ids_to_transcript_test.items()])
 
-    sources_encoded, self.idx_to_tokens, self.tokens_to_idx = encoding_fn(sources_train + sources_test)
+    sources_encoded, self.idx_to_tokens, self.tokens_to_idx = encoding_fn(sources_train + list(sources_test))
 
     self.max_source_len = max(map(len, sources_encoded))
 
@@ -652,7 +658,11 @@ class Data(object):
     process_file_fn = Data.read_and_slice_signal if process_file_fn is None else process_file_fn
     slice_fn = Data.window_slicing_signal if slice_fn is None else slice_fn
 
-    self.ids_to_audiofile_train = {f.split('/')[-1].split('.')[0]: f for f in list_files_fn(train_folder)['audio']}
+    if isinstance(train_folder, str):
+      self.ids_to_audiofile_train = {f.split('/')[-1].split('.')[0]: f for f in list_files_fn(train_folder)['audio']}
+    else:
+      files = [f for tf in train_folder for f in list_files_fn(tf)['audio']]
+      self.ids_to_audiofile_train = {f.split('/')[-1].split('.')[0]: f for f in files}
     self.ids_to_audiofile_test = {f.split('/')[-1].split('.')[0]: f for f in list_files_fn(test_folder)['audio']}
 
     for filename in tqdm(list(self.ids_to_audiofile_train.values()) + list(self.ids_to_audiofile_test.values())):

@@ -27,7 +27,7 @@ class DecoderBlock(nn.Module):
     self.layer_norm3 = nn.LayerNorm(d_model)
     self.dropout = nn.Dropout(dropout)
 
-  def forward(self, x, enc_out, padding_mask=None, save=False, aggregate=False):
+  def forward(self, x, enc_out, padding_mask=None, save=False, aggregate=False, futur_masking=True):
     '''
     Params:
       * x : torch tensor
@@ -39,7 +39,7 @@ class DecoderBlock(nn.Module):
     save and aggregate can be set to True to speed up decoding phase (do not use it during training)
     '''
     # creates triangular mask to hide the futur
-    futur_padding_mask = u.create_futur_mask(x).to(x.device).unsqueeze(1)
+    futur_padding_mask = u.create_futur_mask(x).to(x.device).unsqueeze(1) if futur_masking else None
     # Apply attention to inputs
     att = self.masked_attention_head(x, x, x, mask=futur_padding_mask, aggregate=aggregate)
     x = self.layer_norm1(x + self.dropout(att))
@@ -61,9 +61,9 @@ class TransformerDecoder(nn.Module):
     self.decoders = nn.ModuleList([DecoderBlock(d_model, d_keys, d_values, n_heads, d_ff, dropout=dropout, device=device)
                                     for _ in range(n_blocks)])
         
-  def forward(self, x, enc_out, padding_mask=None, save=False, aggregate=False):
+  def forward(self, x, enc_out, padding_mask=None, save=False, aggregate=False, futur_masking=True):
     for decoder in self.decoders:
-      x = decoder(x, enc_out, padding_mask=padding_mask, save=save, aggregate=aggregate)
+      x = decoder(x, enc_out, padding_mask=padding_mask, save=save, aggregate=aggregate, futur_masking=futur_masking)
     return x
   
   def reset_memory(self):

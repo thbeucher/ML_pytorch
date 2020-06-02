@@ -142,7 +142,7 @@ class Encoder(nn.Module):
     self.available_blocks = {'conv_block': ConvBlock, 'separable_conv_block': SeparableConvBlock,
                              'attention_conv_block': AttentionConvBlock, 'feed_forward': FeedForward,
                              'conv_attention_conv_block': ConvAttentionConvBlock, 'lstm': nn.LSTM,
-                             'transformer': TransformerEncoder}
+                             'transformer': TransformerEncoder, 'transformer_dec': TransformerDecoder}
     
     if input_proj is not None:
       self.input_proj = get_input_proj_layer(config=input_proj)
@@ -165,7 +165,7 @@ class Encoder(nn.Module):
       key = [k for k in ['output_size', 'out_chan', 'in_chan', 'input_size', 'd_model'] if k in self.config[-1][-1][-1][1]][0]
       self.output_proj = nn.Linear(self.config[-1][-1][-1][1][key], output_size)
   
-  def forward(self, x):
+  def forward(self, x, y=None):
     if self.input_proj is not None:
       x = self.input_proj(x)
 
@@ -179,6 +179,8 @@ class Encoder(nn.Module):
           elif 'lstm' in self.config[i][j][k][0]:
             sub_block.flatten_parameters()
             outs.append(sub_block(out)[0])
+          elif 'transformer_dec' in self.config[i][j][k][0]:
+            outs.append(sub_block(out if y is None else y, out, futur_masking=False))
           else:
             outs.append(sub_block(out))
         out = torch.cat(outs, dim=-1)
