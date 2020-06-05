@@ -201,6 +201,10 @@ class CTCTrainer(object):
     return CTCModel(output_dim, emb_dim, d_model, n_heads, d_ff, kernel_size, n_blocks, n_blocks_strided=n_blocks_strided,
                     dropout=dropout, block_type=block_type, **kwargs).to(self.device)
 
+  def get_input_lens(self, input_lens):
+    return u.compute_out_conv(u.compute_out_conv(input_lens, kernel=3, stride=2, padding=1, dilation=1),
+                              kernel=3, stride=2, padding=1, dilation=1)
+
   def train(self):
     print('Start Training...')
     eval_accuracy_memory = 0
@@ -228,8 +232,7 @@ class CTCTrainer(object):
     self.model.eval()
 
     for inputs, targets, input_lens, target_lens in tqdm(self.test_data_loader):
-      input_lens = u.compute_out_conv(u.compute_out_conv(input_lens, kernel=3, stride=2, padding=1, dilation=1),
-                                      kernel=3, stride=2, padding=1, dilation=1)
+      input_lens = self.get_input_lens(input_lens)
 
       inputs, targets = inputs.to(self.device), targets.to(self.device)
       input_lens, target_lens = input_lens.to(self.device), target_lens.to(self.device)
@@ -253,8 +256,7 @@ class CTCTrainer(object):
     all_targets, all_preds = [], []
 
     for inputs, targets, input_lens, target_lens in tqdm(self.train_data_loader):
-      input_lens = u.compute_out_conv(u.compute_out_conv(input_lens, kernel=3, stride=2, padding=1, dilation=1),
-                                      kernel=3, stride=2, padding=1, dilation=1)
+      input_lens = self.get_input_lens(input_lens)
 
       inputs, targets = inputs.to(self.device), targets.to(self.device)
       input_lens, target_lens = input_lens.to(self.device), target_lens.to(self.device)
@@ -295,8 +297,7 @@ class CTCTrainer(object):
     self.model.eval()
 
     for inputs, targets, input_lens, target_lens in tqdm(self.test_data_loader):
-      input_lens = u.compute_out_conv(u.compute_out_conv(input_lens, kernel=3, stride=2, padding=1, dilation=1),
-                                      kernel=3, stride=2, padding=1, dilation=1)
+      input_lens = self.get_input_lens(input_lens)
 
       inputs, targets = inputs.to(self.device), targets.to(self.device)
       input_lens, target_lens = input_lens.to(self.device), target_lens.to(self.device)
@@ -488,8 +489,7 @@ class Experiment17(CTCTrainer):
     all_targets, all_preds = [], []
 
     for inputs, targets, input_lens, target_lens in tqdm(self.train_data_loader):
-      input_lens = u.compute_out_conv(u.compute_out_conv(input_lens, kernel=3, stride=2, padding=1, dilation=1),
-                                      kernel=3, stride=2, padding=1, dilation=1)
+      input_lens = self.get_input_lens(input_lens)
 
       inputs, targets = inputs.to(self.device), targets.to(self.device)
       input_lens, target_lens = input_lens.to(self.device), target_lens.to(self.device)
@@ -537,8 +537,7 @@ class Experiment17(CTCTrainer):
     self.model.eval()
 
     for inputs, targets, input_lens, target_lens in tqdm(self.test_data_loader):
-      input_lens = u.compute_out_conv(u.compute_out_conv(input_lens, kernel=3, stride=2, padding=1, dilation=1),
-                                      kernel=3, stride=2, padding=1, dilation=1)
+      input_lens = self.get_input_lens(input_lens)
 
       inputs, targets = inputs.to(self.device), targets.to(self.device)
       input_lens, target_lens = input_lens.to(self.device), target_lens.to(self.device)
@@ -624,7 +623,7 @@ class Experiment20(CTCTrainer):
 class Experiment21(CTCTrainer):
   def __init__(self, logfile='_logs/_logs_CTC21.txt', save_name_model='convnet/ctc_conv_attention21.pt',
                metadata_file='_Data_metadata_monoSYL_wav2vec.pk'):
-    super().__init__(logfile=logfile, save_name_model=save_name_model, metadata_file=metadata_file, batch_size=64, lr=1e-4)
+    super().__init__(logfile=logfile, save_name_model=save_name_model, metadata_file=metadata_file, batch_size=32, lr=1e-4)
   
   def set_metadata(self, metadata_file):
     with open(metadata_file, 'rb') as f:
@@ -647,7 +646,7 @@ class Experiment21(CTCTrainer):
 class Experiment22(CTCTrainer):
   def __init__(self, logfile='_logs/_logs_CTC22.txt', save_name_model='convnet/ctc_conv_attention22.pt',
                metadata_file='_Data_metadata_syllables_wav2vec.pk'):
-    super().__init__(logfile=logfile, save_name_model=save_name_model, metadata_file=metadata_file, batch_size=128, lr=1e-4)
+    super().__init__(logfile=logfile, save_name_model=save_name_model, metadata_file=metadata_file, batch_size=64, lr=1e-4)
   
   def set_metadata(self, metadata_file):
     with open(metadata_file, 'rb') as f:
@@ -665,6 +664,11 @@ class Experiment22(CTCTrainer):
   def instanciate_model(self, **kwargs):
     return Encoder(config=get_encoder_config(config='conv_attention_deep3'), output_size=kwargs['output_dim'],
                    input_proj='base').to(self.device)
+  
+  def get_input_lens(self, input_lens):
+    for _ in range(3):
+      input_lens = u.compute_out_conv(input_lens, kernel=3, stride=2, padding=1, dilation=1)
+    return input_lens
 
 
 def read_preds_greedy_n_beam_search(res_file='_ctc_exp3_predictions.pk', data_file='_Data_metadata_letters_wav2vec.pk', beam_size=10):
