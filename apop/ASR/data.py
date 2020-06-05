@@ -16,6 +16,7 @@ from scipy.signal import stft
 from pydub import AudioSegment
 from collections import Counter
 from jiwer import wer as wer_compute
+from syllabipy.sonoripy import SonoriPy
 from torch.nn.utils.rnn import pad_sequence
 from fairseq.models.wav2vec import Wav2VecModel
 from torch.utils.data import Dataset, DataLoader, Subset
@@ -605,7 +606,26 @@ class Data(object):
     return sources_encoded, idx_to_tokens, tokens_to_idx
 
   @staticmethod
-  def syllables_encoding(sources, sos_tok='<sos>', eos_tok='<eos>', pad_tok='<pad>', idx_to_syllables=None, syllables_to_idx=None):
+  def syllables_encoding(sources, idx_to_syllables=None, syllables_to_idx=None, **kwargs):
+    sources = [s.lower() for s in sources]
+    sources_syllabels = [[SonoriPy(w) for w in s.split(' ')] for s in tqdm(sources)]
+
+    if idx_to_syllables is None or syllables_to_idx is None:
+      syllables = sorted(list(set([syl for s in sources_syllabels for w in s for syl in w])))
+      idx_to_syllables = syllables + [' ']
+      syllables_to_idx = {syl: i for i, syl in enumerate(idx_to_syllables)}
+    
+    sources_encoded = []
+    for s in tqdm(sources_syllabels):
+      encoded = []
+      for w in s:
+        encoded += [syllables_to_idx[syl] for syl in w] + [syllables_to_idx[' ']]
+      sources_encoded.append(encoded[:-1])
+
+    return sources_encoded, idx_to_syllables, syllables_to_idx
+
+  @staticmethod
+  def stressed_phones_encoding(sources, sos_tok='<sos>', eos_tok='<eos>', pad_tok='<pad>', idx_to_syllables=None, syllables_to_idx=None):
     '''
     Encodes given sources into numerical vectors
 

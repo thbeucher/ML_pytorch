@@ -644,6 +644,29 @@ class Experiment21(CTCTrainer):
                    input_proj='base').to(self.device)
 
 
+class Experiment22(CTCTrainer):
+  def __init__(self, logfile='_logs/_logs_CTC22.txt', save_name_model='convnet/ctc_conv_attention22.pt',
+               metadata_file='_Data_metadata_syllables_wav2vec.pk'):
+    super().__init__(logfile=logfile, save_name_model=save_name_model, metadata_file=metadata_file, batch_size=128, lr=1e-4)
+  
+  def set_metadata(self, metadata_file):
+    with open(metadata_file, 'rb') as f:
+      data = pk.load(f)
+
+    self.idx_to_tokens = ['<blank>'] + data['idx_to_tokens']
+    self.tokens_to_idx = {t: i for i, t in enumerate(self.idx_to_tokens)}
+
+    self.ids_to_encodedsources_train = {k: (np.array(v)+1).tolist() for k, v in data['ids_to_encodedsources_train'].items()}
+    self.ids_to_encodedsources_test = {k: (np.array(v)+1).tolist() for k, v in data['ids_to_encodedsources_test'].items()}
+
+    self.ids_to_audiofile_train = data['ids_to_audiofile_train']
+    self.ids_to_audiofile_test = data['ids_to_audiofile_test']
+  
+  def instanciate_model(self, **kwargs):
+    return Encoder(config=get_encoder_config(config='conv_attention_deep3'), output_size=kwargs['output_dim'],
+                   input_proj='base').to(self.device)
+
+
 def read_preds_greedy_n_beam_search(res_file='_ctc_exp3_predictions.pk', data_file='_Data_metadata_letters_wav2vec.pk', beam_size=10):
   from fast_ctc_decode import beam_search
 
