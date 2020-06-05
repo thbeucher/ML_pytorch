@@ -5,6 +5,7 @@ import h5py
 import torch
 import random
 import librosa
+import pronouncing
 import numpy as np
 import pickle as pk
 import soundfile as sf
@@ -13,6 +14,7 @@ from tqdm import tqdm
 from g2p_en import G2p
 from scipy.signal import stft
 from pydub import AudioSegment
+from collections import Counter
 from jiwer import wer as wer_compute
 from torch.nn.utils.rnn import pad_sequence
 from fairseq.models.wav2vec import Wav2VecModel
@@ -460,32 +462,49 @@ class Data(object):
     return mylist
   
   @staticmethod
-  def words_encoding(sources, sos_tok='<sos>', eos_tok='<eos>', pad_tok='<pad>', idx_to_words=None, words_to_idx=None):
+  def add_sos_eos_tokens(sources, tokens_to_idx, sos_tok='<sos>', eos_tok='<eos>', **kwargs):
+    return [[tokens_to_idx[sos_tok]] + s + [tokens_to_idx[eos_tok]] for s in sources]
+
+  @staticmethod
+  def words_encoding(sources, add_sos_eos_pad_tokens=True, idx_to_words=None, words_to_idx=None, **kwargs):
+    if add_sos_eos_pad_tokens:
+      sos_tok, eos_tok, pad_tok = kwargs.get('sos_tok', '<sos>'), kwargs.get('eos_tok', '<eos>'), kwargs.get('pad_tok', '<pad>')
+
     sources = [s.lower() for s in sources]
 
     if idx_to_words is None or words_to_idx is None:
       words = list(sorted(set([w for s in sources for w in s.split(' ')])))
-      idx_to_words = [sos_tok, eos_tok, pad_tok] + words
+      idx_to_words = [sos_tok, eos_tok, pad_tok] + words if add_sos_eos_pad_tokens else words
       words_to_idx = {l: i for i, l in enumerate(idx_to_words)}
 
-    sources_encoded = [[words_to_idx[sos_tok]] + [words_to_idx[w] for w in s.split(' ')] + [words_to_idx[eos_tok]] for s in tqdm(sources)]
+    sources_encoded = [[words_to_idx[w] for w in s.split(' ')] for s in tqdm(sources)]
+    
+    if add_sos_eos_pad_tokens:
+      sources_encoded = Data.add_sos_eos_tokens(sources_encoded, words_to_idx, sos_tok=sos_tok, eos_tok=eos_tok)
+
     return sources_encoded, idx_to_words, words_to_idx
 
   @staticmethod
-  def ngrams_encoding(sources, sos_tok='<sos>', eos_tok='<eos>', pad_tok='<pad>', n=2, idx_to_ngrams=None, ngrams_to_idx=None):
+  def ngrams_encoding(sources, add_sos_eos_pad_tokens=True, n=2, idx_to_ngrams=None, ngrams_to_idx=None, **kwargs):
+    if add_sos_eos_pad_tokens:
+      sos_tok, eos_tok, pad_tok = kwargs.get('sos_tok', '<sos>'), kwargs.get('eos_tok', '<eos>'), kwargs.get('pad_tok', '<pad>')
+
     sources = [s.lower() for s in sources]
 
     if idx_to_ngrams is None or ngrams_to_idx is None:
       ngrams = list(sorted(set([s[i:i+n] for s in sources for i in range(0, len(s), n)])))
-      idx_to_ngrams = [sos_tok, eos_tok, pad_tok] + ngrams
+      idx_to_ngrams = [sos_tok, eos_tok, pad_tok] + ngrams if add_sos_eos_pad_tokens else ngrams
       ngrams_to_idx = {l: i for i, l in enumerate(idx_to_ngrams)}
 
-    sources_encoded = [[ngrams_to_idx[sos_tok]] + [ngrams_to_idx[s[i:i+n]] for i in range(0, len(s), n)] + [ngrams_to_idx[eos_tok]]
-                        for s in tqdm(sources)]
+    sources_encoded = [[ngrams_to_idx[s[i:i+n]] for i in range(0, len(s), n)] for s in tqdm(sources)]
+
+    if add_sos_eos_pad_tokens:
+      sources_encoded = Data.add_sos_eos_tokens(sources_encoded, ngrams_to_idx, sos_tok=sos_tok, eos_tok=eos_tok)
+
     return sources_encoded, idx_to_ngrams, ngrams_to_idx
 
   @staticmethod
-  def letters_encoding(sources, sos_tok='<sos>', eos_tok='<eos>', pad_tok='<pad>', idx_to_letters=None, letters_to_idx=None):
+  def letters_encoding(sources, add_sos_eos_pad_tokens=True, idx_to_letters=None, letters_to_idx=None, **kwargs):
     '''
     Encodes given sources into numerical vectors
 
@@ -500,18 +519,25 @@ class Data(object):
     Returns:
       sources_encoded, idx_to_letters, letters_to_idx : list of list of int, list of str, dict
     '''
+    if add_sos_eos_pad_tokens:
+      sos_tok, eos_tok, pad_tok = kwargs.get('sos_tok', '<sos>'), kwargs.get('eos_tok', '<eos>'), kwargs.get('pad_tok', '<pad>')
+
     sources = [s.lower() for s in sources]
 
     if idx_to_letters is None or letters_to_idx is None:
       letters = list(sorted(set([l for s in sources for l in s])))
-      idx_to_letters = [sos_tok, eos_tok, pad_tok] + letters
+      idx_to_letters = [sos_tok, eos_tok, pad_tok] + letters if add_sos_eos_pad_tokens else letters
       letters_to_idx = {l: i for i, l in enumerate(idx_to_letters)}
 
-    sources_encoded = [[letters_to_idx[sos_tok]] + [letters_to_idx[l] for l in s] + [letters_to_idx[eos_tok]] for s in tqdm(sources)]
+    sources_encoded = [[letters_to_idx[l] for l in s] for s in tqdm(sources)]
+
+    if add_sos_eos_pad_tokens:
+      sources_encoded = Data.add_sos_eos_tokens(sources_encoded, letters_to_idx, sos_tok=sos_tok, eos_tok=eos_tok)
+
     return sources_encoded, idx_to_letters, letters_to_idx
   
   @staticmethod
-  def phonemes_encoding(sources, sos_tok='<sos>', eos_tok='<eos>', pad_tok='<pad>', idx_to_phonemes=None, phonemes_to_idx=None):
+  def phonemes_encoding(sources, add_sos_eos_pad_tokens=True, idx_to_phonemes=None, phonemes_to_idx=None, **kwargs):
     '''
     Encodes given sources into numerical vectors
 
@@ -526,17 +552,58 @@ class Data(object):
     Returns:
       sources_encoded, idx_to_phonemes, phonemes_to_idx : list of list of int, list of str, dict
     '''
+    if add_sos_eos_pad_tokens:
+      sos_tok, eos_tok, pad_tok = kwargs.get('sos_tok', '<sos>'), kwargs.get('eos_tok', '<eos>'), kwargs.get('pad_tok', '<pad>')
+
     g2p = G2p()
     converted_sources = [g2p(s.lower()) for s in tqdm(sources)]
 
     if idx_to_phonemes is None or phonemes_to_idx is None:
       phonemes = list(sorted(set([p for s in converted_sources for p in s])))
-      idx_to_phonemes = [sos_tok, eos_tok, pad_tok] + phonemes
+      idx_to_phonemes = [sos_tok, eos_tok, pad_tok] + phonemes if add_sos_eos_pad_tokens else phonemes
       phonemes_to_idx = {p: i for i, p in enumerate(idx_to_phonemes)}
     
-    sources_encoded = [[phonemes_to_idx[sos_tok]] + [phonemes_to_idx[p] for p in s] + [phonemes_to_idx[eos_tok]] for s in converted_sources]
+    sources_encoded = [[phonemes_to_idx[p] for p in s] for s in converted_sources]
+
+    if add_sos_eos_pad_tokens:
+      sources_encoded = Data.add_sos_eos_tokens(sources_encoded, phonemes_to_idx, sos_tok=sos_tok, eos_tok=eos_tok)
+
     return sources_encoded, idx_to_phonemes, phonemes_to_idx
   
+  @staticmethod
+  def count_syllable(word):
+    n_syllables = 0
+    pronouncing_ex = pronouncing.phones_for_word(word)
+    if len(pronouncing_ex) > 0:
+      n_syllables = pronouncing.syllable_count(pronouncing_ex[0])
+    return n_syllables
+
+  @staticmethod
+  def mono_syllable_encoding(sources, n_words=1500, add_sos_eos_pad_tokens=False, idx_to_tokens=None, tokens_to_idx=None, **kwargs):
+    sources = [s.lower() for s in sources]
+
+    if idx_to_tokens is None or tokens_to_idx is None:
+      letters = list(sorted(set([l for s in sources for l in s])))
+      words = Counter([w for s in sources for w in s.split(' ')])
+      mono_syl = sorted([(k, v) for k, v in words.items() if Data.count_syllable(k) == 1], key=lambda x: x[1], reverse=True)
+      mono_syl = sorted([w for w, _ in mono_syl if w not in letters][:n_words])
+
+      idx_to_tokens = letters + mono_syl
+      tokens_to_idx = {t: i for i, t in enumerate(idx_to_tokens)}
+    
+    sources_encoded = []
+    for s in tqdm(sources):
+      encoded = []
+      for w in s.split(' '):
+        if w in tokens_to_idx:
+          encoded.append(tokens_to_idx[w])
+        else:
+          encoded += [tokens_to_idx[l] for l in w]
+        encoded.append(tokens_to_idx[' '])
+      sources_encoded.append(encoded[:-1])  # remove end space
+
+    return sources_encoded, idx_to_tokens, tokens_to_idx
+
   @staticmethod
   def syllables_encoding(sources, sos_tok='<sos>', eos_tok='<eos>', pad_tok='<pad>', idx_to_syllables=None, syllables_to_idx=None):
     '''

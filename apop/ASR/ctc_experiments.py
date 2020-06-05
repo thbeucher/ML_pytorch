@@ -1,12 +1,14 @@
 import os
 import re
 import sys
+import json
 import torch
 import random
 import logging
 import numpy as np
 import pickle as pk
 import torch.nn as nn
+import http.client as hc
 import torch.optim as optim
 import torch.nn.functional as F
 
@@ -52,6 +54,7 @@ class CustomDataset(Dataset):
     kwargs['slice_fn'] = kwargs.get('slice_fn', Data.wav2vec_extraction)
     kwargs['save_features'] = kwargs.get('save_features', True)
     self.process_file_fn_args = kwargs
+    # self.client = hc.HTTPConnection('localhost', 8080)
 
     if sort_by_target_len:
       self.identities = CustomDataset._sort_by_targets_len(self.identities, ids_to_encodedsources)
@@ -66,6 +69,9 @@ class CustomDataset(Dataset):
   def __getitem__(self, idx):
     signal = self.process_file_fn(self.ids_to_audiofilefeatures[self.identities[idx]], **self.process_file_fn_args)
     input_ = torch.Tensor(signal) if isinstance(signal, np.ndarray) else signal
+    # self.client.request('POST', '/process', '{"filename": "' + self.ids_to_audiofilefeatures[self.identities[idx]] + '"}')
+    # input_ = torch.Tensor(np.array(json.loads(self.client.getresponse().read())))
+
     target = torch.LongTensor(self.ids_to_encodedsources[self.identities[idx]])
     input_len = len(input_)
     target_len = len(target)
@@ -565,7 +571,7 @@ class Experiment18(CTCTrainer):
 
 class Experiment19(CTCTrainer):
   def __init__(self, logfile='_logs/_logs_CTC19.txt', save_name_model='convnet/ctc_conv_attention19.pt'):
-    super().__init__(logfile=logfile, save_name_model=save_name_model, batch_size=128, lr=1e-4)
+    super().__init__(logfile=logfile, save_name_model=save_name_model, batch_size=48, lr=1e-4)
   
   def instanciate_model(self, **kwargs):
     return Encoder(config=get_encoder_config(config='conv_attention_deep'), output_size=kwargs['output_dim'],
@@ -604,6 +610,38 @@ class Experiment19(CTCTrainer):
                                         shuffle=True, pin_memory=True)
     self.test_data_loader = DataLoader(test_dataset, batch_size=self.batch_size, num_workers=8, collate_fn=collator,
                                        shuffle=True, pin_memory=True)
+
+
+class Experiment20(CTCTrainer):
+  def __init__(self, logfile='_logs/_logs_CTC20.txt', save_name_model='convnet/ctc_conv_attention20.pt'):
+    super().__init__(logfile=logfile, save_name_model=save_name_model, batch_size=64, lr=1e-4)
+  
+  def instanciate_model(self, **kwargs):
+    return Encoder(config=get_encoder_config(config='conv_attention_deep2'), output_size=kwargs['output_dim'],
+                   input_proj='base').to(self.device)
+
+
+class Experiment21(CTCTrainer):
+  def __init__(self, logfile='_logs/_logs_CTC21.txt', save_name_model='convnet/ctc_conv_attention21.pt',
+               metadata_file='_Data_metadata_monoSYL_wav2vec.pk'):
+    super().__init__(logfile=logfile, save_name_model=save_name_model, metadata_file=metadata_file, batch_size=64, lr=1e-4)
+  
+  def set_metadata(self, metadata_file):
+    with open(metadata_file, 'rb') as f:
+      data = pk.load(f)
+
+    self.idx_to_tokens = ['<blank>'] + data['idx_to_tokens']
+    self.tokens_to_idx = {t: i for i, t in enumerate(self.idx_to_tokens)}
+
+    self.ids_to_encodedsources_train = {k: (np.array(v)+1).tolist() for k, v in data['ids_to_encodedsources_train'].items()}
+    self.ids_to_encodedsources_test = {k: (np.array(v)+1).tolist() for k, v in data['ids_to_encodedsources_test'].items()}
+
+    self.ids_to_audiofile_train = data['ids_to_audiofile_train']
+    self.ids_to_audiofile_test = data['ids_to_audiofile_test']
+  
+  def instanciate_model(self, **kwargs):
+    return Encoder(config=get_encoder_config(config='conv_attention_deep2'), output_size=kwargs['output_dim'],
+                   input_proj='base').to(self.device)
 
 
 def read_preds_greedy_n_beam_search(res_file='_ctc_exp3_predictions.pk', data_file='_Data_metadata_letters_wav2vec.pk', beam_size=10):
