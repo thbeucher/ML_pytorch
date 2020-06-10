@@ -25,6 +25,7 @@ from models.final_net import Encoder
 from models.divers_models import ConvLayer
 from optimizer import CosineAnnealingWarmUpRestarts
 from models.final_net_configs import get_encoder_config
+from transition_loss import compute_transition_loss, get_not_ok_transitions, compute_transition_loss2, create_transition_mat
 
 
 class CTCModel(nn.Module):
@@ -646,7 +647,7 @@ class Experiment21(CTCTrainer):
 class Experiment22(CTCTrainer):
   def __init__(self, logfile='_logs/_logs_CTC22.txt', save_name_model='convnet/ctc_conv_attention22.pt',
                metadata_file='_Data_metadata_syllables_wav2vec.pk'):
-    super().__init__(logfile=logfile, save_name_model=save_name_model, metadata_file=metadata_file, batch_size=64, lr=1e-4)
+    super().__init__(logfile=logfile, save_name_model=save_name_model, metadata_file=metadata_file, batch_size=48, lr=1e-4)
   
   def set_metadata(self, metadata_file):
     with open(metadata_file, 'rb') as f:
@@ -669,6 +670,160 @@ class Experiment22(CTCTrainer):
     for _ in range(3):
       input_lens = u.compute_out_conv(input_lens, kernel=3, stride=2, padding=1, dilation=1)
     return input_lens
+
+
+class Experiment23(CTCTrainer):
+  def __init__(self, logfile='_logs/_logs_CTC23.txt', save_name_model='convnet/ctc_conv_attention23.pt'):
+    super().__init__(logfile=logfile, save_name_model=save_name_model, batch_size=48, lr=1e-4)
+  
+  def instanciate_model(self, **kwargs):
+    return Encoder(config=get_encoder_config(config='conv_attention_deep'), output_size=kwargs['output_dim'],
+                   input_proj='base').to(self.device)
+  
+  def set_metadata(self, metadata_file, save_metadata='_Data_metadata_ctc_500-360-100_letters_wav2vec.pk'):
+    self.data = Data()
+
+    if not os.path.isfile(save_metadata):
+      train_folder = ['../../../datasets/openslr/LibriSpeech/train-clean-100/', '../../../datasets/openslr/LibriSpeech/train-clean-360/',
+                      '../../../datasets/openslr/LibriSpeech/train-other-500/']
+      test_folder = '../../../datasets/openslr/LibriSpeech/test-clean/'
+      self.data.process_all_transcripts(train_folder, test_folder, encoding_fn=Data.letters_encoding)
+      self.data.idx_to_tokens = ['<blank>'] + self.data.idx_to_tokens[3:]
+      self.data.tokens_to_idx = {t: i for i, t in enumerate(self.data.idx_to_tokens)}
+      self.data.ids_to_encodedsources_train = {k: (np.array(v[1:-1])-2).tolist() for k, v in self.data.ids_to_encodedsources_train.items()}
+      self.data.ids_to_encodedsources_test = {k: (np.array(v[1:-1])-2).tolist() for k, v in self.data.ids_to_encodedsources_test.items()}
+      self.data.set_audio_metadata(train_folder, test_folder, slice_fn=Data.wav2vec_extraction, save_features=True)
+      self.data.save_metadata(save_name=save_metadata)
+    else:
+      self.data.load_metadata(save_name=save_metadata)
+    
+    self.idx_to_tokens = self.data.idx_to_tokens
+    self.tokens_to_idx = self.data.tokens_to_idx
+    self.ids_to_encodedsources_train = self.data.ids_to_encodedsources_train
+    self.ids_to_encodedsources_test = self.data.ids_to_encodedsources_test
+    self.ids_to_audiofile_train = self.data.ids_to_audiofile_train
+    self.ids_to_audiofile_test = self.data.ids_to_audiofile_test
+  
+  def set_data_loader(self):
+    train_dataset = CustomDataset(self.ids_to_audiofile_train, self.ids_to_encodedsources_train)
+    test_dataset = CustomDataset(self.ids_to_audiofile_test, self.ids_to_encodedsources_test)
+
+    collator = CustomCollator(0, 0)
+
+    self.train_data_loader = DataLoader(train_dataset, batch_size=self.batch_size, num_workers=8, collate_fn=collator,
+                                        shuffle=True, pin_memory=True)
+    self.test_data_loader = DataLoader(test_dataset, batch_size=self.batch_size, num_workers=8, collate_fn=collator,
+                                       shuffle=True, pin_memory=True)
+
+
+class Experiment24(CTCTrainer):
+  def __init__(self, logfile='_logs/_logs_CTC24.txt', save_name_model='convnet/ctc_conv_attention24.pt'):
+    super().__init__(logfile=logfile, save_name_model=save_name_model, batch_size=32, lr=1e-4)
+  
+  def set_metadata(self, metadata_file):
+    with open(metadata_file, 'rb') as f:
+      data = pk.load(f)
+
+    self.idx_to_tokens = ['<blank>'] + data['idx_to_tokens'][3:]
+    self.tokens_to_idx = {t: i for i, t in enumerate(self.idx_to_tokens)}
+
+    self.ids_to_encodedsources_train = {k: (np.array(v[1:-1])-2).tolist() for k, v in data['ids_to_encodedsources_train'].items()}
+    self.ids_to_encodedsources_test = {k: (np.array(v[1:-1])-2).tolist() for k, v in data['ids_to_encodedsources_test'].items()}
+
+    self.ids_to_audiofile_train = data['ids_to_audiofile_train']
+    self.ids_to_audiofile_test = data['ids_to_audiofile_test']
+
+    sources = [s.lower() for s in data['ids_to_transcript_train'].values()] + [s.lower() for s in data['ids_to_transcript_test'].values()]
+    self.transition_mat = torch.Tensor(create_transition_mat(sources, self.idx_to_tokens)).to(self.device)
+  
+  def instanciate_model(self, **kwargs):
+    return Encoder(config=get_encoder_config(config='conv_attention_deep2'), output_size=kwargs['output_dim'],
+                   input_proj='base').to(self.device)
+  
+  def train_pass(self, only_loss=True):
+    losses, accs = 0, {}
+    all_targets, all_preds = [], []
+
+    for inputs, targets, input_lens, target_lens in tqdm(self.train_data_loader):
+      input_lens = self.get_input_lens(input_lens)
+
+      inputs, targets = inputs.to(self.device), targets.to(self.device)
+      input_lens, target_lens = input_lens.to(self.device), target_lens.to(self.device)
+      
+      preds = self.model(inputs)  # [batch_size, seq_len, output_dim]
+
+      self.optimizer.zero_grad()
+      ctc_loss = self.criterion(preds.permute(1, 0, 2).log_softmax(-1), targets, input_lens, target_lens)
+      transition_loss = compute_transition_loss2(preds, self.transition_mat) / 1e7
+      transition_loss = 0 if transition_loss < 0 else transition_loss
+      current_loss = ctc_loss + transition_loss
+      current_loss.backward()
+      self.optimizer.step()
+
+      all_targets += targets.tolist()
+      all_preds += preds.argmax(dim=-1).tolist()
+
+      losses += current_loss.item()
+    
+    if not only_loss:
+      accs = CTCTrainer.scorer(all_targets, all_preds, self.idx_to_tokens, self.tokens_to_idx)
+    
+    return losses / len(self.train_data_loader), accs
+
+
+class Experiment25(CTCTrainer):
+  def __init__(self, logfile='_logs/_logs_CTC25.txt', save_name_model='convnet/ctc_conv_attention25.pt'):
+    super().__init__(logfile=logfile, save_name_model=save_name_model, batch_size=32, lr=1e-4)
+  
+  def set_metadata(self, metadata_file):
+    with open(metadata_file, 'rb') as f:
+      data = pk.load(f)
+
+    self.idx_to_tokens = ['<blank>'] + data['idx_to_tokens'][3:]
+    self.tokens_to_idx = {t: i for i, t in enumerate(self.idx_to_tokens)}
+
+    self.ids_to_encodedsources_train = {k: (np.array(v[1:-1])-2).tolist() for k, v in data['ids_to_encodedsources_train'].items()}
+    self.ids_to_encodedsources_test = {k: (np.array(v[1:-1])-2).tolist() for k, v in data['ids_to_encodedsources_test'].items()}
+
+    self.ids_to_audiofile_train = data['ids_to_audiofile_train']
+    self.ids_to_audiofile_test = data['ids_to_audiofile_test']
+
+    sources = [s.lower() for s in data['ids_to_transcript_train'].values()] + [s.lower() for s in data['ids_to_transcript_test'].values()]
+    not_ok_transitions, _ = get_not_ok_transitions(sources, self.idx_to_tokens)
+    self.not_ok_transitions = not_ok_transitions
+  
+  def instanciate_model(self, **kwargs):
+    return Encoder(config=get_encoder_config(config='conv_attention_deep2'), output_size=kwargs['output_dim'],
+                   input_proj='base').to(self.device)
+  
+  def train_pass(self, only_loss=True):
+    losses, accs = 0, {}
+    all_targets, all_preds = [], []
+
+    for inputs, targets, input_lens, target_lens in tqdm(self.train_data_loader):
+      input_lens = self.get_input_lens(input_lens)
+
+      inputs, targets = inputs.to(self.device), targets.to(self.device)
+      input_lens, target_lens = input_lens.to(self.device), target_lens.to(self.device)
+      
+      preds = self.model(inputs)  # [batch_size, seq_len, output_dim]
+
+      self.optimizer.zero_grad()
+      ctc_loss = self.criterion(preds.permute(1, 0, 2).log_softmax(-1), targets, input_lens, target_lens)
+      transition_loss = compute_transition_loss(preds.softmax(-1), self.not_ok_transitions)
+      current_loss = ctc_loss + transition_loss
+      current_loss.backward()
+      self.optimizer.step()
+
+      all_targets += targets.tolist()
+      all_preds += preds.argmax(dim=-1).tolist()
+
+      losses += current_loss.item()
+    
+    if not only_loss:
+      accs = CTCTrainer.scorer(all_targets, all_preds, self.idx_to_tokens, self.tokens_to_idx)
+    
+    return losses / len(self.train_data_loader), accs
 
 
 def read_preds_greedy_n_beam_search(res_file='_ctc_exp3_predictions.pk', data_file='_Data_metadata_letters_wav2vec.pk', beam_size=10):

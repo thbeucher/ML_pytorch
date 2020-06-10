@@ -167,10 +167,10 @@ def bs_test(model_name='bert-large-uncased-whole-word-masking'):  # distilbert-b
   import editdistance as ed
   from BKTree import BKTree
   from collections import defaultdict
-  # from transformers import AutoModelWithLMHead, AutoTokenizer
+  from transformers import AutoModelWithLMHead, AutoTokenizer
 
-  # tokenizer = AutoTokenizer.from_pretrained(model_name)
-  # model = AutoModelWithLMHead.from_pretrained(model_name)
+  tokenizer = AutoTokenizer.from_pretrained(model_name)
+  model = AutoModelWithLMHead.from_pretrained(model_name)
 
   with open('_Data_metadata_letters_wav2vec.pk', 'rb') as f:
     data = pk.load(f)
