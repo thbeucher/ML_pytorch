@@ -72,23 +72,59 @@ def transition_loss_test():
     print(f'grad = {w.grad}')
 
 
-def get_transitions(candidat, not_ok_transitions):
-    cand_idxs = candidat.argmax(-1).tolist()
-    run_idxs = []
-    for i in range(0, len(cand_idxs)):
-      if cand_idxs[i] != 0:  # ignore blank token
-        if len(run_idxs) == 0:
+def get_groupby_idxs(candidat, blank_token=0):
+  cand_idxs = candidat.argmax(-1).tolist()
+  run_idxs = []
+  for i in range(0, len(cand_idxs)):
+    if cand_idxs[i] != blank_token:  # ignore blank token
+      if len(run_idxs) == 0:
+        run_idxs.append((i, cand_idxs[i]))
+      else:
+        if cand_idxs[i] != cand_idxs[i-1]:
           run_idxs.append((i, cand_idxs[i]))
-        else:
-          if cand_idxs[i] != cand_idxs[i-1]:
-            run_idxs.append((i, cand_idxs[i]))
-    transition_idxs = []
-    for i in range(0, len(run_idxs) - 1):
-      comb = (run_idxs[i][1], run_idxs[i+1][1])
-      if comb in not_ok_transitions:
-        err = torch.Tensor([1 if j == c else 0 for c in comb for j in range(candidat.shape[-1])]).to(candidat.device)
-        transition_idxs.append((run_idxs[i][0], run_idxs[i+1][0], err))
-    return transition_idxs, max(len(run_idxs) - 1, 1)
+  return run_idxs
+
+
+def get_transitions(candidat, not_ok_transitions, blank_token=0):
+  '''
+  Params:
+    * candidat
+    * not_ok_transitions
+  
+  Returns:
+    * transition_idxs : list of tuple
+    * n_transitions : int
+  '''
+  run_idxs = get_groupby_idxs(candidat, blank_token=blank_token)
+  transition_idxs = []
+  for i in range(0, len(run_idxs) - 1):
+    comb = (run_idxs[i][1], run_idxs[i+1][1])
+    if comb in not_ok_transitions:
+      err = torch.Tensor([1 if j == c else 0 for c in comb for j in range(candidat.shape[-1])]).to(candidat.device)
+      transition_idxs.append((run_idxs[i][0], run_idxs[i+1][0], err))
+  return transition_idxs, max(len(run_idxs) - 1, 1)
+
+
+def get_not_ok_words(candidat, ok_words, blank_token=0, space_token=1):
+  run_idxs = get_groupby_idxs(candidat, blank_token=blank_token)
+  words, tmp_word, tmp_idx = [], [], []
+  for pos, idx in run_idxs:
+    if len(tmp_word) == 0:
+      tmp_word.append(idx)
+      tmp_idx.append(pos)
+    elif idx == space_token:  # end of current word
+      words += [(tuple(tmp_word), tmp_idx)]
+      tmp_word = []
+      tmp_idx = []
+    else:
+      tmp_word.append(idx)
+      tmp_idx.append(pos)
+  not_ok_words = []
+  for word, idxs in words:
+    if word not in ok_words:
+      err = torch.Tensor([1 if j == i else 0 for i in word for j in range(candidat.shape[-1])]).to(candidat.device)
+      not_ok_words.append((idxs, err))
+  return not_ok_words, max(len(words), 1)
 
 
 def test_get_transitions():
@@ -129,6 +165,18 @@ def compute_transition_loss2(predictions, transition_mat):
   return -loss / predictions.shape[0]  # batch mean loss
 
 
+def compute_wrong_words_loss(predictions, ok_words, blank_token=0, space_token=1):
+  loss = 0
+  for batch_pred in predictions:
+    not_ok_words, n_words = get_not_ok_words(batch_pred, ok_words, blank_token=blank_token, space_token=space_token)
+    batch_pred_loss = 0
+    for idxs, err in not_ok_words:
+      current = torch.cat([batch_pred[i] for i in idxs], dim=0)
+      batch_pred_loss += (current * err).sum()
+    loss += batch_pred_loss / n_words
+  return loss / predictions.shape[0]
+
+
 def create_transition_mat(sources, idx_to_tokens):  # idx_to_tokens = [<blanck>, ...]
   combis = [''.join(comb) for comb in product(''.join(idx_to_tokens[1:]), repeat=2)]
   ok_combis = []
@@ -145,6 +193,15 @@ def create_transition_mat(sources, idx_to_tokens):  # idx_to_tokens = [<blanck>,
 
 
 def get_not_ok_transitions(sources, idx_to_tokens):
+  '''
+  Params:
+    * sources : list of str
+    * idx_to_tokens : list of str
+  
+  Returns:
+    * not_ok_combis : set of tuple of int
+    * readable_noc : list of str
+  '''
   combis = [''.join(comb) for comb in product(''.join(idx_to_tokens[1:]), repeat=2)]
   ok_combis = []
   for comb in combis:
@@ -157,7 +214,14 @@ def get_not_ok_transitions(sources, idx_to_tokens):
     if comb not in ok_combis:
       not_ok_combis.append((idx_to_tokens.index(comb[0]), idx_to_tokens.index(comb[1])))
       readable_noc.append(comb)
-  return not_ok_combis, readable_noc
+  return set(not_ok_combis), readable_noc
+
+
+def get_ok_words(sources, tokens_to_idx):
+  '''words here are defined as every sequence of characters between two space token'''
+  words = list(set([w for s in sources for w in s.split(' ')]))
+  words_idx_seq = [tuple([tokens_to_idx[c] for c in w]) for w in words]
+  return set(words_idx_seq), words
 
 
 def test_trans_mat():
@@ -167,6 +231,11 @@ def test_trans_mat():
 def test_not_ok_combis():
   not_ok_trans, readable_not = get_not_ok_transitions(['ab', 'ac'], '$abc')
   print(not_ok_trans, readable_not)
+
+
+def test_not_ok_words():
+  tokens_to_idx = {k:i for i, k in enumerate([' ', 'i', 's', 'e', 'y', 'o', 'u', 'd', 'm'])}
+  get_ok_words(['i see you', 'do you see me'], tokens_to_idx)
 
 
 def test_trans_mat_trans_loss():
@@ -181,6 +250,7 @@ def test_trans_mat_trans_loss():
   
   sources = [s.lower() for s in data['ids_to_transcript_train'].values()] + [s.lower() for s in data['ids_to_transcript_test'].values()]
   not_ok_transitions, readable_not = get_not_ok_transitions(sources, ['$'] + data['idx_to_tokens'][3:])
+  ok_words, readable_words = get_ok_words(sources, tokens_to_idx)
 
   with open('_ctc_exp3_predictions.pk', 'rb') as f:
     res = pk.load(f)
@@ -202,8 +272,13 @@ def test_trans_mat_trans_loss():
     scores = CTCTrainer.scorer(t_sent, p_sent, rec=False)
     print(f"batch{i} scores = {' | '.join([f'{k} = {v:.3f}' for k, v in scores.items()])}")
     loss = compute_transition_loss(torch.Tensor(res['predictions'][i:i+32]), not_ok_transitions)
-    print(f"loss = {loss} | {loss*1e2}\n")
+    print(f"loss = {loss} | {loss*1e2}")
     # print(f"Acc batch{i+1} = {compute_acc(torch.Tensor(res['targets'][i:i+32]), torch.Tensor(res['predictions'][i:i+32]))}")
+
+    wrong_words = [w for s in p_sent for w in s.split() if w not in readable_words]
+    # print(f'wrong_words = {wrong_words}')
+    loss = compute_wrong_words_loss(torch.Tensor(res['predictions'][i:i+32]), ok_words)
+    print(f'n_wrong_words = {len(wrong_words)}\nloss = {loss}\n')
   
 
 if __name__ == "__main__":
@@ -211,5 +286,6 @@ if __name__ == "__main__":
   # test_trans_mat()
   # test_not_ok_combis()
   # test_get_transitions()
+  # test_not_ok_words()
 
   test_trans_mat_trans_loss()

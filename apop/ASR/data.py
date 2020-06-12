@@ -889,7 +889,7 @@ class Data(object):
     list_files_fn = Data.get_openslr_files if list_files_fn is None else list_files_fn
     process_file_fn = Data.read_and_slice_signal if process_file_fn is None else process_file_fn
     slice_fn = Data.wav2vec_extraction if slice_fn is None else slice_fn
-    speed_changes = kwargs.get('speed_changes', [0.75, 1.5])
+    speed_changes = kwargs.get('speed_changes', [0.75, 1.25])
 
     if not os.path.isdir(save_path):
       os.makedirs(save_path)

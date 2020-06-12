@@ -74,12 +74,15 @@ def analyze(filename):
   plt.show()
 
 
-def compare_all(folder, read_from_new=True):
+def compare_all(folder, read_from_new=True, read_from=[]):
   df_data = defaultdict(list)
   top = defaultdict(list)
   names = []
   for fname in os.listdir(folder):
     if not '.txt' in fname:
+      continue
+    
+    if len(read_from) > 0 and fname not in read_from:
       continue
 
     if read_from_new:
@@ -128,9 +131,13 @@ if __name__ == "__main__":
   argparser.add_argument('--logfile', default='_logs/_convnet_experiments_feedback_logs.txt', type=str)
   argparser.add_argument('--read_all', default=False, type=ast.literal_eval)
   argparser.add_argument('--read_from_new', default=True, type=ast.literal_eval)
+  argparser.add_argument('--read_from', default='')
   args = argparser.parse_args()
 
+  read_from = [el.split('/')[-1] for el in args.read_from.split(',')]
+  read_from = [el for el in read_from if len(el) > 0]
+
   if args.read_all:
-    compare_all(args.folder, args.read_from_new)
+    compare_all(args.folder, args.read_from_new, read_from=read_from)
   else:
     analyze(args.logfile)
