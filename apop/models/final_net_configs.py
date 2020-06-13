@@ -3,6 +3,8 @@ import pickle as pk
 import torch.nn as nn
 import torch.nn.functional as F
 
+from fairseq.models.wav2vec import Wav2VecModel
+
 
 def get_encoder_config(config='base'):
   if config == 'separable':
@@ -1199,3 +1201,11 @@ def get_input_proj_layer(config='base'):
                                nn.ReLU(inplace=True),
                                nn.LayerNorm(512))
   return input_proj
+
+
+def get_wav2vec_model(filename='wav2vec_large.pt'):
+  cp = torch.load(filename)
+  wav2vec_model = Wav2VecModel.build_model(cp['args'], task=None)
+  wav2vec_model.load_state_dict(cp['model'])
+  wav2vec_model.eval()
+  return wav2vec_model

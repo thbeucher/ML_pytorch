@@ -133,7 +133,7 @@ def test_get_transitions():
   print(get_transitions(candidat, not_ok_combis))
 
 
-def compute_transition_loss(predictions, not_ok_transitions):
+def compute_transition_loss(predictions, not_ok_transitions, **kwargs):
   # predictions = [batch_size, seq_len, output_size]
   # transition_mat = [2 * output_size, n_total_transition]
   loss = 0
@@ -165,7 +165,7 @@ def compute_transition_loss2(predictions, transition_mat):
   return -loss / predictions.shape[0]  # batch mean loss
 
 
-def compute_wrong_words_loss(predictions, ok_words, blank_token=0, space_token=1):
+def compute_wrong_words_loss(predictions, ok_words, blank_token=0, space_token=1, **kwargs):
   loss = 0
   for batch_pred in predictions:
     not_ok_words, n_words = get_not_ok_words(batch_pred, ok_words, blank_token=blank_token, space_token=space_token)

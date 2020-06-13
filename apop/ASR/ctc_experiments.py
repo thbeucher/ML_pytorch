@@ -58,6 +58,13 @@ class CustomDataset(Dataset):
     self.process_file_fn_args = kwargs
     # self.client = hc.HTTPConnection('localhost', 8080)
 
+    self.ids_input_lens = {}
+    if kwargs['slice_fn'] == Data.wav2vec_extraction or kwargs.get('use_wav2vec', True):
+      for i, f in self.ids_to_audiofilefeatures.items():
+        fname = f.replace('.flac', '.wav2vec_shape.pk')
+        if os.path.isfile(fname):
+          self.ids_input_lens[i] = pk.load(open(fname, 'rb'))[0]
+
     if sort_by_target_len:
       self.identities = CustomDataset._sort_by_targets_len(self.identities, ids_to_encodedsources)
   
@@ -75,7 +82,7 @@ class CustomDataset(Dataset):
     # input_ = torch.Tensor(np.array(json.loads(self.client.getresponse().read())))
 
     target = torch.LongTensor(self.ids_to_encodedsources[self.identities[idx]])
-    input_len = len(input_)
+    input_len = self.ids_input_lens[self.identities[idx]] if self.identities[idx] in self.ids_input_lens else len(input_)
     target_len = len(target)
     return input_, target, input_len, target_len
 
@@ -106,6 +113,7 @@ class CTCTrainer(object):
     self.eval_step = eval_step
     self.save_name_model = save_name_model
     self.lr_scheduling = lr_scheduling
+    self.kwargs = kwargs
 
     if kwargs.get('augmented', False):
       self.new_metadata_file = kwargs.get('new_metadata_file', None)
@@ -188,8 +196,9 @@ class CTCTrainer(object):
                  'ids_to_audiofile_test': self.ids_to_audiofile_test}, f)
   
   def set_data_loader(self):
-    train_dataset = CustomDataset(self.ids_to_audiofile_train, self.ids_to_encodedsources_train)
-    test_dataset = CustomDataset(self.ids_to_audiofile_test, self.ids_to_encodedsources_test)
+    slice_fn = self.kwargs.get('slice_fn', Data.wav2vec_extraction)
+    train_dataset = CustomDataset(self.ids_to_audiofile_train, self.ids_to_encodedsources_train, slice_fn=slice_fn)
+    test_dataset = CustomDataset(self.ids_to_audiofile_test, self.ids_to_encodedsources_test, slice_fn=slice_fn)
 
     collator = CustomCollator(0, 0)
 
@@ -830,6 +839,8 @@ class Experiment25(CTCTrainer):
 class Experiment26(CTCTrainer):
   def __init__(self, logfile='_logs/_logs_CTC26.txt', save_name_model='convnet/ctc_conv_attention26.pt'):
     super().__init__(logfile=logfile, save_name_model=save_name_model, batch_size=32, lr=1e-4)
+    self.additional_loss = compute_transition_loss
+    self.additional_loss_args = self.not_ok_transitions
   
   def set_metadata(self, metadata_file):
     with open(metadata_file, 'rb') as f:
@@ -846,6 +857,7 @@ class Experiment26(CTCTrainer):
 
     sources = [s.lower() for s in data['ids_to_transcript_train'].values()] + [s.lower() for s in data['ids_to_transcript_test'].values()]
     self.ok_words, _ = get_ok_words(sources, self.tokens_to_idx)
+    self.not_ok_transitions, _ = get_not_ok_transitions(sources, self.idx_to_tokens)
   
   def instanciate_model(self, **kwargs):
     return Encoder(config=get_encoder_config(config='conv_attention_deep2'), output_size=kwargs['output_dim'],
@@ -865,8 +877,8 @@ class Experiment26(CTCTrainer):
 
       self.optimizer.zero_grad()
       ctc_loss = self.criterion(preds.permute(1, 0, 2).log_softmax(-1), targets, input_lens, target_lens)
-      word_loss = compute_wrong_words_loss(preds.softmax(-1), self.ok_words)
-      current_loss = ctc_loss + word_loss
+      additional_loss = self.additional_loss(preds.softmax(-1), self.additional_loss_args)
+      current_loss = ctc_loss + additional_loss
       current_loss.backward()
       self.optimizer.step()
 
@@ -877,8 +889,21 @@ class Experiment26(CTCTrainer):
     
     if not only_loss:
       accs = CTCTrainer.scorer(all_targets, all_preds, self.idx_to_tokens, self.tokens_to_idx)
+
+      if accs['word_accuracy'] > 0.55:
+        self.additional_loss = compute_wrong_words_loss
+        self.additional_loss_args = self.ok_words
     
     return losses / len(self.train_data_loader), accs
+
+
+class Experiment27(CTCTrainer):
+  def __init__(self, logfile='_logs/_logs_CTC27.txt', save_name_model='convnet/ctc_conv_attention27.pt'):
+    super().__init__(logfile=logfile, save_name_model=save_name_model, batch_size=32, lr=1e-4, slice_fn=Data.raw_signal)
+  
+  def instanciate_model(self, **kwargs):
+    return Encoder(config=get_encoder_config(config='conv_attention_deep2'), output_size=kwargs['output_dim'],
+                   input_proj='base', wav2vec_frontend=True).to(self.device)
 
 
 def read_preds_greedy_n_beam_search(res_file='_ctc_exp3_predictions.pk', data_file='_Data_metadata_letters_wav2vec.pk', beam_size=10):

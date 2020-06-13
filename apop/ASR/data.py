@@ -211,6 +211,10 @@ class Data(object):
       return librosa.load(filename, sr=sample_rate)
   
   @staticmethod
+  def raw_signal(signal, **kwargs):
+    return signal
+
+  @staticmethod
   def window_slicing_signal(signal, sample_rate=16000, window_size=0.025, **kwargs):
     '''
     Slices signal into n chunks
@@ -307,7 +311,8 @@ class Data(object):
     return librosa.feature.mfcc(y=signal, sr=sample_rate, dct_type=dct_type, n_mfcc=n_mfcc, hop_length=hop_length, n_fft=n_fft).T
   
   @staticmethod
-  def wav2vec_extraction(signal, wav2vec_model=None, filename='', save_features=False, save_method='h5', to_gpu=True, **kwargs):
+  def wav2vec_extraction(signal, wav2vec_model=None, filename='', save_features=False, save_method='h5', to_gpu=True,
+                         save_metadata=False, **kwargs):
     if save_features:
       if save_method == 'h5' and os.path.isfile(filename.replace('.flac', '.features.h5')):
         with h5py.File(filename.replace('.flac', '.features.h5'), 'r') as hf:
@@ -330,7 +335,11 @@ class Data(object):
         with h5py.File(filename.replace('.flac', '.features.h5'), 'w') as hf:
           hf.create_dataset('features', data=c.cpu().numpy(), compression='gzip', compression_opts=9)
       else:
-        np.save(filename.replace('.flac', '.features.npy'), c.numpy())
+        np.save(filename.replace('.flac', '.features.npy'), c.cpu().numpy())
+    
+    if save_metadata:
+      with open(filename.replace('.flac', '.wav2vec_shape.pk'), 'wb') as f:
+        pk.dump(c.cpu().numpy().shape, f)
 
     return c
   

@@ -6,11 +6,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 sys.path.append(os.path.abspath(__file__).replace('final_net.py', ''))
+import final_net_configs as fnc
 from conv_seqseq import Decoder as CSSDecoder
 from transformer.encoder import TransformerEncoder
 from transformer.decoder import TransformerDecoder
 from transformer.attention import MultiHeadAttention
-from final_net_configs import get_encoder_config, get_decoder_config, get_input_proj_layer
 
 
 class PositionalEncoding(nn.Module):
@@ -126,7 +126,7 @@ class FeedForward(nn.Module):
 
 
 class Encoder(nn.Module):
-  def __init__(self, config=None, residual=True, output_size=None, one_pred=False, input_proj=None):
+  def __init__(self, config=None, residual=True, output_size=None, one_pred=False, input_proj=None, wav2vec_frontend=False, **kwargs):
     '''
     config = list of layer_config
       layer_config = list of block_config
@@ -143,12 +143,13 @@ class Encoder(nn.Module):
                              'attention_conv_block': AttentionConvBlock, 'feed_forward': FeedForward,
                              'conv_attention_conv_block': ConvAttentionConvBlock, 'lstm': nn.LSTM,
                              'transformer': TransformerEncoder, 'transformer_dec': TransformerDecoder}
+    self.wav2vec = fnc.get_wav2vec_model(kwargs.get('wav2vec_save_file', 'wav2vec_large.pt')) if wav2vec_frontend else None
     
     if input_proj is not None:
-      self.input_proj = get_input_proj_layer(config=input_proj)
+      self.input_proj = fnc.get_input_proj_layer(config=input_proj)
     
     if config is None:
-      self.config = get_encoder_config(config='base')
+      self.config = fnc.get_encoder_config(config='base')
     
     layers = []
     for layer in self.config:
@@ -165,7 +166,16 @@ class Encoder(nn.Module):
       key = [k for k in ['output_size', 'out_chan', 'in_chan', 'input_size', 'd_model'] if k in self.config[-1][-1][-1][1]][0]
       self.output_proj = nn.Linear(self.config[-1][-1][-1][1][key], output_size)
   
+  @torch.no_grad()
+  def _wav2vec_forward(self, x):  # x = [batch_size, signal_len]
+    z = self.wav2vec.feature_extractor(x)  # n_feats = 512
+    c = self.wav2vec.feature_aggregator(z)  # [batch_size, n_feats, seq_len]
+    return c.permute(0, 2, 1)  # [batch_size, seq_len, n_feats]
+  
   def forward(self, x, y=None):
+    if self.wav2vec is not None:
+      x = self._wav2vec_forward(x)
+
     if self.input_proj is not None:
       x = self.input_proj(x)
 
@@ -202,14 +212,14 @@ class Decoder(nn.Module):
     if isinstance(config, list):
       pass
     elif config == 'css_decoder':
-      conf = get_decoder_config(config=config, **kwargs)
+      conf = fnc.get_decoder_config(config=config, **kwargs)
       embedder = TextEmbedder(conf['output_dim'], emb_dim=conf['emb_dim'], max_seq_len=conf['max_seq_len'])
       self.network = CSSDecoder(conf['output_dim'], conf['emb_dim'], conf['hid_dim'], conf['n_layers'], conf['kernel_size'],
                                 conf['dropout'], conf['pad_idx'], embedder=embedder, score_fn=conf['score_fn'],
                                 max_seq_len=conf['max_seq_len'], scaling_energy=conf['scaling_energy'], multi_head=conf['multi_head'],
                                 d_keys_values=conf['d_keys_values'])
     else:
-      conf = get_decoder_config(config='transformer', **kwargs)
+      conf = fnc.get_decoder_config(config='transformer', **kwargs)
       self.embedder = TextEmbedder(conf['output_dim'], emb_dim=conf['d_model'], max_seq_len=conf['max_seq_len'])
       self.network = TransformerDecoder(conf['n_blocks'], conf['d_model'], conf['d_keys'], conf['d_values'], conf['n_heads'],
                                         conf['d_ff'], dropout=conf['dropout'])
@@ -248,13 +258,13 @@ class EncoderMultiHeadObjective(nn.Module):
 if __name__ == "__main__":
   ## ENCODER
   print('ENCODER')
-  encoder = Encoder(config=get_encoder_config('attention'))  # separable | attention | attention_glu | base
+  encoder = Encoder(config=fnc.get_encoder_config('attention'))  # separable | attention | attention_glu | base
   print(f'Number of parameters = {sum(p.numel() for p in encoder.parameters() if p.requires_grad):,}')
   in_ = torch.randn(2, 1500, 512)
   out = encoder(in_)
   print(f'in_ = {in_.shape} | out = {out.shape}')
 
-  encoder = Encoder(config=get_encoder_config('attention'), output_size=31)
+  encoder = Encoder(config=fnc.get_encoder_config('attention'), output_size=31)
   out = encoder(in_)
   print(f'in_ = {in_.shape} | out = {out.shape}')
 
@@ -272,10 +282,10 @@ if __name__ == "__main__":
   import pandas as pd
   from tabulate import tabulate
   confs = ['separable', 'attention', 'attention_glu', 'conv_attention', 'conv_attention_large', 'rnn_base',
-           'conv_transformer', 'base', 'conv_gated_transformer']
+           'conv_transformer', 'base', 'conv_gated_transformer', 'conv_attention_deep']
   res = []
   for conf in confs:
-    model = Encoder(config=get_encoder_config(config=conf))
+    model = Encoder(config=fnc.get_encoder_config(config=conf))
     res.append((conf, f'{sum(p.numel() for p in model.parameters() if p.requires_grad):,}'))
   res = sorted(res, key=lambda x: x[1])
   models, n_params = zip(*res)
