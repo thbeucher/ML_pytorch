@@ -899,11 +899,73 @@ class Experiment26(CTCTrainer):
 
 class Experiment27(CTCTrainer):
   def __init__(self, logfile='_logs/_logs_CTC27.txt', save_name_model='convnet/ctc_conv_attention27.pt'):
-    super().__init__(logfile=logfile, save_name_model=save_name_model, batch_size=32, lr=1e-4, slice_fn=Data.raw_signal)
+    self.train_folder = ['../../../datasets/openslr/LibriSpeech/train-clean-100/', '../../../datasets/openslr/LibriSpeech/train-clean-360/',
+                         '../../../datasets/openslr/LibriSpeech/train-other-500/']
+    self.test_folder = '../../../datasets/openslr/LibriSpeech/test-clean/'
+    self.encoding_fn = Data.letters_encoding
+    self.encoding_fn_args = {'add_sos_eos_pad_tokens': False}
+    self.process_file_fn = Data.read_and_slice_signal
+    self.process_file_fn_args = {'slice_fn': Data.wav2vec_extraction, 'save_metadata': True}  # 'wav2vec_model': Data.get_wav2vec_model()
+    self.augmented = True
+    self.augmented_args = {'save_path': '../../../datasets/openslr/LibriSpeech/train-augmented/'}
+    super().__init__(logfile=logfile, save_name_model=save_name_model, batch_size=32, lr=1e-4, slice_fn=Data.raw_signal,
+                     metadata_file='_Data_metadata_ctc_500-360-100-augmented_letters_wav2vec.pk')
+    sources = [s.lower() for s in self.data.ids_to_transcript_train.values()] +\
+              [s.lower() for s in self.data.ids_to_transcript_test.values()]
+    self.not_ok_transitions, _ = get_not_ok_transitions(sources, self.idx_to_tokens)
   
+  def set_metadata(self, metadata_file):
+    self.data = Data()
+
+    if not os.path.isfile(metadata_file):
+      self.data.set_audio_metadata(self.train_folder, self.test_folder, process_file_fn=self.process_file_fn, **self.process_file_fn_args)
+      self.data.process_all_transcripts(self.train_folder, self.test_folder, encoding_fn=self.encoding_fn, **self.encoding_fn_args)
+      self.data.add_blank_token()
+      if self.augmented:
+        self.data.data_augmentation_create_n_add(**self.augmented_args)
+      self.data.save_metadata(save_name=metadata_file)
+    else:
+      self.data.load_metadata(save_name=metadata_file)
+    
+    self.idx_to_tokens = self.data.idx_to_tokens
+    self.tokens_to_idx = self.data.tokens_to_idx
+    self.ids_to_encodedsources_train = self.data.ids_to_encodedsources_train
+    self.ids_to_encodedsources_test = self.data.ids_to_encodedsources_test
+    self.ids_to_audiofile_train = self.data.ids_to_audiofile_train
+    self.ids_to_audiofile_test = self.data.ids_to_audiofile_test
+    
   def instanciate_model(self, **kwargs):
     return Encoder(config=get_encoder_config(config='conv_attention_deep2'), output_size=kwargs['output_dim'],
                    input_proj='base', wav2vec_frontend=True).to(self.device)
+  
+  def train_pass(self, only_loss=True):
+    losses, accs = 0, {}
+    all_targets, all_preds = [], []
+
+    for inputs, targets, input_lens, target_lens in tqdm(self.train_data_loader):
+      input_lens = self.get_input_lens(input_lens)
+
+      inputs, targets = inputs.to(self.device), targets.to(self.device)
+      input_lens, target_lens = input_lens.to(self.device), target_lens.to(self.device)
+      
+      preds = self.model(inputs)  # [batch_size, seq_len, output_dim]
+
+      self.optimizer.zero_grad()
+      ctc_loss = self.criterion(preds.permute(1, 0, 2).log_softmax(-1), targets, input_lens, target_lens)
+      transition_loss = compute_transition_loss(preds.softmax(-1), self.not_ok_transitions)
+      current_loss = ctc_loss + transition_loss
+      current_loss.backward()
+      self.optimizer.step()
+
+      all_targets += targets.tolist()
+      all_preds += preds.argmax(dim=-1).tolist()
+
+      losses += current_loss.item()
+    
+    if not only_loss:
+      accs = CTCTrainer.scorer(all_targets, all_preds, self.idx_to_tokens, self.tokens_to_idx)
+    
+    return losses / len(self.train_data_loader), accs
 
 
 def read_preds_greedy_n_beam_search(res_file='_ctc_exp3_predictions.pk', data_file='_Data_metadata_letters_wav2vec.pk', beam_size=10):

@@ -661,7 +661,7 @@ class Data(object):
     sources_encoded = [[syllables_to_idx[sos_tok]] + [syllables_to_idx[s] for s in cs] + [syllables_to_idx[eos_tok]] for cs in conv_sources]
     return sources_encoded, idx_to_syllables, syllables_to_idx
   
-  def process_all_transcripts(self, train_folder, test_folder, encoding_fn=None, padding=False, pad_tok='<pad>'):
+  def process_all_transcripts(self, train_folder, test_folder, encoding_fn=None, padding=False, pad_tok='<pad>', **kwargs):
     '''
     Default transcripts processing
 
@@ -698,7 +698,7 @@ class Data(object):
     self.get_transcripts(test_folder, var_name='ids_to_transcript_test')
     ids_test, sources_test = zip(*[(k, v) for k, v in self.ids_to_transcript_test.items()])
 
-    sources_encoded, self.idx_to_tokens, self.tokens_to_idx = encoding_fn(sources_train + list(sources_test))
+    sources_encoded, self.idx_to_tokens, self.tokens_to_idx = encoding_fn(sources_train + list(sources_test), **kwargs)
 
     self.max_source_len = max(map(len, sources_encoded))
 
@@ -708,6 +708,12 @@ class Data(object):
     self.ids_to_encodedsources_train = {ids_train[i]: s for i, s in enumerate(sources_encoded[:len(sources_train)])}
     self.ids_to_encodedsources_test = {ids_test[i]: s for i, s in enumerate(sources_encoded[len(sources_train):])}
   
+  def add_blank_token(self, blank_token='<blank>'):
+    self.idx_to_tokens = [blank_token] + self.idx_to_tokens
+    self.tokens_to_idx = {t: i for i, t in enumerate(self.idx_to_tokens)}
+    self.ids_to_encodedsources_train = {k: (np.array(v)+1).tolist() for k, v in self.ids_to_encodedsources_train.items()}
+    self.ids_to_encodedsources_test = {k: (np.array(v)+1).tolist() for k, v in self.ids_to_encodedsources_test.items()}
+
   @staticmethod
   def get_readers(ids_to_something):
     return list(sorted(set([r.split('-')[0] for r in ids_to_something.keys()])))
@@ -898,7 +904,7 @@ class Data(object):
     list_files_fn = Data.get_openslr_files if list_files_fn is None else list_files_fn
     process_file_fn = Data.read_and_slice_signal if process_file_fn is None else process_file_fn
     slice_fn = Data.wav2vec_extraction if slice_fn is None else slice_fn
-    speed_changes = kwargs.get('speed_changes', [0.75, 1.25])
+    speed_changes = kwargs.get('speed_changes', [0.85, 1.15])
 
     if not os.path.isdir(save_path):
       os.makedirs(save_path)
@@ -920,8 +926,11 @@ class Data(object):
         new_ids_to_encodedsources_train[new_id] = self.ids_to_encodedsources_train[id_]
         new_ids_to_transcript_train[new_id] = self.ids_to_transcript_train[id_]
 
-        features = process_file_fn(save_name, slice_fn=slice_fn, **kwargs)
-        self.max_signal_len = max(self.max_signal_len, features.shape[0])
+        if slice_fn == Data.wav2vec_extraction and os.path.isfile(save_name.replace('.flac', '.wav2vec_shape.pk')):
+          self.max_signal_len = max(self.max_signal_len, pk.load(open(save_name.replace('.flac', '.wav2vec_shape.pk'), 'rb'))[0])
+        else:
+          features = process_file_fn(save_name, slice_fn=slice_fn, **kwargs)
+          self.max_signal_len = max(self.max_signal_len, features.shape[0])
     
     self.ids_to_audiofile_train = {**self.ids_to_audiofile_train, **new_ids_to_audiofile_train}
     self.ids_to_encodedsources_train = {**self.ids_to_encodedsources_train, **new_ids_to_encodedsources_train}
