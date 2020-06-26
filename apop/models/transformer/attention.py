@@ -75,6 +75,7 @@ class MultiHeadAttention(nn.Module):
     self.output_projection = nn.Linear(n_heads * d_values, d_model, bias=False)
 
     self.K, self.V = None, None
+    self.reset_parameters()
   
   def forward(self, queries, keys, values, mask=None, save=False, aggregate=False):
     '''
@@ -114,3 +115,8 @@ class MultiHeadAttention(nn.Module):
   def reset_memory(self):
     self.K, self.V = None, None
     self.attention.reset_memory()
+  
+  def reset_parameters(self):  # default linear init is kaiming_uniform_
+    nn.init.xavier_uniform_(self.query_projection.weight)
+    nn.init.xavier_uniform_(self.key_projection.weight)
+    nn.init.xavier_uniform_(self.value_projection.weight)

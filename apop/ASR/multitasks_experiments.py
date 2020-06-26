@@ -6,11 +6,15 @@ import torch
 import random
 import logging
 import numpy as np
+import pickle as pk
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 
 from tqdm import tqdm
+from PIL import Image
+from torchvision import transforms
+from torchvision.models import resnet50
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
@@ -20,6 +24,7 @@ import utils as u
 
 from data import Data
 from ctc_experiments import CTCTrainer
+from models.transformer.decoder import TransformerDecoder
 from models.final_net import Decoder, Encoder, EncoderMultiHeadObjective
 from models.final_net_configs import get_decoder_config, get_encoder_config
 
@@ -701,6 +706,251 @@ class AttentionTrainer(object):
     return losses / len(self.test_data_loader), accs
 
 
+class AudioVisualDataset(Dataset):
+  def __init__(self, ids_to_captionsImagesAudios):
+    self.preprocess_img = transforms.Compose([transforms.Resize(256),
+                                              transforms.CenterCrop(224),
+                                              transforms.ToTensor(),
+                                              transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
+    self.ids_to_captionsImagesAudios = ids_to_captionsImagesAudios
+    self._sort_by_targets_len()
+  
+  def __len__(self):
+    return len(self.identities)
+  
+  def _sort_by_targets_len(self):
+    ids_lenCaption = [(k, len(v[0])) for k, v in self.ids_to_captionsImagesAudios.items()]
+    self.identities = list(map(lambda x: x[0], sorted(ids_lenCaption, key=lambda x: x[1])))
+  
+  def __getitem__(self, idx):
+    caption, image_file, audio_file, audio_len = self.ids_to_captionsImagesAudios[self.identities[idx]]
+    signal, _ = Data.read_audio_file(audio_file)
+    target = torch.LongTensor(caption)
+    target_len = len(target)
+    audio = torch.Tensor(signal)
+    image = self.preprocess_img(Image.open(image_file))  # [3, 224, 224]
+    return audio, image, target, target_len, audio_len
+
+
+class AudioVisualCollator(object):
+  def __init__(self, audio_pad, text_pad):
+    self.audio_pad = audio_pad
+    self.text_pad = text_pad
+  
+  def __call__(self, batch):
+    audios, images, targets, targets_lens, audios_lens = zip(*batch)
+    audios_batch = pad_sequence(audios, batch_first=True, padding_value=self.audio_pad).float()
+    images_batch = torch.stack(images)
+    targets_batch = pad_sequence(targets, batch_first=True, padding_value=self.text_pad)
+    targets_lens = torch.LongTensor(targets_lens)
+    audios_lens = torch.LongTensor(audios_lens)
+    return audios_batch, images_batch, targets_batch, targets_lens, audios_lens
+
+
+class AudioVisualModel(nn.Module):
+  def __init__(self, output_size, **kwargs):
+    super().__init__()
+    self.visual_backbone = resnet50(pretrained=True)
+    self.visual_backbone.avgpool = nn.Identity()
+    self.visual_backbone.fc = nn.Identity()
+    self.visual_backbone_proj = nn.Linear(2048, 512)
+    self.audio_backbone = Encoder(config=get_encoder_config(config='conv_attention'), input_proj='base', wav2vec_frontend=True)
+    self.transcriptor = TransformerDecoder(kwargs.get('n_blocks', 4), kwargs.get('d_model', 512), kwargs.get('d_keys', 64),
+                                           kwargs.get('d_values', 64), kwargs.get('n_heads', 8), kwargs.get('d_ff', 1024),
+                                           dropout=kwargs.get('dropout', 0.25))
+    self.output_proj = nn.Linear(kwargs.get('d_model', 512), output_size)
+  
+  def forward(self, img, audio):
+    for i, (_, layer) in enumerate(self.visual_backbone.named_children()):
+      visual_output = layer(img) if i == 0 else layer(visual_output)
+    visual_output = self.visual_backbone_proj(visual_output.reshape(visual_output.size(0), visual_output.size(1), -1).permute(0, 2, 1))
+    audio_output = self.audio_backbone(audio)
+    out = self.transcriptor(audio_output, visual_output, futur_masking=False)
+    return self.output_proj(out)
+
+
+class AudioVisualTrainer(object):
+  '''
+  From the COCO dataset we retrieve natural image and their annotations,
+    we use tacotron2+waveglow to get audio signal from the image captions (see process_coco.py)
+    We creates a network that will accept an image and an audio signal and ask it to produce the transcription
+    By associating an Image with the sound, we hope that the network will better learn how to distinguish tokens
+    from spoken language and be able to reproduce more faithfully the correct transcription
+    We will have a Visual-Backbone e.g. a ResNet50 and a Audio-Backbone, the two will join to a network that will
+    produce the transcription
+    If we see this step as a powerful pretraining for Speech-to-Text task, we can then use the Audio-Backbone and
+    fine-tune it on openSLR dataset, see if it helps to improve performance
+
+    => To get input_len as required by CTC loss
+    import os;import sys;import torch;import pickle as pk;from tqdm import tqdm;from data import Data
+    sys.path.append('../')
+    from models.final_net import Encoder;from models.final_net_configs import get_encoder_config
+    save_folder = 'train2014_wav_lens/'
+    if not os.path.isdir(save_folder):
+      os.makedirs(save_folder)
+    net = Encoder(config=get_encoder_config(config='conv_attention'), input_proj='base', wav2vec_frontend=True)
+    folder = '../../../datasets/coco/train2014_wav/'
+    files = os.listdir(folder)
+    for f in tqdm(files):
+      signal, _ = Data.read_audio_file(os.path.join(folder, f))
+      out = net(torch.Tensor(signal).reshape(1, -1))
+      with open(os.path.join(save_folder, f.replace('.wav', '.pk')), 'wb') as f:
+        pk.dump(out.shape[1], f)
+  '''
+  def __init__(self, device=None, logfile='_logs/_audio_visual_trainer_logs.txt', save_name_model='convnet/audio_visual_model.pt',
+               captions_file='../../../datasets/coco/annotations/captions_train2014.json', batch_size=32, lr=1e-4,
+               images_folder='../../../datasets/coco/train2014/', audios_folder='../../../datasets/coco/train2014_wav/',
+               audioLens_folder='../../../datasets/coco/train2014_wav_lens/', lr_scheduling=True, eval_step=1, n_epochs=1000,
+               encoding_fn=Data.letters_encoding, metadata_file='_audio_visual_metadata.pk', **kwargs):
+    logging.basicConfig(filename=logfile, filemode='a', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') if device is None else device
+    self.captions_file = captions_file
+    self.images_folder = images_folder
+    self.audios_folder = audios_folder
+    self.audioLens_folder = audioLens_folder
+    self.encoding_fn = encoding_fn
+    self.metadata_file = metadata_file
+    self.batch_size = batch_size
+    self.n_epochs = n_epochs
+    self.eval_step = eval_step
+    self.save_name_model = save_name_model
+    self.lr_scheduling = lr_scheduling
+
+    self.set_data()
+    self.set_data_loader()
+
+    self.model = self.instanciate_model()
+    self.model = nn.DataParallel(self.model)
+
+    u.dump_dict({'batch_size': batch_size, 'lr': lr, 'lr_scheduling': lr_scheduling}, 'CTCModel Hyperparameters')
+    logging.info(self.model)
+    logging.info(f'The model has {u.count_trainable_parameters(self.model):,} trainable parameters')
+
+    self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
+    self.criterion = nn.CTCLoss(zero_infinity=True)
+
+    if lr_scheduling:
+      patience, min_lr, threshold = kwargs.get('patience', 75), kwargs.get('min_lr', 1e-5), kwargs.get('lr_threshold', 0.003)
+      self.lr_scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='max', factor=0.1, patience=patience, verbose=True,
+                                                                min_lr=min_lr, threshold_mode='abs', threshold=threshold)
+
+  def set_data(self):
+    if os.path.isfile(self.metadata_file):
+      with open(self.metadata_file, 'rb') as f:
+        self.idx_to_tokens, self.tokens_to_idx, self.train_data, self.test_data = pk.load(f)
+    else:
+      with open(self.captions_file, 'r') as f:
+        captions = json.load(f)
+      ids_captions = [(f"{capt['image_id']}-{capt['id']}", capt['caption']) for capt in captions['annotations']]
+      captions_encoded, idx_to_tokens, tokens_to_idx = self.encoding_fn(list(map(lambda x: x[1], ids_captions)),
+                                                                        add_sos_eos_pad_tokens=False)
+      captions_encoded, self.idx_to_tokens, self.tokens_to_idx = Data.add_blank_token(encodedsources=captions_encoded,
+                                                                                      idx_to_tokens=idx_to_tokens,
+                                                                                      tokens_to_idx=tokens_to_idx)
+      ids_to_caption = {ids_captions[i][0]: ce for i, ce in enumerate(captions_encoded)}
+
+      ids_to_images = {re.search(r'_0+(\d+).', f).group(1): f for f in os.listdir(self.images_folder)}
+
+      ids_to_audioLens = {f.split('.')[0]: pk.load(open(os.path.join(self.audioLens_folder, f), 'rb'))
+                            for f in os.listdir(self.audioLens_folder)}
+
+      data = {f.split('.')[0]: (ids_to_caption[f.split('.')[0]],
+                                os.path.join(self.images_folder, ids_to_images[f.split('-')[0]]),
+                                os.path.join(self.audios_folder, f),
+                                ids_to_audioLens[f.split('.')[0]])
+                                  for f in os.listdir(self.audios_folder)}
+
+      train_ids, test_ids = train_test_split(list(data.keys()), test_size=0.1, shuffle=True)
+      self.train_data = {i: data[i] for i in train_ids}
+      self.test_data = {i: data[i] for i in test_ids}
+
+      with open(self.metadata_file, 'wb') as f:
+        pk.dump([self.idx_to_tokens, self.tokens_to_idx, self.train_data, self.test_data], f)
+  
+  def set_data_loader(self):
+    train_dataset = AudioVisualDataset(self.train_data)
+    test_dataset = AudioVisualDataset(self.test_data)
+
+    collator = AudioVisualCollator(0, 0)
+
+    self.train_data_loader = DataLoader(train_dataset, batch_size=self.batch_size, num_workers=8, collate_fn=collator,
+                                        shuffle=True, pin_memory=True)
+    self.test_data_loader = DataLoader(test_dataset, batch_size=self.batch_size, num_workers=8, collate_fn=collator,
+                                       shuffle=True, pin_memory=True)
+  
+  def instanciate_model(self):
+    return AudioVisualModel(len(self.idx_to_tokens)).to(self.device)
+  
+  def train(self):
+    print('Start Training...')
+    eval_accuracy_memory = 0
+    for epoch in tqdm(range(self.n_epochs)):
+      epoch_loss, accs = self.train_pass(only_loss=epoch % self.eval_step != 0)
+      logging.info(f"Epoch {epoch} | train_loss = {epoch_loss:.3f} | {' | '.join([f'{k} = {v:.3f}' for k, v in accs.items()])}")
+      eval_loss, accs = self.evaluation(only_loss=epoch % self.eval_step != 0)
+      logging.info(f"Epoch {epoch} | test_loss = {eval_loss:.3f} | {' | '.join([f'{k} = {v:.3f}' for k, v in accs.items()])}")
+
+      oea = accs.get('word_accuracy', None)
+
+      if self.lr_scheduling and oea is not None:
+        self.lr_scheduler.step(oea)
+
+      if oea is not None and oea > eval_accuracy_memory:
+        logging.info(f'Save model with eval_accuracy = {oea:.3f}')
+        u.save_checkpoint(self.model, None, self.save_name_model)
+        eval_accuracy_memory = oea
+  
+  def train_pass(self, only_loss=True):
+    losses, accs = 0, {}
+    all_targets, all_preds = [], []
+
+    for audios, images, targets, targets_lens, audios_lens in tqdm(self.train_data_loader):
+      audios, images, targets = audios.to(self.device), images.to(self.device), targets.to(self.device)
+      targets_lens, audios_lens = targets_lens.to(self.device), audios_lens.to(self.device)
+      
+      preds = self.model(images, audios)  # [batch_size, seq_len, output_dim]
+
+      self.optimizer.zero_grad()
+      current_loss = self.criterion(preds.permute(1, 0, 2).log_softmax(-1), targets, audios_lens, targets_lens)
+      current_loss.backward()
+      self.optimizer.step()
+
+      all_targets += targets.tolist()
+      all_preds += preds.argmax(dim=-1).tolist()
+
+      losses += current_loss.item()
+    
+    if not only_loss:
+      accs = Data.ctc_scorer(all_targets, all_preds, self.idx_to_tokens, self.tokens_to_idx)
+    
+    return losses / len(self.train_data_loader), accs
+  
+  @torch.no_grad()
+  def evaluation(self, only_loss=True):
+    losses, accs = 0, {}
+    all_targets, all_preds = [], []
+
+    self.model.eval()
+
+    for audios, images, targets, targets_lens, audios_lens in tqdm(self.test_data_loader):
+      audios, images, targets = audios.to(self.device), images.to(self.device), targets.to(self.device)
+      targets_lens, audios_lens = targets_lens.to(self.device), audios_lens.to(self.device)
+
+      preds = self.model(images, audios)  # [batch_size, seq_len, output_dim]
+
+      losses += self.criterion(preds.permute(1, 0, 2).log_softmax(-1), targets, audios_lens, targets_lens).item()
+
+      all_targets += targets.tolist()
+      all_preds += preds.argmax(dim=-1).tolist()
+    
+    self.model.train()
+
+    if not only_loss:
+      accs = Data.ctc_scorer(all_targets, all_preds, self.idx_to_tokens, self.tokens_to_idx)
+
+    return losses / len(self.test_data_loader), accs
+
+
 if __name__ == "__main__":
   ## SEEDING FOR REPRODUCIBILITY
   SEED = 42
@@ -727,3 +977,8 @@ if __name__ == "__main__":
   if rep == 'y':
     attn = AttentionTrainer()
     attn.train()
+  
+  rep = input('Train AudioVisualModel? (y or n): ')
+  if rep == 'y':
+    avt = AudioVisualTrainer()
+    avt.train()

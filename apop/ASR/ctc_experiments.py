@@ -25,6 +25,7 @@ from models.final_net import Encoder
 from models.divers_models import ConvLayer
 from optimizer import CosineAnnealingWarmUpRestarts
 from models.final_net_configs import get_encoder_config
+from models.transformer.encoder import TransformerEncoder
 from transition_loss import compute_transition_loss, get_not_ok_transitions, compute_transition_loss2, create_transition_mat,\
                             compute_wrong_words_loss, get_ok_words
 
@@ -316,7 +317,7 @@ class CTCTrainer(object):
       preds = self.model(inputs)
 
       all_targets += targets.tolist()
-      predictions += preds.softmax(-1).tolist()
+      predictions += preds.tolist()
     
     with open(save_file, 'wb') as f:
       pk.dump({'targets': all_targets, 'predictions': predictions}, f)
@@ -920,7 +921,11 @@ class Experiment27(CTCTrainer):
     if not os.path.isfile(metadata_file):
       self.data.set_audio_metadata(self.train_folder, self.test_folder, process_file_fn=self.process_file_fn, **self.process_file_fn_args)
       self.data.process_all_transcripts(self.train_folder, self.test_folder, encoding_fn=self.encoding_fn, **self.encoding_fn_args)
-      self.data.add_blank_token()
+      self.data.ids_to_encodedsources_train, self.data.idx_to_tokens,\
+        self.data.tokens_to_idx = Data.add_blank_token(self.data.ids_to_encodedsources_train, self.data.idx_to_tokens,
+                                                       self.data.tokens_to_idx)
+      self.data.ids_to_encodedsources_test, *_ = Data.add_blank_token(self.data.ids_to_encodedsources_test, self.data.idx_to_tokens,
+                                                                      self.data.tokens_to_idx)
       if self.augmented:
         self.data.data_augmentation_create_n_add(**self.augmented_args)
       self.data.save_metadata(save_name=metadata_file)
@@ -966,6 +971,77 @@ class Experiment27(CTCTrainer):
       accs = CTCTrainer.scorer(all_targets, all_preds, self.idx_to_tokens, self.tokens_to_idx)
     
     return losses / len(self.train_data_loader), accs
+
+
+class WordsHead(nn.Module):
+  def __init__(self, output_size, device):
+    super().__init__()
+    self.device = device
+    self.encoder = Encoder(config=get_encoder_config(config='conv_attention_deep'), input_proj='base').to(self.device)
+    self.encoder.eval()
+    for param in self.encoder.parameters():
+      param.requires_grad = False
+    self.word_dec = nn.Sequential(TransformerEncoder(n_blocks=1, d_model=512, dropout=0.25),
+                                  nn.Linear(512, output_size))
+  
+  def forward(self, x, y=None):
+    char_out = self.encoder(x, y=y)
+    return self.word_dec(char_out)
+
+
+class Experiment28(CTCTrainer):
+  def __init__(self, logfile='_logs/_logs_CTC28.txt', save_name_model='convnet/ctc_conv_attention28.pt'):
+    self.train_folder = ['../../../datasets/openslr/LibriSpeech/train-clean-100/',
+                         '../../../datasets/openslr/LibriSpeech/train-clean-360/',
+                         '../../../datasets/openslr/LibriSpeech/train-other-500/']
+    self.test_folder = '../../../datasets/openslr/LibriSpeech/test-clean/'
+    self.augmented = False
+    self.augmented_args = {'save_path': '../../../datasets/openslr/LibriSpeech/train-augmented/'}
+    self.encoding_fn = Data.words_encoding
+    self.encoding_fn_args = {'add_sos_eos_pad_tokens': False, 'limit_words': 3000}
+    self.process_file_fn = Data.read_and_slice_signal
+    self.process_file_fn_args = {'slice_fn': Data.wav2vec_extraction, 'save_metadata': True, 'save_features': True}
+    super().__init__(logfile=logfile, save_name_model=save_name_model, batch_size=48, lr=1e-4,
+                     metadata_file='_Data_metadata_ctc_500-360-100_words_wav2vec.pk')
+    u.load_model(self.model.module.encoder, 'convnet/ctc_conv_attention23.pt', restore_only_similars=True)
+  
+  def instanciate_model(self, **kwargs):
+    return WordsHead(kwargs['output_dim'], self.device).to(self.device)
+  
+  def set_metadata(self, metadata_file):
+    self.data = Data()
+
+    if not os.path.isfile(metadata_file):
+      self.data.set_audio_metadata(self.train_folder, self.test_folder, process_file_fn=self.process_file_fn, **self.process_file_fn_args)
+      self.data.process_all_transcripts(self.train_folder, self.test_folder, encoding_fn=self.encoding_fn, **self.encoding_fn_args)
+      self.data.ids_to_encodedsources_train, self.data.idx_to_tokens,\
+        self.data.tokens_to_idx = Data.add_blank_token(self.data.ids_to_encodedsources_train, self.data.idx_to_tokens,
+                                                       self.data.tokens_to_idx)
+      self.data.ids_to_encodedsources_test, *_ = Data.add_blank_token(self.data.ids_to_encodedsources_test, self.data.idx_to_tokens,
+                                                                      self.data.tokens_to_idx)
+      if self.augmented:
+        self.data.data_augmentation_create_n_add(**self.augmented_args)
+      self.data.save_metadata(save_name=metadata_file)
+    else:
+      self.data.load_metadata(save_name=metadata_file)
+    
+    self.idx_to_tokens = self.data.idx_to_tokens
+    self.tokens_to_idx = self.data.tokens_to_idx
+    self.ids_to_encodedsources_train = self.data.ids_to_encodedsources_train
+    self.ids_to_encodedsources_test = self.data.ids_to_encodedsources_test
+    self.ids_to_audiofile_train = self.data.ids_to_audiofile_train
+    self.ids_to_audiofile_test = self.data.ids_to_audiofile_test
+  
+  def set_data_loader(self):
+    train_dataset = CustomDataset(self.ids_to_audiofile_train, self.ids_to_encodedsources_train)
+    test_dataset = CustomDataset(self.ids_to_audiofile_test, self.ids_to_encodedsources_test)
+
+    collator = CustomCollator(0, 0)
+
+    self.train_data_loader = DataLoader(train_dataset, batch_size=self.batch_size, num_workers=8, collate_fn=collator,
+                                        shuffle=True, pin_memory=True)
+    self.test_data_loader = DataLoader(test_dataset, batch_size=self.batch_size, num_workers=8, collate_fn=collator,
+                                       shuffle=True, pin_memory=True)
 
 
 def read_preds_greedy_n_beam_search(res_file='_ctc_exp3_predictions.pk', data_file='_Data_metadata_letters_wav2vec.pk', beam_size=10):

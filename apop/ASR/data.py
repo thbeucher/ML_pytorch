@@ -476,18 +476,32 @@ class Data(object):
     return [[tokens_to_idx[sos_tok]] + s + [tokens_to_idx[eos_tok]] for s in sources]
 
   @staticmethod
-  def words_encoding(sources, add_sos_eos_pad_tokens=True, idx_to_words=None, words_to_idx=None, **kwargs):
+  def words_encoding(sources, add_sos_eos_pad_tokens=True, idx_to_words=None, words_to_idx=None, limit_words=0, **kwargs):
     if add_sos_eos_pad_tokens:
       sos_tok, eos_tok, pad_tok = kwargs.get('sos_tok', '<sos>'), kwargs.get('eos_tok', '<eos>'), kwargs.get('pad_tok', '<pad>')
 
     sources = [s.lower() for s in sources]
 
     if idx_to_words is None or words_to_idx is None:
-      words = list(sorted(set([w for s in sources for w in s.split(' ')])))
+      words_count = Counter([w for s in sources for w in s.split(' ')])
+      words = list(sorted(words_count.keys()))
+      if limit_words > 0:
+        words = list(map(lambda x: x[0], words_count.most_common(limit_words))) + list(sorted(set([l for s in sources for l in s])))
       idx_to_words = [sos_tok, eos_tok, pad_tok] + words if add_sos_eos_pad_tokens else words
       words_to_idx = {l: i for i, l in enumerate(idx_to_words)}
 
-    sources_encoded = [[words_to_idx[w] for w in s.split(' ')] for s in tqdm(sources)]
+    if limit_words == 0:
+      sources_encoded = [[words_to_idx[w] for w in s.split(' ')] for s in tqdm(sources)]
+    else:
+      sources_encoded = []
+      for s in tqdm(sources):
+        s_enc = []
+        words = s.split()
+        for i, w in enumerate(words):
+          s_enc += [words_to_idx[w]] if w in words_to_idx else [words_to_idx[l] for l in w]
+          if i < len(words) - 1:
+            s_enc.append(words_to_idx[' '])
+        sources_encoded.append(s_enc)
     
     if add_sos_eos_pad_tokens:
       sources_encoded = Data.add_sos_eos_tokens(sources_encoded, words_to_idx, sos_tok=sos_tok, eos_tok=eos_tok)
@@ -708,11 +722,15 @@ class Data(object):
     self.ids_to_encodedsources_train = {ids_train[i]: s for i, s in enumerate(sources_encoded[:len(sources_train)])}
     self.ids_to_encodedsources_test = {ids_test[i]: s for i, s in enumerate(sources_encoded[len(sources_train):])}
   
-  def add_blank_token(self, blank_token='<blank>'):
-    self.idx_to_tokens = [blank_token] + self.idx_to_tokens
-    self.tokens_to_idx = {t: i for i, t in enumerate(self.idx_to_tokens)}
-    self.ids_to_encodedsources_train = {k: (np.array(v)+1).tolist() for k, v in self.ids_to_encodedsources_train.items()}
-    self.ids_to_encodedsources_test = {k: (np.array(v)+1).tolist() for k, v in self.ids_to_encodedsources_test.items()}
+  @staticmethod
+  def add_blank_token(encodedsources, idx_to_tokens, tokens_to_idx, blank_token='<blank>'):
+    idx_to_tokens = [blank_token] + idx_to_tokens
+    tokens_to_idx = {t: i for i, t in enumerate(idx_to_tokens)}
+    if isinstance(encodedsources, dict):
+      encodedsources = {k: (np.array(v) + 1).tolist() for k, v in encodedsources}
+    else:
+      encodedsources = [(np.array(es) + 1).tolist() for es in encodedsources]
+    return encodedsources, idx_to_tokens, tokens_to_idx
 
   @staticmethod
   def get_readers(ids_to_something):
@@ -897,6 +915,19 @@ class Data(object):
     wer = np.mean(wers)
 
     return {'character_accuracy': character_accuracy, 'sentence_accuracy': sentence_accuracy, 'wer': wer, 'word_accuracy': word_accuracy}
+
+  @staticmethod
+  def ctc_reconstruct_sentences(targets, predictions, idx_to_tokens, tokens_to_idx):
+    target_sentences = [''.join([idx_to_tokens[i] for i in t[:t.index(0) if 0 in t else None]]) for t in targets]
+    predicted_sentences = [[i for i, _ in groupby(p)] for p in predictions]
+    predicted_sentences = [''.join([idx_to_tokens[i] for i in p if i != 0]) for p in predicted_sentences]
+    return target_sentences, predicted_sentences
+
+  @staticmethod
+  def ctc_scorer(targets, predictions, idx_to_tokens=None, tokens_to_idx=None, rec=True):
+    if rec:
+      targets, predictions = Data.ctc_reconstruct_sentences(targets, predictions, idx_to_tokens, tokens_to_idx)
+    return Data.compute_scores(targets=targets, predictions=predictions, rec=False)
 
   def data_augmentation_create_n_add(self, save_path='../../../datasets/openslr/LibriSpeech/train-clean-100-augmented/',
                                      list_files_fn=None, slice_fn=None, process_file_fn=None, **kwargs):
