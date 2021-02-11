@@ -143,7 +143,9 @@ class Encoder(nn.Module):
                              'attention_conv_block': AttentionConvBlock, 'feed_forward': FeedForward,
                              'conv_attention_conv_block': ConvAttentionConvBlock, 'lstm': nn.LSTM,
                              'transformer': TransformerEncoder, 'transformer_dec': TransformerDecoder}
-    self.wav2vec = fnc.get_wav2vec_model(kwargs.get('wav2vec_save_file', 'wav2vec_large.pt')) if wav2vec_frontend else None
+    self.trainable_wav2vec = kwargs.get('trainable_wav2vec', False)
+    self.wav2vec = fnc.get_wav2vec_model(kwargs.get('wav2vec_save_file', 'wav2vec_large.pt'), eval_mode=not self.trainable_wav2vec)\
+                    if wav2vec_frontend else None
     
     if input_proj is not None:
       self.input_proj = fnc.get_input_proj_layer(config=input_proj)
@@ -166,10 +168,14 @@ class Encoder(nn.Module):
       key = [k for k in ['output_size', 'out_chan', 'in_chan', 'input_size', 'd_model'] if k in self.config[-1][-1][-1][1]][0]
       self.output_proj = nn.Linear(self.config[-1][-1][-1][1][key], output_size)
   
-  @torch.no_grad()
   def _wav2vec_forward(self, x):  # x = [batch_size, signal_len]
-    z = self.wav2vec.feature_extractor(x)  # n_feats = 512
-    c = self.wav2vec.feature_aggregator(z)  # [batch_size, n_feats, seq_len]
+    if self.trainable_wav2vec:
+      z = self.wav2vec.feature_extractor(x)  # n_feats = 512
+      c = self.wav2vec.feature_aggregator(z)  # [batch_size, n_feats, seq_len]
+    else:
+      with torch.no_grad():
+        z = self.wav2vec.feature_extractor(x)
+        c = self.wav2vec.feature_aggregator(z)
     return c.permute(0, 2, 1)  # [batch_size, seq_len, n_feats]
   
   def forward(self, x, y=None):
@@ -269,13 +275,16 @@ if __name__ == "__main__":
   print(f'in_ = {in_.shape} | out = {out.shape}')
 
   ## DECODER
-  print('DECODER')
-  decoder = Decoder(config='transformer')
-  print(f'Number of parameters = {sum(p.numel() for p in decoder.parameters() if p.requires_grad):,}')
-  enc_out = torch.randn(2, 375, 512)
-  dec_in = torch.randint(0, 31, (2, 200))
-  out = decoder(enc_out, dec_in)
-  print(f'dec_in = {dec_in.shape} | out = {out.shape}')
+  try:
+    print('DECODER')
+    decoder = Decoder(config='transformer')
+    print(f'Number of parameters = {sum(p.numel() for p in decoder.parameters() if p.requires_grad):,}')
+    enc_out = torch.randn(2, 375, 512)
+    dec_in = torch.randint(0, 31, (2, 200))
+    out = decoder(enc_out, dec_in)
+    print(f'dec_in = {dec_in.shape} | out = {out.shape}')
+  except:
+    pass
 
   ## MODEL SIZES
   print('MODEL SIZES')

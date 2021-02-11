@@ -1203,9 +1203,12 @@ def get_input_proj_layer(config='base'):
   return input_proj
 
 
-def get_wav2vec_model(filename='wav2vec_large.pt'):
+def get_wav2vec_model(filename='wav2vec_large.pt', eval_mode=True):
   cp = torch.load(filename)
   wav2vec_model = Wav2VecModel.build_model(cp['args'], task=None)
   wav2vec_model.load_state_dict(cp['model'])
-  wav2vec_model.eval()
+
+  if eval_mode:
+    wav2vec_model.eval()
+    
   return wav2vec_model
