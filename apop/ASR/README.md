@@ -27,11 +27,12 @@ else:
 
 Contains class to train/eval/dump_predictions for convnet_seqseq experiments
 
-## convnet_experiments.py
+## ctc_experiments.py
 
-Contains experiments that uses convnet_seqseq architecture
+Contains experiments to perform Speech-to-Text task.
+Default configuration (available experiment) use [wav2vec](https://arxiv.org/abs/1904.05862) model so you have to download it first!
 
 Usage:
 ```python
-python3 convnet_experiments.py
+python3 ctc_experiments.py
 ```
