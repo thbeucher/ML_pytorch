@@ -1,8 +1,10 @@
 # ASR (Automatic Speech Recognition)
 
+## Speech-to-Text (STT)
+
 Experiments conduct in this repository are currently using openslr dataset that you can download on http://www.openslr.org/12/
 
-## data.py
+### data.py
 
 This file contains every functions to process data for ASR experiments
 
@@ -23,12 +25,14 @@ else:
   data.load_metadata(save_name=metadata_file)
 ```
 
-## ctc_experiments.py
-
-Contains experiments to perform Speech-to-Text task.
+### ctc_experiments.py
+ 
 Default configuration (available experiment) use [wav2vec](https://arxiv.org/abs/1904.05862) model so you have to download it first!
 
 Usage:
 ```python
 python3 ctc_experiments.py
 ```
+
+Experiment1 ends up with following performance score:
+ ```character_accuracy: 0.72, 'word_accuracy': 0.86, sentence_accuracy: 0.5, 'wer': 0.057```
