@@ -23,10 +23,6 @@ else:
   data.load_metadata(save_name=metadata_file)
 ```
 
-## convnet_trainer.py
-
-Contains class to train/eval/dump_predictions for convnet_seqseq experiments
-
 ## ctc_experiments.py
 
 Contains experiments to perform Speech-to-Text task.
