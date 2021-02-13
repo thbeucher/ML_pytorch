@@ -796,9 +796,26 @@ class AudioVisualTrainer(object):
       out = net(torch.Tensor(signal).reshape(1, -1))
       with open(os.path.join(save_folder, f.replace('.wav', '.pk')), 'wb') as f:
         pk.dump(out.shape[1], f)
+    
+    => To clean captions
+    import json;import text_cleaner as tc (.py file in work/datasets/coco/)
+    with open('annotations/captions_train2014.json', 'r') as f:
+      data = json.load(f)
+    sources = [el['caption'] for el in data['annotations']]
+    sources_cleaned = [tc.english_cleaners(s) for s in sources]
+    letters = " 'abcdefghijklmnopqrstuvwxyz"
+    sources_cleaned = [''.join([l for l in s if l in letters]) for s in sources_cleaned]
+    sources_cleaned = [s.strip() for s in sources_cleaned]
+    new_annotations = []
+    for i, a in enumerate(data['annotations']):
+      a['caption'] = sources_cleaned[i]
+      new_annotations.append(a)
+    data['annotations'] = new_annotations
+    with open('annotations/captions_train2014_clean.json', 'w') as f:
+      json.dump(data, f)
   '''
   def __init__(self, device=None, logfile='_logs/_audio_visual_trainer_logs.txt', save_name_model='convnet/audio_visual_model.pt',
-               captions_file='../../../datasets/coco/annotations/captions_train2014.json', batch_size=32, lr=1e-4,
+               captions_file='../../../datasets/coco/annotations/captions_train2014_clean.json', batch_size=32, lr=1e-4,
                images_folder='../../../datasets/coco/train2014/', audios_folder='../../../datasets/coco/train2014_wav/',
                audioLens_folder='../../../datasets/coco/train2014_wav_lens/', lr_scheduling=True, eval_step=1, n_epochs=1000,
                encoding_fn=Data.letters_encoding, metadata_file='_audio_visual_metadata.pk', **kwargs):

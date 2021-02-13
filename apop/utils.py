@@ -132,6 +132,8 @@ def save_checkpoint(model, optimizer, save_path):
     * optimizer : torch.nn.Module
     * save_path : string
   '''
+  if not os.path.isdir(os.path.dirname(save_path)):
+    os.makedirs(os.path.dirname(save_path))
   torch.save({
               'model_state_dict': model.state_dict() if model is not None else None,
               'optimizer_state_dict': optimizer.state_dict() if optimizer is not None else None

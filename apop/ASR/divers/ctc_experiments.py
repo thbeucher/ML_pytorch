@@ -581,6 +581,7 @@ class Experiment18(CTCTrainer):
 
 
 class Experiment19(CTCTrainer):
+  '''Stop epoch 214, best epoch 210 : word_acc = 0.825, WER = 0.079'''
   def __init__(self, logfile='_logs/_logs_CTC19.txt', save_name_model='convnet/ctc_conv_attention19.pt'):
     super().__init__(logfile=logfile, save_name_model=save_name_model, batch_size=48, lr=1e-4)
   
@@ -684,6 +685,7 @@ class Experiment22(CTCTrainer):
 
 
 class Experiment23(CTCTrainer):
+  '''Stop epoch 282, best epoch 265 : word_acc = 0.861, WER = 0.058'''
   def __init__(self, logfile='_logs/_logs_CTC23.txt', save_name_model='convnet/ctc_conv_attention23.pt'):
     super().__init__(logfile=logfile, save_name_model=save_name_model, batch_size=48, lr=1e-4)
   
@@ -1042,6 +1044,100 @@ class Experiment28(CTCTrainer):
                                         shuffle=True, pin_memory=True)
     self.test_data_loader = DataLoader(test_dataset, batch_size=self.batch_size, num_workers=8, collate_fn=collator,
                                        shuffle=True, pin_memory=True)
+
+
+class Experiment29(CTCTrainer):
+  def __init__(self, logfile='_logs/_logs_CTC29.txt', save_name_model='convnet/ctc_conv_attention29.pt'):
+    super().__init__(logfile=logfile, save_name_model=save_name_model, batch_size=32, lr=1e-4, slice_fn=Data.raw_signal)
+    audio_visual_checkpoint = torch.load('convnet/audio_visual_model.pt', map_location=self.device)['model_state_dict']
+    audio_encoder = {k: v for k, v in audio_visual_checkpoint.items() if 'audio_backbone' in k}
+    output_proj = {k: v for k, v in audio_visual_checkpoint.items() if 'output_proj.' in k}
+    model_state_dict = {k.replace('module.', ''): v for k, v in self.model.state_dict().items()}
+    params = {f'module.{k}': vv for k, v in model_state_dict.items() for kk, vv in {**audio_encoder, **output_proj}.items() if k in kk}
+    print(f'Loads {len(params)}/{len(self.model.state_dict())} modules from audio_visual_model.pt')
+    params = {**self.model.state_dict(), **params}
+    self.model.load_state_dict(params)
+  
+  def instanciate_model(self, **kwargs):
+    return Encoder(config=get_encoder_config(config='conv_attention'), output_size=kwargs['output_dim'],
+                   input_proj='base', wav2vec_frontend=True).to(self.device)
+
+
+class Experiment30(CTCTrainer):
+  def __init__(self, logfile='_logs/_logs_CTC30.txt', save_name_model='convnet/ctc_conv_attention30.pt'):
+    self.train_folder = ['../../../datasets/openslr/LibriSpeech/train-clean-100/',
+                         '../../../datasets/openslr/LibriSpeech/train-clean-360/',
+                         '../../../datasets/openslr/LibriSpeech/train-other-500/']
+    self.test_folder = '../../../datasets/openslr/LibriSpeech/test-clean/'
+    self.augmented = False
+    self.augmented_args = {'save_path': '../../../datasets/openslr/LibriSpeech/train-augmented/'}
+    self.encoding_fn = Data.mono_syllable_encoding
+    self.encoding_fn_args = {'add_sos_eos_pad_tokens': False, 'n_words': 3000}
+    self.process_file_fn = Data.read_and_slice_signal
+    self.process_file_fn_args = {'slice_fn': Data.raw_signal, 'save_metadata': True, 'save_features': False}
+    super().__init__(logfile=logfile, save_name_model=save_name_model, batch_size=32, lr=1e-4,
+                     metadata_file='_Data_metadata_ctc_500-360-100_monoSYL_wav2vec.pk')
+    u.load_model(self.model, 'convnet/ctc_conv_attention23.pt', restore_only_similars=True)
+  
+  def instanciate_model(self, **kwargs):
+    return Encoder(config=get_encoder_config(config='conv_attention_deep'), output_size=kwargs['output_dim'],
+                   input_proj='base', wav2vec_frontend=True).to(self.device)
+  
+  def set_metadata(self, metadata_file):
+    self.data = Data()
+
+    if not os.path.isfile(metadata_file):
+      self.data.set_audio_metadata(self.train_folder, self.test_folder, process_file_fn=self.process_file_fn, **self.process_file_fn_args)
+      self.data.process_all_transcripts(self.train_folder, self.test_folder, encoding_fn=self.encoding_fn, **self.encoding_fn_args)
+      self.data.ids_to_encodedsources_train, self.data.idx_to_tokens,\
+        self.data.tokens_to_idx = Data.add_blank_token(self.data.ids_to_encodedsources_train, self.data.idx_to_tokens,
+                                                       self.data.tokens_to_idx)
+      self.data.ids_to_encodedsources_test, *_ = Data.add_blank_token(self.data.ids_to_encodedsources_test, self.data.idx_to_tokens,
+                                                                      self.data.tokens_to_idx)
+      if self.augmented:
+        self.data.data_augmentation_create_n_add(**self.augmented_args)
+      self.data.save_metadata(save_name=metadata_file)
+    else:
+      self.data.load_metadata(save_name=metadata_file)
+    
+    self.idx_to_tokens = self.data.idx_to_tokens
+    self.tokens_to_idx = self.data.tokens_to_idx
+    self.ids_to_encodedsources_train = self.data.ids_to_encodedsources_train
+    self.ids_to_encodedsources_test = self.data.ids_to_encodedsources_test
+    self.ids_to_audiofile_train = self.data.ids_to_audiofile_train
+    self.ids_to_audiofile_test = self.data.ids_to_audiofile_test
+  
+  def set_data_loader(self):
+    train_dataset = CustomDataset(self.ids_to_audiofile_train, self.ids_to_encodedsources_train, slice_fn=Data.raw_signal)
+    test_dataset = CustomDataset(self.ids_to_audiofile_test, self.ids_to_encodedsources_test, slice_fn=Data.raw_signal)
+
+    collator = CustomCollator(0, 0)
+
+    self.train_data_loader = DataLoader(train_dataset, batch_size=self.batch_size, num_workers=8, collate_fn=collator,
+                                        shuffle=True, pin_memory=True)
+    self.test_data_loader = DataLoader(test_dataset, batch_size=self.batch_size, num_workers=8, collate_fn=collator,
+                                       shuffle=True, pin_memory=True)
+
+
+class Experiment31(CTCTrainer):
+  def __init__(self, logfile='_logs/_logs_CTC31.txt', save_name_model='convnet/ctc_conv_attention31.pt'):
+    super().__init__(logfile=logfile, save_name_model=save_name_model, batch_size=24, lr=1e-4)
+    # u.load_model(self.model, 'convnet/ctc_conv_attention10.pt', restore_only_similars=True)
+  
+  def set_data_loader(self):
+    train_dataset = CustomDataset(self.ids_to_audiofile_train, self.ids_to_encodedsources_train, slice_fn=Data.raw_signal)
+    test_dataset = CustomDataset(self.ids_to_audiofile_test, self.ids_to_encodedsources_test, slice_fn=Data.raw_signal)
+
+    collator = CustomCollator(0, 0)
+
+    self.train_data_loader = DataLoader(train_dataset, batch_size=self.batch_size, num_workers=8, collate_fn=collator,
+                                        shuffle=True, pin_memory=True)
+    self.test_data_loader = DataLoader(test_dataset, batch_size=self.batch_size, num_workers=8, collate_fn=collator,
+                                       shuffle=True, pin_memory=True)
+  
+  def instanciate_model(self, **kwargs):
+    return Encoder(config=get_encoder_config(config='conv_attention'), output_size=kwargs['output_dim'],
+                   input_proj='base', wav2vec_frontend=True, trainable_wav2vec=True).to(self.device)
 
 
 def read_preds_greedy_n_beam_search(res_file='_ctc_exp3_predictions.pk', data_file='_Data_metadata_letters_wav2vec.pk', beam_size=10):

@@ -713,7 +713,7 @@ class Data(object):
     self.get_transcripts(test_folder, var_name='ids_to_transcript_test')
     ids_test, sources_test = zip(*[(k, v) for k, v in self.ids_to_transcript_test.items()])
 
-    sources_encoded, self.idx_to_tokens, self.tokens_to_idx = encoding_fn(sources_train + list(sources_test), **kwargs)
+    sources_encoded, self.idx_to_tokens, self.tokens_to_idx = encoding_fn(list(sources_train) + list(sources_test), **kwargs)
 
     self.max_source_len = max(map(len, sources_encoded))
 
