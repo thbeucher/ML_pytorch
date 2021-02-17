@@ -25,8 +25,8 @@ import utils as u
 from data import Data
 from ctc_experiments import CTCTrainer
 from models.transformer.decoder import TransformerDecoder
-from models.final_net import Decoder, Encoder, EncoderMultiHeadObjective
-from models.final_net_configs import get_decoder_config, get_encoder_config
+from models.stt_net import Decoder, Encoder, EncoderMultiHeadObjective
+from models.stt_net_configs import get_decoder_config, get_encoder_config
 
 
 class TextDataset(Dataset):
@@ -784,7 +784,7 @@ class AudioVisualTrainer(object):
     => To get input_len as required by CTC loss
     import os;import sys;import torch;import pickle as pk;from tqdm import tqdm;from data import Data
     sys.path.append('../')
-    from models.final_net import Encoder;from models.final_net_configs import get_encoder_config
+    from models.stt_net import Encoder;from models.stt_net_configs import get_encoder_config
     save_folder = 'train2014_wav_lens/'
     if not os.path.isdir(save_folder):
       os.makedirs(save_folder)

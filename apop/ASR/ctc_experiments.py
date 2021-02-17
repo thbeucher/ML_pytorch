@@ -13,14 +13,14 @@ from tqdm import tqdm
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset, DataLoader
 
-sys.path.append(os.path.abspath(__file__).replace('ASR/ctc_experiments_cleaned.py', ''))
+sys.path.append(os.path.abspath(__file__).replace('ASR/ctc_experiments.py', ''))
 
 import utils as u
 
 from data import Data
-from models.final_net import Encoder
+from models.stt_net import Encoder
 from optimizer import CosineAnnealingWarmUpRestarts
-from models.final_net_configs import get_encoder_config
+from models.stt_net_configs import get_encoder_config
 
 
 class CustomDataset(Dataset):

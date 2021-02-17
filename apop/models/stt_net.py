@@ -5,8 +5,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-sys.path.append(os.path.abspath(__file__).replace('final_net.py', ''))
-import final_net_configs as fnc
+sys.path.append(os.path.abspath(__file__).replace('stt_net.py', ''))
+import stt_net_configs as fnc
 from conv_seqseq import Decoder as CSSDecoder
 from transformer.encoder import TransformerEncoder
 from transformer.decoder import TransformerDecoder

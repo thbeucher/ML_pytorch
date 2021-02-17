@@ -21,10 +21,10 @@ sys.path.append(os.path.abspath(__file__).replace('ASR/ctc_experiments.py', ''))
 import utils as u
 
 from data import Data
-from models.final_net import Encoder
+from models.stt_net import Encoder
 from models.divers_models import ConvLayer
 from optimizer import CosineAnnealingWarmUpRestarts
-from models.final_net_configs import get_encoder_config
+from models.stt_net_configs import get_encoder_config
 from models.transformer.encoder import TransformerEncoder
 from transition_loss import compute_transition_loss, get_not_ok_transitions, compute_transition_loss2, create_transition_mat,\
                             compute_wrong_words_loss, get_ok_words
