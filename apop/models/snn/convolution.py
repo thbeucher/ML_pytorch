@@ -1,4 +1,4 @@
-# Taken (with possible modifications) from https://github.com/miladmozafari/SpykeTorch
+# Taken (with modifications) from https://github.com/miladmozafari/SpykeTorch
 import torch
 import torch.nn as nn
 

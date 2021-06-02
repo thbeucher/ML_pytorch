@@ -1,4 +1,4 @@
-# Functions & class taken (with possible modifications) from https://github.com/miladmozafari/SpykeTorch
+# Functions & class taken (with modifications) from https://github.com/miladmozafari/SpykeTorch
 import os
 import sys
 import math
@@ -71,7 +71,13 @@ class Filter(object):
 
 
 def cumulative_intensity_to_latency(intencities, n_time_steps, to_spike=True):
-  '''intencities = [1, n_feats, height, width]'''
+  '''intencities = [1, n_feats, height, width]
+  We compute bin_size in order to fill all non-zero intencities in the n_time_steps
+  We then sort flattened intencities then split it in n bins
+  Finally, the cumulative latency matrice is created where we find at each timestep
+  the neurons (spike=1) that fire first (higher intencities received)
+  Cumulative because when a neuron fire at time_step n, it "keep firing" at n+t timesteps
+  '''
   # bin size to get all non-zero intencities into the n_time_steps defined
   bin_size = torch.count_nonzero(intencities) // n_time_steps  # (intencities != 0).sum() for count_nonzero for pytorch < 1.6
   

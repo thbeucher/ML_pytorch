@@ -1,13 +1,13 @@
-# Functions taken (with possible modifications) from https://github.com/miladmozafari/SpykeTorch
+# Functions taken (with modifications) from https://github.com/miladmozafari/SpykeTorch
 import torch
 import numpy as np
 
 
 def pointwise_feature_competition_inhibition(potentials):
   '''In each position, the first spiking neuron will inhibit his concurrents'''
-  pot_max = potentials.max(dim=1, keepdim=True)
+  pot_max = potentials.max(dim=1, keepdim=True)  # max returns (values, indices)
   # use topk instead of max as since torch version 1.0.0, max doesn't return first index when equal max values
-  earliest_spikes = pot_max[0].sign().topk(1, dim=0)
+  earliest_spikes = pot_max[0].sign().topk(1, dim=0)  # topk returns (values, indices)
   winners = pot_max[1].gather(0, earliest_spikes[1])  # keep values of only winning neurons
   coefs = torch.zeros_like(potentials[0]).unsqueeze_(0).scatter_(1, winners, earliest_spikes[0])  # inhibition coefs
   return torch.mul(potentials, coefs)  # broadcast on each timesteps
@@ -26,36 +26,36 @@ def get_k_winners(potentials, kwta=1, inhibition_radius=0, spikes=None):
     spikes = potentials.sign()
   # finding earliest potentials for each position in each feature
   # use topk instead of max as since torch version 1.0, max doesn't return first index when equal max values
-  maximum = torch.topk(spikes, 1, dim=0)
+  maximum = torch.topk(spikes, 1, dim=0)  # [1, feat_out(eg32), height, width]
   values = potentials.gather(dim=0, index=maximum[1]) # gathering values
   # propagating the earliest potential through the whole timesteps
-  truncated_pot = spikes * values
+  truncated_pot = spikes * values  # [timestep, feat_out, height, width]
   # summation with a high enough value (maximum of potential summation over timesteps) at spike positions
   v = truncated_pot.max() * potentials.size(0)
   truncated_pot.addcmul_(spikes,v)
   # summation over all timesteps
-  total = truncated_pot.sum(dim=0,keepdim=True)
+  total = truncated_pot.sum(dim=0,keepdim=True)  # [1, feat_out, height, width]
   
   total.squeeze_(0)
   global_pooling_size = tuple(total.size())
   winners = []
   for k in range(kwta):
-    max_val,max_idx = total.view(-1).max(0)
+    max_val, max_idx = total.view(-1).max(0)
     if max_val.item() != 0:
       # finding the 3d position of the maximum value
-      max_idx_unraveled = np.unravel_index(max_idx.item(),global_pooling_size)
+      max_idx_unraveled = np.unravel_index(max_idx.item(), global_pooling_size)
       # adding to the winners list
       winners.append(max_idx_unraveled)
       # preventing the same feature to be the next winner
       total[max_idx_unraveled[0],:,:] = 0
-      # columnar inhibition (increasing the chance of leanring diverse features)
+      # columnar inhibition (increasing the chance of learning diverse features)
       if inhibition_radius != 0:
         rowMin,rowMax = max(0,max_idx_unraveled[-2]-inhibition_radius),min(total.size(-2),max_idx_unraveled[-2]+inhibition_radius+1)
         colMin,colMax = max(0,max_idx_unraveled[-1]-inhibition_radius),min(total.size(-1),max_idx_unraveled[-1]+inhibition_radius+1)
         total[:,rowMin:rowMax,colMin:colMax] = 0
     else:
       break
-  return winners
+  return winners  # winner = (feature, row, column) e.g. (2, 21, 10)
 
 
 def fire(potentials, threshold=None, return_thresholded_potentials=False):

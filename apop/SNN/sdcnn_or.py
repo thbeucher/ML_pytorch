@@ -1,5 +1,5 @@
-# Taken (with possible modifications) from https://github.com/miladmozafari/SpykeTorch
-# Take 1Go of memory on GPU for training
+# Taken (with modifications) from https://github.com/miladmozafari/SpykeTorch
+# Take 1Go of memory on GPU for training, trained in 2h47, accuracy obtained = 98%
 import os
 import sys
 import torch
@@ -86,30 +86,30 @@ class SDCNNExperiment(object):
                                                         shuffle=True, pin_memory=True, collate_fn=lambda x: x[0])
   
   def instanciate_model(self):
-    self.layers = nn.ModuleList([Convolution(**self.config['layers_config'][0]), Convolution(**self.config['layers_config'][1])])
+    self.layers = nn.ModuleList([Convolution(**lc) for lc in self.config['layers_config']])
     self.layers.to(self.device)
   
   def update_all_lr(self, new_ap, new_an, layer_idx):
-    for ap, an in self.learning_rates[layer_idx]:
-      ap = new_ap
-      an = new_an
+    for i in range(len(self.learning_rates[layer_idx])):
+      self.learning_rates[layer_idx][i][0] = new_ap
+      self.learning_rates[layer_idx][i][1] = new_an
   
   def competition_winner_stdp(self, input_spikes, potentials, layer_idx):
-    potentials = f.pointwise_feature_competition_inhibition(potentials)
+    potentials = f.pointwise_feature_competition_inhibition(potentials)  # [timestep, feat_out(eg32), height, width]
     spikes = potentials.sign()
     winners = f.get_k_winners(potentials, kwta=self.config['n_winners'][layer_idx],
                               inhibition_radius=self.config['inhibition_radius'][layer_idx], spikes=spikes)
     lf.functional_stdp(self.layers[layer_idx], self.learning_rates[layer_idx], input_spikes, spikes, winners)
     return spikes, potentials
   
-  def forward(self, input_spikes, layer_idx, training=False):
+  def forward(self, input_spikes, layer_idx, training=False):  # [timestep, feat_in(eg2), height, width]
     for i, layer in enumerate(self.layers):
-      input_spikes = nn.functional.pad(input_spikes, self.paddings_train[i])
+      input_spikes = nn.functional.pad(input_spikes, self.paddings_train[i])  # [timestep, feat_in, height_pad, width_pad]
 
       if i > 0 and training:
         input_spikes = f.pointwise_feature_competition_inhibition(input_spikes)
 
-      potentials = layer(input_spikes)
+      potentials = layer(input_spikes)  # [timestep, feat_out(eg32), heigth, width]
       spikes, potentials = f.fire(potentials, self.config['thresholds'][i], return_thresholded_potentials=True)
 
       if i == layer_idx and training:
@@ -130,9 +130,6 @@ class SDCNNExperiment(object):
           self.forward(spikes_in.to(self.device), i, training=True)
   
   def evaluate(self):
-    # retrieve train data
-    # retrieve test data
-    # train classifier then evaluate
     from sklearn.svm import LinearSVC
     from sklearn.metrics import classification_report
 
@@ -160,6 +157,11 @@ class SDCNNExperiment(object):
 
     print(f'TRAIN results:\n{classification_report(np.array(y_train), preds_train)}')
     print(f'TEST results:\n{classification_report(np.array(y_test), preds_test)}')
+
+    import pickle as pk
+    with open('_tmp_xy_traintest_preds.pk', 'wb') as f:
+      pk.dump({'x_train': x_train, 'y_train': y_train, 'x_test': x_test, 'y_test': y_test,
+               'preds_train': preds_train, 'preds_test': preds_test}, f)
   
   def load_model(self, map_location='cpu'):
     if os.path.isfile(self.config['save_path']):
@@ -207,3 +209,31 @@ if __name__ == "__main__":
     print('Loading train model...')
     sdcnn_exp.load_model(map_location=None)
     sdcnn_exp.evaluate()
+
+
+###################################################################################################################################
+## STORY                                                                                                                         ##
+##                                                                                                                               ##
+## Input:                                                                                                                        ##
+##  image from mnist = grayscale -> [1, 28, 28]                                                                                  ##
+##  Creation of different kernels that modelize the retina and ganglion cells. We use these kernels to transform                 ##
+##  the grayscale image (pixel values between 0-255) into intencitie levels                                                      ##
+##  (convolution between kernels and image -> [n_kernels=2, 28, 28]). We localy normalize obtained intencities.                  ##
+##  Finally, we transform the intencities matrix (2D) into temporal spiking matrix (3D) (see cumulative_intensity_to_latency)    ##
+## Model:                                                                                                                        ##
+##  Convolution layer, kernel interpretation -> at each position, there is feature_out neurons that shared feature_in set of     ##
+##                                              kernel_size*2 synapses                                                           ##
+##                                             (eg at each position, there is 32 neurons that shared 2 set of 25 synapses)       ##
+## Training:                                                                                                                     ##
+##  spike_in = [n_timesteps=15, n_retina_kernels=2, 28, 28], we pad it in order to go through convolution layer [15, 2, 32, 32]  ##
+##  -We go through convolutional layer, as we have cumulative temporal spiking input, we obtained at each timestep the potential ##
+##  of each neuron so then with a defined threshold we obtain a cumulative spike train (functional.fire).                        ##
+##  spike_out = [15, 32, 28, 28]                                                                                                 ##
+##  -We perform a pointwise feature competition. At each position, through all features, we retrieve the first neuron to spike   ##
+##  then inhibit (by putting to 0) all other neuron at that position on other features.                                          ##
+##  -We find k=5 winners by using the criteria of first to spike then highest potential. When a winner is found, all neurons     ##
+##  in the same feature are set to 0 to prevent the same feature to be the next winner then to increase the chance of learning   ##
+##  diverse features we perform a columnar inhibition where with a specified radius=2 we set to 0 all neurons in that radius     ##
+##  on all other features.                                                                                                       ##
+##  -We finally allow winners to learn by updating their synapses using STDP process                                             ##
+###################################################################################################################################

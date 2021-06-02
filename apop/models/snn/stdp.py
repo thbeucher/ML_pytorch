@@ -1,4 +1,4 @@
-# Functional version (with possible modifications) of STDP class from https://github.com/miladmozafari/SpykeTorch
+# Functional version (with modifications) of STDP class from https://github.com/miladmozafari/SpykeTorch
 import os
 import sys
 import torch
@@ -17,8 +17,8 @@ def get_pre_post_ordering(input_spikes, output_spikes, winners, kernel_size):
   Input and output tensors must be spike-waves.
 
   Args:
-      input_spikes (Tensor): Input spike-wave
-      output_spikes (Tensor): Output spike-wave
+      input_spikes (Tensor): Input spike-wave (shape = [timestep, feat_in(eg2), height_pad, width_pad])
+      output_spikes (Tensor): Output spike-wave (shape = [timestep, feat_out(eg32), height, width])
       winners (List of Tuples): List of winners.
                                 Each tuple denotes a winner in a form of a triplet (feature, row, column).
 
@@ -26,8 +26,8 @@ def get_pre_post_ordering(input_spikes, output_spikes, winners, kernel_size):
       List: pre-post ordering of spikes
   """
   # accumulating input and output spikes to get latencies
-  input_latencies = torch.sum(input_spikes, dim=0)
-  output_latencies = torch.sum(output_spikes, dim=0)
+  input_latencies = torch.sum(input_spikes, dim=0)  # [feat_in, height_pad, width_pad]
+  output_latencies = torch.sum(output_spikes, dim=0)  # [feat_out, height, width]
 
   result = []
   for winner in winners:
@@ -37,7 +37,8 @@ def get_pre_post_ordering(input_spikes, output_spikes, winners, kernel_size):
     # since input_latencies is padded and winners are computes on unpadded input we do not need to shift it to the center
     in_tensor = input_latencies[:, winner[-2]:winner[-2] + kernel_size[-2], winner[-1]:winner[-1] + kernel_size[-1]]
     result.append(torch.ge(in_tensor, out_tensor))
-  return result
+
+  return result  # results_1 shape = [feat_in, kernel_size, kernel_size]
 
 
 def functional_stdp(conv_layer, learning_rate, input_spikes, output_spikes, winners,
