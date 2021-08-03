@@ -32,7 +32,7 @@ def get_k_winners(potentials, kwta=1, inhibition_radius=0, spikes=None):
   truncated_pot = spikes * values  # [timestep, feat_out, height, width]
   # summation with a high enough value (maximum of potential summation over timesteps) at spike positions
   v = truncated_pot.max() * potentials.size(0)
-  truncated_pot.addcmul_(spikes,v)
+  truncated_pot.addcmul_(spikes,v)  # truncated_pot + v * spikes
   # summation over all timesteps
   total = truncated_pot.sum(dim=0,keepdim=True)  # [1, feat_out, height, width]
   

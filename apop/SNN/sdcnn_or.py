@@ -1,5 +1,6 @@
 # Taken (with modifications) from https://github.com/miladmozafari/SpykeTorch
 # Take 1Go of memory on GPU for training, trained in 2h47, accuracy obtained = 98%
+# Using Convergence criterion, training is done in 8mn with an accuracy of 98%
 import os
 import sys
 import torch
@@ -54,7 +55,8 @@ class SDCNNExperiment(object):
                         'pooling_vars': [{'kernel_size': 2, 'stride': 2, 'padding': 1}] * 2,
                         'n_winners': [5, 8], 'inhibition_radius': [2, 1],
                         'batch_size': 1, 'dataset_path': 'data/', 'n_epochs': [2, 20],
-                        'save_path': 'model/sdcnne_exp.pt'}
+                        'save_path': 'model/sdcnne_exp.pt',
+                        'check_convergence_step': 5000, 'convergence_threshold': 0.008}
     self.config = u.populate_configuration(configuration, self.base_config)
 
     self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -128,6 +130,12 @@ class SDCNNExperiment(object):
             new_an = self.learning_rates[0][0][0] * self.config['an_update']
             self.update_all_lr(new_ap, new_an, 0)
           self.forward(spikes_in.to(self.device), i, training=True)
+
+          if j % self.config['check_convergence_step'] == 0:
+            C = (self.layers[i].weights * (1 - self.layers[i].weights)).sum() / np.prod(self.layers[i].weights.shape)
+            logging.info(f'Layer {i} - Epoch {epoch} - n_data {j} - C = {C:.4f}')
+            if C < self.config['convergence_threshold']:
+              break
   
   def evaluate(self):
     from sklearn.svm import LinearSVC
@@ -236,4 +244,13 @@ if __name__ == "__main__":
 ##  diverse features we perform a columnar inhibition where with a specified radius=2 we set to 0 all neurons in that radius     ##
 ##  on all other features.                                                                                                       ##
 ##  -We finally allow winners to learn by updating their synapses using STDP process                                             ##
+##                                                                                                                               ##
+## HYPERPARAMETERS:                                                                                                              ##
+##  - learning rates (0.004, -0.003) & learning rates update (max_ap=0.15, an_update=-0.75, timestep_update_lr=500)              ##
+##  - firing threshold (layer1 = 10, layer2 = 1)                                                                                 ##
+##  - number of winners (layer1 = 5, layer2 = 8)                                                                                 ##
+##  - inhibition radius (layer1 = 2, layer2 = 1)                                                                                 ##
+##  - number of epochs (layer1 = 2, layer2 = 20) -> can be removed by using Convergence criteria                                 ##
+##  - layers configuration (n_channel, kernel_size)                                                                              ##
+##  - input transformation hyperparameters: kernel_type, kernel_configuration, normalization_radius, n_time_steps                ##
 ###################################################################################################################################

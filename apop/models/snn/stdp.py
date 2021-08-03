@@ -36,7 +36,7 @@ def get_pre_post_ordering(input_spikes, output_spikes, winners, kernel_size):
     # slicing input tensor with the same size of the receptive field centered around winner
     # since input_latencies is padded and winners are computes on unpadded input we do not need to shift it to the center
     in_tensor = input_latencies[:, winner[-2]:winner[-2] + kernel_size[-2], winner[-1]:winner[-1] + kernel_size[-1]]
-    result.append(torch.ge(in_tensor, out_tensor))
+    result.append(torch.ge(in_tensor, out_tensor))  # ge = in_tensor >= out_tensor
 
   return result  # results_1 shape = [feat_in, kernel_size, kernel_size]
 

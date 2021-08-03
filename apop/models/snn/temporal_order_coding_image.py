@@ -79,12 +79,15 @@ def cumulative_intensity_to_latency(intencities, n_time_steps, to_spike=True):
   Cumulative because when a neuron fire at time_step n, it "keep firing" at n+t timesteps
   '''
   # bin size to get all non-zero intencities into the n_time_steps defined
-  bin_size = torch.count_nonzero(intencities) // n_time_steps  # (intencities != 0).sum() for count_nonzero for pytorch < 1.6
+  bin_size = (intencities != 0).sum() // n_time_steps  # for pytorch < 1.6
+  # bin_size = torch.count_nonzero(intencities) // n_time_steps
   
   intencities_flattened_sorted = torch.sort(intencities.view(-1), descending=True)
   
-  sorted_bins_value = torch.split(intencities_flattened_sorted[0], bin_size)  # bin_size.item() for pytorch < 1.6
-  sorted_bins_idx = torch.split(intencities_flattened_sorted[1], bin_size)
+  sorted_bins_value = torch.split(intencities_flattened_sorted[0], bin_size.item())  # for pytorch < 1.6
+  sorted_bins_idx = torch.split(intencities_flattened_sorted[1], bin_size.item())  # for pytorch < 1.6
+  # sorted_bins_value = torch.split(intencities_flattened_sorted[0], bin_size)
+  # sorted_bins_idx = torch.split(intencities_flattened_sorted[1], bin_size)
   
   spike_map = torch.zeros(intencities_flattened_sorted[0].shape)
   
