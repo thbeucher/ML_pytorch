@@ -149,7 +149,6 @@ class SDCNNExperiment(object):
           self.predictions_history[0] += 1
       else:
         stdp = False
-        # lrs = torch.zeros_like(self.layers[layer_idx].weights)
         self.predictions_history[2] += 1
 
     if stdp:
@@ -187,7 +186,6 @@ class SDCNNExperiment(object):
           self.forward(spikes_in.to(self.device), i, target=target if i == 2 else None, training=True)
 
           if i == 2 and self.config['adaptive_lr'] and j > 0 and j % 1000 == 0:
-            # logging.info(f'Epoch {epoch} - n_data {j} - perf = {self.predictions_history / self.predictions_history.sum()}')
             self.adaptive_update_lr(i)
           
           if i == 2 and j % 20000 == 0:
@@ -195,15 +193,16 @@ class SDCNNExperiment(object):
             logging.info(f'Network performance - f1 = {network_f1:.3f}')
 
             if network_f1 > self.prev_network_f1:
-              self.save_model(save_name=self.config['save_path'].replace('.pt', f'_{network_f1:.2f}.pt'))
-              if self.prev_network_f1 > 0:
+              if os.path.isfile(self.config['save_path'].replace('.pt', f'_{self.prev_network_f1:.2f}.pt')):
                 os.remove(self.config['save_path'].replace('.pt', f'_{self.prev_network_f1:.2f}.pt'))
+
+              self.save_model(save_name=self.config['save_path'].replace('.pt', f'_{network_f1:.2f}.pt'))
               self.prev_network_f1 = network_f1
 
           if j % self.config['check_convergence_step'] == 0:
             C = (self.layers[i].weights * (1 - self.layers[i].weights)).sum() / np.prod(self.layers[i].weights.shape)
             logging.info(f'Layer {i} - Epoch {epoch} - n_data {j} - C = {C:.4f}')
-            if C < self.config['convergence_threshold']:
+            if (C < self.config['convergence_threshold'] and epoch != 0) or round(C.item(), 5) == 0.:  
               break
   
   def evaluate(self, print_res=True):
