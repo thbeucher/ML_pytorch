@@ -50,5 +50,5 @@ def functional_stdp(conv_layer, learning_rate, input_spikes, output_spikes, winn
     feat = winners[i][0]
     lr[feat] = torch.where(pairings[i], *(learning_rate[feat]))
 
-  conv_layer.weights += lr * (conv_layer.weights * (1 - conv_layer.weights) if use_stabilizer else 1)
+  conv_layer.weights += lr * ((conv_layer.weights - lower_bound) * (upper_bound - conv_layer.weights) if use_stabilizer else 1)
   conv_layer.weights.clamp_(lower_bound, upper_bound)

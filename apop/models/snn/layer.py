@@ -16,7 +16,7 @@ class Layer(nn.Module):
 
 class Convolution(Layer):
   def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, groups=1, bias=None,
-               weight_mean=0.8, weight_std=0.02):
+               weight_mean=0.8, weight_std=0.02, *args, **kwargs):
     super().__init__()
     self.in_channels = in_channels
     self.out_channels = out_channels
@@ -37,7 +37,7 @@ class Convolution(Layer):
 
 
 class Linear(Layer):
-  def __init__(self, in_feat, out_feat, learning_rates, weight_mean=0.8, weight_std=0.02):
+  def __init__(self, in_feat, out_feat, learning_rates, weight_mean=0.8, weight_std=0.02, *args, **kwargs):
     super().__init__()
     self.in_feat = in_feat
     self.out_feat = out_feat

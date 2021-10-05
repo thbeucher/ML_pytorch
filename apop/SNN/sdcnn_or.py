@@ -20,7 +20,7 @@ import models.snn.stdp as lf
 import models.snn.functional as f
 import models.snn.temporal_order_coding_image as toci
 
-from models.snn.convolution import Convolution
+from models.snn.layer import Convolution
 
 
 class DataTransformer(object):
