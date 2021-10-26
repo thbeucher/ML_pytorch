@@ -55,7 +55,7 @@ class SDCNNExperiment(object):
                         'batch_size': 1, 'dataset_path': 'data/', 'n_epochs': [2, 4, 680],
                         'save_path': 'model/sdcnn_rl_exp.pt',
                         'check_convergence_step': 5000, 'convergence_threshold': 0.008,
-                        'n_labels': 10, 'adaptive_lr': True}
+                        'n_labels': 10, 'adaptive_lr': True, 'n_workers': 8}
     self.config = u.populate_configuration(configuration, self.base_config)
 
     self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -91,11 +91,11 @@ class SDCNNExperiment(object):
   def set_dataloader(self):
     self.train_data_loader = torch.utils.data.DataLoader(torchvision.datasets.MNIST(self.config['dataset_path'], train=True,
                                                                                     download=True, transform=DataTransformer()),
-                                                         batch_size=self.config['batch_size'], num_workers=8,
+                                                         batch_size=self.config['batch_size'], num_workers=self.config['n_workers'],
                                                          shuffle=True, pin_memory=True, collate_fn=lambda x: x[0])
     self.test_data_loader = torch.utils.data.DataLoader(torchvision.datasets.MNIST(self.config['dataset_path'], train=False,
                                                                                    download=True, transform=DataTransformer()),
-                                                        batch_size=self.config['batch_size'], num_workers=8,
+                                                        batch_size=self.config['batch_size'], num_workers=self.config['n_workers'],
                                                         shuffle=True, pin_memory=True, collate_fn=lambda x: x[0])
   
   def instanciate_model(self):
@@ -123,12 +123,16 @@ class SDCNNExperiment(object):
     self.update_all_lr(new_ap, new_an, layer_idx)
     self.update_all_anti_lr(new_anti_ap, new_anti_an, layer_idx)
     self.predictions_history = np.array([0., 0., 0.])
+    logging.info(f'new_ap = {new_ap.item():.5f} | new_an = {new_an.item():.5f}')
+    logging.info(f'new_anti_ap = {new_anti_ap.item():.5f} | new_anti_an = {new_anti_an.item():.5f}')
   
   def competition_winner(self, potentials, layer_idx):
     potentials = f.pointwise_feature_competition_inhibition(potentials)  # [timestep, feat_out(eg32), height, width]
     spikes = potentials.sign()
-    winners = f.get_k_winners(potentials, kwta=self.config['n_winners'][layer_idx],
-                              inhibition_radius=self.config['inhibition_radius'][layer_idx], spikes=spikes)
+    # winners = f.get_k_winners(potentials, kwta=self.config['n_winners'][layer_idx],
+    #                           inhibition_radius=self.config['inhibition_radius'][layer_idx], spikes=spikes)
+    winners = f.get_k_winners_ori(potentials, kwta=self.config['n_winners'][layer_idx],
+                                  inhibition_radius=self.config['inhibition_radius'][layer_idx], spikes=spikes)
     return potentials, spikes, winners
   
   def competition_winner_stdp(self, input_spikes, potentials, layer_idx, target, stdp=True):
@@ -202,7 +206,8 @@ class SDCNNExperiment(object):
           if j % self.config['check_convergence_step'] == 0:
             C = (self.layers[i].weights * (1 - self.layers[i].weights)).sum() / np.prod(self.layers[i].weights.shape)
             logging.info(f'Layer {i} - Epoch {epoch} - n_data {j} - C = {C:.4f}')
-            if (C < self.config['convergence_threshold'] and epoch != 0) or round(C.item(), 5) == 0.:  
+            if (C < self.config['convergence_threshold'] and epoch != 0) or round(C.item(), 5) == 0.:
+              self.save_model()
               break
   
   def evaluate(self, print_res=True):
@@ -271,6 +276,7 @@ if __name__ == "__main__":
   argparser = argparse.ArgumentParser(prog='sdcnn_or_rl.py', description='')
   argparser.add_argument('--log_file', default='_tmp_sdcnn_or_rl_logs.txt', type=str)
   argparser.add_argument('--dataset_path', default='data/', type=str)
+  argparser.add_argument('--n_workers', default=8, type=int)
   args = argparser.parse_args()
 
   logging.basicConfig(filename=args.log_file, filemode='a', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -278,7 +284,7 @@ if __name__ == "__main__":
   random_seed = 42
   torch.manual_seed(random_seed)
 
-  sdcnn_rl_exp = SDCNNExperiment({'dataset_path': args.dataset_path})
+  sdcnn_rl_exp = SDCNNExperiment({'dataset_path': args.dataset_path, 'n_workers': args.n_workers})
 
   rep = input('Load saved model? (y or n): ')
   if rep == 'y':
@@ -288,8 +294,10 @@ if __name__ == "__main__":
   if rep == 'y':
     sdcnn_rl_exp.train()
 
-  print('Start evaluation...')
-  sdcnn_rl_exp.evaluate()
+  rep = input('Start evaluation? (y or n): ')
+  if rep == 'y':
+    sdcnn_rl_exp.evaluate()
 
-  print('Saving model...')
-  sdcnn_rl_exp.save_model()
+  rep = input('Save model? (y or n): ')
+  if rep == 'y':
+    sdcnn_rl_exp.save_model()

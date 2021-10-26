@@ -58,6 +58,43 @@ def get_k_winners(potentials, kwta=1, inhibition_radius=0, spikes=None):
   return winners  # winner = (feature, row, column) e.g. (2, 21, 10)
 
 
+def get_k_winners_ori(potentials, kwta=1, inhibition_radius=0, spikes=None):
+  if spikes is None:
+    spikes = potentials.sign()
+  # finding earliest potentials for each position in each feature
+  maximum = (spikes.size(0) - spikes.sum(dim = 0, keepdim=True)).long()
+  maximum.clamp_(0,spikes.size(0)-1)
+  values = potentials.gather(dim=0, index=maximum) # gathering values
+  # propagating the earliest potential through the whole timesteps
+  truncated_pot = spikes * values
+  # summation with a high enough value (maximum of potential summation over timesteps) at spike positions
+  v = truncated_pot.max() * potentials.size(0)
+  truncated_pot.addcmul_(spikes,v)
+  # summation over all timesteps
+  total = truncated_pot.sum(dim=0,keepdim=True)
+  
+  total.squeeze_(0)
+  global_pooling_size = tuple(total.size())
+  winners = []
+  for k in range(kwta):
+    max_val,max_idx = total.view(-1).max(0)
+    if max_val.item() != 0:
+      # finding the 3d position of the maximum value
+      max_idx_unraveled = np.unravel_index(max_idx.item(),global_pooling_size)
+      # adding to the winners list
+      winners.append(max_idx_unraveled)
+      # preventing the same feature to be the next winner
+      total[max_idx_unraveled[0],:,:] = 0
+      # columnar inhibition (increasing the chance of leanring diverse features)
+      if inhibition_radius != 0:
+        rowMin,rowMax = max(0,max_idx_unraveled[-2]-inhibition_radius),min(total.size(-2),max_idx_unraveled[-2]+inhibition_radius+1)
+        colMin,colMax = max(0,max_idx_unraveled[-1]-inhibition_radius),min(total.size(-1),max_idx_unraveled[-1]+inhibition_radius+1)
+        total[:,rowMin:rowMax,colMin:colMax] = 0
+    else:
+      break
+  return winners
+
+
 def fire(potentials, threshold=None, return_thresholded_potentials=False):
   thresholded = potentials.clone()
   if threshold is None:
