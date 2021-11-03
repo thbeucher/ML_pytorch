@@ -123,8 +123,8 @@ class SDCNNExperiment(object):
     self.update_all_lr(new_ap, new_an, layer_idx)
     self.update_all_anti_lr(new_anti_ap, new_anti_an, layer_idx)
     self.predictions_history = np.array([0., 0., 0.])
-    logging.info(f'new_ap = {new_ap.item():.5f} | new_an = {new_an.item():.5f}')
-    logging.info(f'new_anti_ap = {new_anti_ap.item():.5f} | new_anti_an = {new_anti_an.item():.5f}')
+    # logging.info(f'new_ap = {new_ap.item():.5f} | new_an = {new_an.item():.5f}')
+    # logging.info(f'new_anti_ap = {new_anti_ap.item():.5f} | new_anti_an = {new_anti_an.item():.5f}')
   
   def competition_winner(self, potentials, layer_idx):
     potentials = f.pointwise_feature_competition_inhibition(potentials)  # [timestep, feat_out(eg32), height, width]
@@ -171,8 +171,9 @@ class SDCNNExperiment(object):
         return self.competition_winner_stdp(input_spikes, potentials, layer_idx, target)
       
       if target is not None and i == layer_idx:
-        _, _, winners = self.competition_winner(potentials, layer_idx)
-        return -1 if len(winners) == 0 else self.decision_map[winners[0][0]]
+        potentials, spikes, winners = self.competition_winner(potentials, layer_idx)
+        pred = -1 if len(winners) == 0 else self.decision_map[winners[0][0]]
+        return potentials, spikes, pred
 
       input_spikes = nn.functional.max_pool2d(spikes, **self.config['pooling_vars'][i])
     
@@ -214,7 +215,7 @@ class SDCNNExperiment(object):
     targets, predictions = [], []
     for spikes_in, target in tqdm(self.test_data_loader, leave=False):
       targets.append(target)
-      pred = self.forward(spikes_in.to(self.device), 2, target=target)
+      _, _, pred = self.forward(spikes_in.to(self.device), 2, target=target)
       predictions.append(pred)
     
     if print_res:
