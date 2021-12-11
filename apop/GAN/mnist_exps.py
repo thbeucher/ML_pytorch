@@ -6,6 +6,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from tqdm import tqdm
+from sklearn.metrics import f1_score
 from torchvision.datasets import MNIST
 from torch.utils.data import DataLoader
 from torchvision.transforms import Compose, ToTensor, Normalize
@@ -72,6 +73,8 @@ class MNISTGANTrainer(object):
     self.criterion = torch.nn.BCELoss()
     self.generator_optimizer = torch.optim.Adam(self.generator.parameters(), lr=self.config['lr_generator'])
     self.discriminator_optimizer = torch.optim.Adam(self.discriminator.parameters(), lr=self.config['lr_discriminator'])
+
+    self.lowest_f1 = 1.
   
   def instanciate_model(self):
     self.discriminator = Discriminator({}).to(self.device)
@@ -88,7 +91,7 @@ class MNISTGANTrainer(object):
                                        batch_size=self.config['batch_size'], num_workers=self.config['n_workers'],
                                        pin_memory=True)
 
-  def discriminator_train_pass(self, img):
+  def discriminator_train_pass(self, img, target):
     self.discriminator.zero_grad()
 
     # Train on real MNIST data
@@ -122,15 +125,49 @@ class MNISTGANTrainer(object):
   def train(self):
     for epoch in tqdm(range(self.config['n_epochs'])):
       d_losses, g_losses = [], []
-      for img, _ in tqdm(self.train_data_loader, leave=False):
-        d_losses.append(self.discriminator_train_pass(img.to(self.device)))
+      for img, target in tqdm(self.train_data_loader, leave=False):
+        d_losses.append(self.discriminator_train_pass(img.to(self.device), target.to(self.device)))
         g_losses.append(self.generator_train_pass())
 
       logging.info(f'Epoch {epoch} | discriminator_loss={np.mean(d_losses):.3f} | generator_loss={np.mean(g_losses):.3f}')
 
       if epoch % self.config['eval_step'] == 0:
-        # self.evaluation()
         self.save_model()
+        scores = self.get_metrics()
+        logging.info(f"Epoch {epoch} | {[(m, round(s, 4)) for m, s in scores.items()]}")
+
+        if scores['fake_data_f1'] < self.lowest_f1:
+          logging.info(f"Saving model with f1 score on fake data = {scores['fake_data_f1']:.3f}")
+          self.save_model(save_name=self.config['save_name'].replace('.pt', '_lowest_fake_f1.pt'))
+          self.lowest_f1 = scores['fake_data_f1']
+  
+  @torch.no_grad()
+  def get_metrics(self, n_examples=10000):
+    scores = {}
+
+    # Discriminator f1 score on real train and test data
+    real_data_preds = {'train': [], 'test': []}
+    for train in [True, False]:
+      for img, _ in tqdm(self.train_data_loader if train else self.test_data_loader, leave=False):
+        out = self.discriminator(img.view(img.shape[0], -1).to(self.device))
+        real_data_preds['train' if train else 'test'] += (out > 0.5).int().view(-1).cpu().tolist()
+
+        if len(real_data_preds['train' if train else 'test']) > n_examples:
+          break
+    
+    scores['real_train_data_f1'] = f1_score([1] * len(real_data_preds['train']), real_data_preds['train'], average='weighted')
+    scores['real_test_data_f1'] = f1_score([1] * len(real_data_preds['test']), real_data_preds['test'], average='weighted')
+    
+    # Discriminator f1 score on fake data from the Generator
+    fake_data_preds = []
+    for _ in tqdm(range(n_examples // self.config['batch_size'] + 1), leave=False):
+      fake_img = self.generator(torch.randn(self.config['batch_size'], self.config['noise_dim'], device=self.device))
+      out = self.discriminator(fake_img)
+      fake_data_preds += (out > 0.5).int().view(-1).cpu().tolist()
+    
+    scores['fake_data_f1'] = f1_score([0] * len(fake_data_preds), fake_data_preds, average='weighted')
+
+    return scores
 
   @torch.no_grad()
   def evaluation(self):
@@ -166,11 +203,14 @@ class MNISTGANTrainer(object):
 
 
 if __name__ == "__main__":
+  # https://github.com/Sleepychord/ImprovedGAN-pytorch/blob/master/ImprovedGAN.py
   argparser = argparse.ArgumentParser(prog='mnist_exps.py', description='')
   argparser.add_argument('--log_file', default='_tmp_mnist_gan_logs.txt', type=str)
   argparser.add_argument('--dataset_path', default='data/', type=str)
   argparser.add_argument('--n_workers', default=8, type=int)
   argparser.add_argument('--random_seed', default=42, type=int)
+  argparser.add_argument('--save_model', default='model/mnist_gan_model.pt', type=str)
+  argparser.add_argument('--batch_size', default=128, type=int)
   args = argparser.parse_args()
 
   logging.basicConfig(filename=args.log_file, filemode='a', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -188,16 +228,17 @@ if __name__ == "__main__":
   # print(f'Generator output = {out.shape}')
   # print(discriminator)
 
-  mnist_gan_trainer = MNISTGANTrainer({'dataset_path': args.dataset_path, 'n_workers': args.n_workers})
+  mnist_gan_trainer = MNISTGANTrainer({'dataset_path': args.dataset_path, 'n_workers': args.n_workers,
+                                       'save_name': args.save_model, 'batch_size': args.batch_size})
 
-  rep = input('Load MNIST GAN model? (y or n): ')
+  rep = input(f'Load MNIST GAN model? (y or n): ')
   if rep == 'y':
     mnist_gan_trainer.load_model(map_location=mnist_gan_trainer.device)
 
-  rep = input('Train MNIST GAN? (y or n): ')
+  rep = input(f'Train MNIST GAN? (y or n): ')
   if rep == 'y':
     mnist_gan_trainer.train()
   
-  rep = input('Eval MNIST GAN? (y or n): ')
+  rep = input(f'Eval MNIST GAN? (y or n): ')
   if rep == 'y':
     mnist_gan_trainer.evaluation()
