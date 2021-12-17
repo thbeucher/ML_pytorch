@@ -357,7 +357,7 @@ class MNISTCompClassifTrainer(MNISTCompTrainer):
 
 if __name__ == "__main__":
   argparser = argparse.ArgumentParser(prog='classif_mnist_exps.py', description='')
-  argparser.add_argument('--log_file', default='_tmp_exps_mnist_logs.txt', type=str)
+  argparser.add_argument('--log_file', default='_tmp_classif_exps_mnist_logs.txt', type=str)
   argparser.add_argument('--dataset_path', default='data/', type=str)
   argparser.add_argument('--n_workers', default=8, type=int)
   argparser.add_argument('--random_seed', default=42, type=int)
@@ -391,7 +391,8 @@ if __name__ == "__main__":
   
   rep = input(f'Train/evaluate {args.trainer} on subsampling? (y or n): ')
   if rep == 'y':
-    for percent in [0.001, 0.01, 0.05, 0.1, 0.2, 0.5, 0.8, 1.]:
+    # [12, 24, 54, 102, 504, 1020, 2040, 4020, 6000]
+    for percent in [0.002, 0.004, 0.009, 0.017, 0.084, 0.17, 0.34, 0.67, 1.]:
       logging.info(f'START {args.trainer} training with train_size = {percent}')
       mnist_trainer.config['percent'] = percent
       mnist_trainer.set_dataloader()

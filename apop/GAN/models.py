@@ -16,20 +16,21 @@ def weights_init(m, mean=0.0, std=0.02):
 
 
 class MLPDiscriminator(torch.nn.Module):
+  BASE_CONFIG = {'layers_config': [{'type': torch.nn.Linear, 'params': {'in_features': 784, 'out_features': 1024}},
+                                   {'type': torch.nn.LeakyReLU, 'params': {'negative_slope': 0.2}},
+                                   {'type': torch.nn.Dropout, 'params': {'p': 0.3}},
+                                   {'type': torch.nn.Linear, 'params': {'in_features': 1024, 'out_features': 512}},
+                                   {'type': torch.nn.LeakyReLU, 'params': {'negative_slope': 0.2}},
+                                   {'type': torch.nn.Dropout, 'params': {'p': 0.3}},
+                                   {'type': torch.nn.Linear, 'params': {'in_features': 512, 'out_features': 256}},
+                                   {'type': torch.nn.LeakyReLU, 'params': {'negative_slope': 0.2}},
+                                   {'type': torch.nn.Dropout, 'params': {'p': 0.3}},
+                                   {'type': torch.nn.Linear, 'params': {'in_features': 256, 'out_features': 1}},
+                                   {'type': torch.nn.Sigmoid, 'params': {}}]}
   def __init__(self, config):
     super().__init__()
-    base_config = {'layers_config': [{'type': torch.nn.Linear, 'params': {'in_features': 784, 'out_features': 1024}},
-                                     {'type': torch.nn.LeakyReLU, 'params': {'negative_slope': 0.2}},
-                                     {'type': torch.nn.Dropout, 'params': {'p': 0.3}},
-                                     {'type': torch.nn.Linear, 'params': {'in_features': 1024, 'out_features': 512}},
-                                     {'type': torch.nn.LeakyReLU, 'params': {'negative_slope': 0.2}},
-                                     {'type': torch.nn.Dropout, 'params': {'p': 0.3}},
-                                     {'type': torch.nn.Linear, 'params': {'in_features': 512, 'out_features': 256}},
-                                     {'type': torch.nn.LeakyReLU, 'params': {'negative_slope': 0.2}},
-                                     {'type': torch.nn.Dropout, 'params': {'p': 0.3}},
-                                     {'type': torch.nn.Linear, 'params': {'in_features': 256, 'out_features': 1}},
-                                     {'type': torch.nn.Sigmoid, 'params': {}}]}
-    self.config = {**base_config, **config}
+    MLPDiscriminator.BASE_CONFIG['layers_config'][-2]['params']['out_features'] = config.get('n_classes', 1)
+    self.config = {**MLPDiscriminator.BASE_CONFIG, **config}
 
     network = []
     for layer_config in self.config['layers_config']:
@@ -41,17 +42,17 @@ class MLPDiscriminator(torch.nn.Module):
 
 
 class MLPGenerator(torch.nn.Module):
+  BASE_CONFIG = {'layers_config': [{'type': torch.nn.Linear, 'params': {'in_features': 100, 'out_features': 256}},
+                                   {'type': torch.nn.LeakyReLU, 'params': {'negative_slope': 0.2}},
+                                   {'type': torch.nn.Linear, 'params': {'in_features': 256, 'out_features': 512}},
+                                   {'type': torch.nn.LeakyReLU, 'params': {'negative_slope': 0.2}},
+                                   {'type': torch.nn.Linear, 'params': {'in_features': 512, 'out_features': 1024}},
+                                   {'type': torch.nn.LeakyReLU, 'params': {'negative_slope': 0.2}},
+                                   {'type': torch.nn.Linear, 'params': {'in_features': 1024, 'out_features': 784}},
+                                   {'type': torch.nn.Tanh, 'params': {}}]}
   def __init__(self, config):
     super().__init__()
-    base_config = {'layers_config': [{'type': torch.nn.Linear, 'params': {'in_features': 100, 'out_features': 256}},
-                                     {'type': torch.nn.LeakyReLU, 'params': {'negative_slope': 0.2}},
-                                     {'type': torch.nn.Linear, 'params': {'in_features': 256, 'out_features': 512}},
-                                     {'type': torch.nn.LeakyReLU, 'params': {'negative_slope': 0.2}},
-                                     {'type': torch.nn.Linear, 'params': {'in_features': 512, 'out_features': 1024}},
-                                     {'type': torch.nn.LeakyReLU, 'params': {'negative_slope': 0.2}},
-                                     {'type': torch.nn.Linear, 'params': {'in_features': 1024, 'out_features': 784}},
-                                     {'type': torch.nn.Tanh, 'params': {}}]}
-    self.config = {**base_config, **config}
+    self.config = {**MLPGenerator.BASE_CONFIG, **config}
 
     network = []
     for layer_config in self.config['layers_config']:
@@ -63,31 +64,31 @@ class MLPGenerator(torch.nn.Module):
 
 
 class CNNGenerator(torch.nn.Module):
+  BASE_CONFIG = {'layers_config': [{'type': torch.nn.ConvTranspose2d,  # 100*1*1 -> 256*4*4
+                                    'params': {'in_channels': 100, 'out_channels': 256, 'kernel_size': 4,
+                                               'stride': 1, 'padding': 0, 'bias': False}},
+                                   {'type': torch.nn.BatchNorm2d, 'params': {'num_features': 256}},
+                                   {'type': torch.nn.ReLU, 'params': {'inplace': True}},
+                                   {'type': torch.nn.ConvTranspose2d,  # 256*4*4 -> 128*7*7
+                                    'params': {'in_channels': 256, 'out_channels': 128, 'kernel_size': 3,
+                                               'stride': 2, 'padding': 1, 'bias': False}},
+                                   {'type': torch.nn.BatchNorm2d, 'params': {'num_features': 128}},
+                                   {'type': torch.nn.ReLU, 'params': {'inplace': True}},
+                                   {'type': torch.nn.ConvTranspose2d,  # 128*7*7 -> 64*14*14
+                                    'params': {'in_channels': 128, 'out_channels': 64, 'kernel_size': 4,
+                                               'stride': 2, 'padding': 1, 'bias': False}},
+                                   {'type': torch.nn.BatchNorm2d, 'params': {'num_features': 64}},
+                                   {'type': torch.nn.ReLU, 'params': {'inplace': True}},
+                                   {'type': torch.nn.ConvTranspose2d,  # 64*14*14 -> 1*28*28
+                                    'params': {'in_channels': 64, 'out_channels': 1, 'kernel_size': 4,
+                                               'stride': 2, 'padding': 1, 'bias': False}},
+                                   {'type': torch.nn.Tanh, 'params': {}}]}
   def __init__(self, config):
     super().__init__()
     # H_out = (H_in - 1) * stride - 2 * padding + dilation * (kernel_size - 1) + output_padding + 1
-    latent_vector_size = config.get('latent_vector_size', 100)
-    n_channels = config.get('n_channels', 1)
-    base_config = {'layers_config': [{'type': torch.nn.ConvTranspose2d,  # 100*1*1 -> 256*4*4
-                                      'params': {'in_channels': latent_vector_size, 'out_channels': 256, 'kernel_size': 4,
-                                                 'stride': 1, 'padding': 0, 'bias': False}},
-                                     {'type': torch.nn.BatchNorm2d, 'params': {'num_features': 256}},
-                                     {'type': torch.nn.ReLU, 'params': {'inplace': True}},
-                                     {'type': torch.nn.ConvTranspose2d,  # 256*4*4 -> 128*7*7
-                                      'params': {'in_channels': 256, 'out_channels': 128, 'kernel_size': 3,
-                                                 'stride': 2, 'padding': 1, 'bias': False}},
-                                     {'type': torch.nn.BatchNorm2d, 'params': {'num_features': 128}},
-                                     {'type': torch.nn.ReLU, 'params': {'inplace': True}},
-                                     {'type': torch.nn.ConvTranspose2d,  # 128*7*7 -> 64*14*14
-                                      'params': {'in_channels': 128, 'out_channels': 64, 'kernel_size': 4,
-                                                 'stride': 2, 'padding': 1, 'bias': False}},
-                                     {'type': torch.nn.BatchNorm2d, 'params': {'num_features': 64}},
-                                     {'type': torch.nn.ReLU, 'params': {'inplace': True}},
-                                     {'type': torch.nn.ConvTranspose2d,  # 64*14*14 -> 1*28*28
-                                      'params': {'in_channels': 64, 'out_channels': n_channels, 'kernel_size': 4,
-                                                 'stride': 2, 'padding': 1, 'bias': False}},
-                                     {'type': torch.nn.Tanh, 'params': {}}]}
-    self.config = {**base_config, **config}
+    CNNGenerator.BASE_CONFIG['layers_config'][0]['params']['in_channels'] = config.get('latent_vector_size', 100)
+    CNNGenerator.BASE_CONFIG['layers_config'][-2]['params']['out_channels'] = config.get('n_channels', 1)
+    self.config = {**CNNGenerator.BASE_CONFIG, **config}
 
     network = []
     for layer_config in self.config['layers_config']:
@@ -104,29 +105,30 @@ class CNNGenerator(torch.nn.Module):
 
 
 class CNNDiscriminator(torch.nn.Module):
+  BASE_CONFIG = {'layers_config': [{'type': torch.nn.Conv2d,  # 1*28*28 -> 64*14*14
+                                    'params': {'in_channels': 1, 'out_channels': 64, 'kernel_size': 4,
+                                               'stride': 2, 'padding': 1, 'bias': False}},
+                                   {'type': torch.nn.LeakyReLU, 'params': {'negative_slope': 0.2, 'inplace': True}},
+                                   {'type': torch.nn.Conv2d,  # 64*14*14 -> 128*7*7
+                                    'params': {'in_channels': 64, 'out_channels': 128, 'kernel_size': 4,
+                                               'stride': 2, 'padding': 1, 'bias': False}},
+                                   {'type': torch.nn.BatchNorm2d, 'params': {'num_features': 128}},
+                                   {'type': torch.nn.LeakyReLU, 'params': {'negative_slope': 0.2, 'inplace': True}},
+                                   {'type': torch.nn.Conv2d,  # 128*7*7 -> 256*4*4
+                                    'params': {'in_channels': 128, 'out_channels': 256, 'kernel_size': 3,
+                                               'stride': 2, 'padding': 1, 'bias': False}},
+                                   {'type': torch.nn.BatchNorm2d, 'params': {'num_features': 256}},
+                                   {'type': torch.nn.LeakyReLU, 'params': {'negative_slope': 0.2, 'inplace': True}},
+                                   {'type': torch.nn.Conv2d,  # 256*4*4 -> 1*1*1
+                                    'params': {'in_channels': 256, 'out_channels': 1, 'kernel_size': 4,
+                                               'stride': 1, 'padding': 0, 'bias': False}},
+                                   {'type': torch.nn.Sigmoid, 'params': {}}]}
   def __init__(self, config):
     super().__init__()
     # H_out = (H_in + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1
-    n_channels = config.get('n_channels', 1)
-    base_config = {'layers_config': [{'type': torch.nn.Conv2d,  # 1*28*28 -> 64*14*14
-                                      'params': {'in_channels': n_channels, 'out_channels': 64, 'kernel_size': 4,
-                                                 'stride': 2, 'padding': 1, 'bias': False}},
-                                     {'type': torch.nn.LeakyReLU, 'params': {'negative_slope': 0.2, 'inplace': True}},
-                                     {'type': torch.nn.Conv2d,  # 64*14*14 -> 128*7*7
-                                      'params': {'in_channels': 64, 'out_channels': 128, 'kernel_size': 4,
-                                                 'stride': 2, 'padding': 1, 'bias': False}},
-                                     {'type': torch.nn.BatchNorm2d, 'params': {'num_features': 128}},
-                                     {'type': torch.nn.LeakyReLU, 'params': {'negative_slope': 0.2, 'inplace': True}},
-                                     {'type': torch.nn.Conv2d,  # 128*7*7 -> 256*4*4
-                                      'params': {'in_channels': 128, 'out_channels': 256, 'kernel_size': 3,
-                                                 'stride': 2, 'padding': 1, 'bias': False}},
-                                     {'type': torch.nn.BatchNorm2d, 'params': {'num_features': 256}},
-                                     {'type': torch.nn.LeakyReLU, 'params': {'negative_slope': 0.2, 'inplace': True}},
-                                     {'type': torch.nn.Conv2d,  # 256*4*4 -> 1*1*1
-                                      'params': {'in_channels': 256, 'out_channels': 1, 'kernel_size': 4,
-                                                 'stride': 1, 'padding': 0, 'bias': False}},
-                                     {'type': torch.nn.Sigmoid, 'params': {}}]}
-    self.config = {**base_config, **config}
+    CNNDiscriminator.BASE_CONFIG['layers_config'][0]['params']['in_channels'] = config.get('n_channels', 1)
+    CNNDiscriminator.BASE_CONFIG['layers_config'][-2]['params']['out_channels'] = config.get('n_classes', 1)
+    self.config = {**CNNDiscriminator.BASE_CONFIG, **config}
 
     network = []
     for layer_config in self.config['layers_config']:
@@ -157,4 +159,8 @@ if __name__ == '__main__':
 
   cnn_discriminator = CNNDiscriminator({})
   print('\nCNNDiscriminator input=[4, 1, 28, 28]')  # out = [4, 1, 1, 1]
+  print(f'CNNDiscriminator out={cnn_discriminator(torch.randn(4, 1, 28, 28)).shape}')
+
+  cnn_discriminator = CNNDiscriminator({'n_classes': 10})
+  print('\nCNNDiscriminator input=[4, 1, 28, 28]')  # out = [4, 10, 1, 1]
   print(f'CNNDiscriminator out={cnn_discriminator(torch.randn(4, 1, 28, 28)).shape}')
