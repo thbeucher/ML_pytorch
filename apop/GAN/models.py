@@ -221,18 +221,6 @@ class ACCNNDiscriminator(torch.nn.Module):
       head.apply(weights_init)
 
 
-class ConditionalACCNNDiscriminator(ACCNNDiscriminator):
-  def __init__(self, config):
-    config['n_channels'] = 2
-    super().__init__(config)
-    self.embed = torch.nn.Embedding(config.get('n_classes', 10), config.get('embedding_size', 28*28))
-  
-  def forward(self, x, labels):
-    embedding = self.embed(labels).view(x.shape[0], 1, x.shape[2], x.shape[3])
-    out = self.body(torch.cat([x, embedding], dim=1))
-    return [head(out) for head in self.heads]
-
-
 if __name__ == '__main__':
   mlp_generator = MLPGenerator({})
   print('\nMLPGenerator input=[4, 100]}')  # out = [4, 784]
@@ -266,8 +254,3 @@ if __name__ == '__main__':
   print('\nACCNNDiscriminator input=[4, 1, 28, 28]')  # out = [4, 1, 1, 1], [4, 10, 1, 1]
   out_real_fake, out_classif = ac_cnn_discriminator(torch.randn(4, 1, 28, 28))
   print(f'ACCNNDiscriminator out_real_fake={out_real_fake.shape} | out_classif={out_classif.shape}')
-
-  c_ac_cnn_discriminator = ConditionalACCNNDiscriminator({})
-  print('\nConditionalACCNNDiscriminator input=[4, 1, 28, 28], [4]')  # out = [4, 1, 1, 1]
-  out_gan, out_classif = c_ac_cnn_discriminator(torch.randn(4, 1, 28, 28), torch.randint(0, 10, (4,)))
-  print(f'ConditionalACCNNDiscriminator out_gan={out_gan.shape} | out_classif={out_classif.shape}')

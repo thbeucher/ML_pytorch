@@ -96,7 +96,7 @@ class SDCNNExperiment(object):
     self.test_data_loader = torch.utils.data.DataLoader(torchvision.datasets.MNIST(self.config['dataset_path'], train=False,
                                                                                    download=True, transform=DataTransformer()),
                                                         batch_size=self.config['batch_size'], num_workers=self.config['n_workers'],
-                                                        shuffle=True, pin_memory=True, collate_fn=lambda x: x[0])
+                                                        shuffle=False, pin_memory=True, collate_fn=lambda x: x[0])
   
   def instanciate_model(self):
     self.layers = nn.ModuleList([Convolution(**lc) for lc in self.config['layers_config']])
@@ -179,6 +179,29 @@ class SDCNNExperiment(object):
     
     return input_spikes
   
+  def forward_fullret(self, input_spikes, layer_idx, target=None, training=False):
+    returns = {'input_spikes': [], 'potentials': []}
+    for i, layer in enumerate(self.layers):
+      returns['input_spikes'].append([i, input_spikes.cpu().short()])
+      input_spikes = nn.functional.pad(input_spikes, self.paddings_train[i])
+
+      potentials = layer(input_spikes)  # [timestep, feat_out(eg32), heigth, width]
+      spikes, potentials = f.fire(potentials, self.config['thresholds'][i], return_thresholded_potentials=True)
+      returns['potentials'].append([i, potentials.cpu().short()])
+
+      if i == layer_idx and training:
+        return self.competition_winner_stdp(input_spikes, potentials, layer_idx, target)
+      
+      if target is not None and i == layer_idx:
+        potentials, spikes, winners = self.competition_winner(potentials, layer_idx)
+        pred = -1 if len(winners) == 0 else self.decision_map[winners[0][0]]
+        returns['pred'] = pred
+        return returns
+
+      input_spikes = nn.functional.max_pool2d(spikes, **self.config['pooling_vars'][i])
+    
+    return input_spikes
+  
   def train(self):
     for i, n_epoch in enumerate(tqdm(self.config['n_epochs'])):
       for epoch in tqdm(range(n_epoch), leave=False):
@@ -188,12 +211,12 @@ class SDCNNExperiment(object):
             new_an = self.learning_rates[i][0][0] * self.config['an_update']
             self.update_all_lr(new_ap, new_an, i)
 
-          self.forward(spikes_in.to(self.device), i, target=target if i == 2 else None, training=True)
+          self.forward(spikes_in.to(self.device), i, target=target if i == len(self.layers) - 1 else None, training=True)
 
-          if i == 2 and self.config['adaptive_lr'] and j > 0 and j % 1000 == 0:
+          if i == len(self.layers) - 1 and self.config['adaptive_lr'] and j > 0 and j % 1000 == 0:
             self.adaptive_update_lr(i)
           
-          if i == 2 and j % 20000 == 0:
+          if i == len(self.layers) - 1 and j % 20000 == 0:
             network_f1 = self.evaluate(print_res=False)
             logging.info(f'Network performance - f1 = {network_f1:.3f}')
 
@@ -215,13 +238,25 @@ class SDCNNExperiment(object):
     targets, predictions = [], []
     for spikes_in, target in tqdm(self.test_data_loader, leave=False):
       targets.append(target)
-      _, _, pred = self.forward(spikes_in.to(self.device), 2, target=target)
+      _, _, pred = self.forward(spikes_in.to(self.device), len(self.layers) - 1, target=target)
       predictions.append(pred)
     
     if print_res:
       print(f'TEST results:\n{classification_report(targets, predictions, zero_division=0)}')
     else:
       return classification_report(targets, predictions, zero_division=0, output_dict=True)['weighted avg']['f1-score']
+  
+  def out_for_analyze(self, train=False, save_out=True):
+    outputs = []
+    for spikes_in, target in tqdm(self.train_data_loader if train else self.test_data_loader, leave=False):
+      returns = self.forward_fullret(spikes_in.to(self.device), len(self.layers) - 1, target=target)
+      returns['target'] = target
+      outputs.append(returns)
+    
+    if save_out:
+      torch.save(outputs, '_tmp_out_for_analyze.pt')
+    else:
+      return outputs
   
   def evaluate_stdp_layers(self):
     from sklearn.svm import LinearSVC
@@ -274,6 +309,9 @@ class SDCNNExperiment(object):
 
 
 if __name__ == "__main__":
+  # Layer 1 is trained in 2mn (STDP)
+  # Layer 2 is trained in 8mn (STDP)
+  # Layer 3 achieve performance of 0.9 in 22mn
   argparser = argparse.ArgumentParser(prog='sdcnn_or_rl.py', description='')
   argparser.add_argument('--log_file', default='_tmp_sdcnn_or_rl_logs.txt', type=str)
   argparser.add_argument('--dataset_path', default='data/', type=str)
@@ -302,3 +340,7 @@ if __name__ == "__main__":
   rep = input('Save model? (y or n): ')
   if rep == 'y':
     sdcnn_rl_exp.save_model()
+  
+  rep = input('Retrieves all outputs then save it? (y or n): ')
+  if rep == 'y':
+    sdcnn_rl_exp.out_for_analyze()

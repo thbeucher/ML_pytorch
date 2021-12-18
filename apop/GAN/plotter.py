@@ -6,6 +6,7 @@ import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 
+from PIL import Image
 from natsort import natsorted
 
 
@@ -80,6 +81,22 @@ def read_ssdcgan_logs(folder='tmp_data/', root_name='_tmp_mnist_gan_ssdcgan_perc
     print(f'n_examples = {n_examples} | f1 = {np.max(f1s)}')
 
 
+def plot_comp_imgs(folder='tmp_data/', fname='imgs_generated_epoch180.png'):
+  dcgan, cdcgan, acdcgan = 'generated_dcgan_imgs/', 'generated_cdcgan_imgs/', 'generated_acdcgan_imgs/'
+
+  img_dcgan = Image.open(os.path.join(folder, dcgan, fname))
+  img_cdcgan = Image.open(os.path.join(folder, cdcgan, fname))
+  img_acdcgan = Image.open(os.path.join(folder, acdcgan, fname))
+
+  img = Image.new('L', (img_dcgan.width, img_dcgan.height + img_cdcgan.height + img_acdcgan.height))
+
+  img.paste(img_dcgan, (0, 0))
+  img.paste(img_cdcgan, (0, img_dcgan.height))
+  img.paste(img_acdcgan, (0, 2 * img_dcgan.height))
+
+  img.show()
+
+
 if __name__ == '__main__':
   argparser = argparse.ArgumentParser(prog='plotter.py', description='')
   argparser.add_argument('--log_file', default='_tmp_classif_exps_mnist_logs.txt', type=str)
@@ -92,3 +109,7 @@ if __name__ == '__main__':
   rep = input('Read ssdcgan logs? (y or n): ')
   if rep == 'y':
     read_ssdcgan_logs()
+  
+  rep = input('Plot comparison of generated GAN images? (y or n): ')
+  if rep == 'y':
+    plot_comp_imgs()
