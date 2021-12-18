@@ -166,6 +166,73 @@ class ConditionalCNNGenerator(CNNGenerator):
     return self.network(torch.cat([x, embedding], dim=1))
 
 
+class ACCNNDiscriminator(torch.nn.Module):
+  BASE_CONFIG = {'body_config': [{'type': torch.nn.Conv2d,  # 1*28*28 -> 64*14*14
+                                  'params': {'in_channels': 1, 'out_channels': 64, 'kernel_size': 4,
+                                             'stride': 2, 'padding': 1, 'bias': False}},
+                                 {'type': torch.nn.LeakyReLU, 'params': {'negative_slope': 0.2, 'inplace': True}},
+                                 {'type': torch.nn.Conv2d,  # 64*14*14 -> 128*7*7
+                                  'params': {'in_channels': 64, 'out_channels': 128, 'kernel_size': 4,
+                                             'stride': 2, 'padding': 1, 'bias': False}},
+                                 {'type': torch.nn.BatchNorm2d, 'params': {'num_features': 128}},
+                                 {'type': torch.nn.LeakyReLU, 'params': {'negative_slope': 0.2, 'inplace': True}},
+                                 {'type': torch.nn.Conv2d,  # 128*7*7 -> 256*4*4
+                                  'params': {'in_channels': 128, 'out_channels': 256, 'kernel_size': 3,
+                                             'stride': 2, 'padding': 1, 'bias': False}},
+                                 {'type': torch.nn.BatchNorm2d, 'params': {'num_features': 256}},
+                                 {'type': torch.nn.LeakyReLU, 'params': {'negative_slope': 0.2, 'inplace': True}}],
+                  'heads_config': [[{'type': torch.nn.Conv2d, # 256*4*4 -> 1*1*1
+                                     'params': {'in_channels': 256, 'out_channels': 1, 'kernel_size': 4,
+                                                'stride': 1, 'padding': 0, 'bias': False}},
+                                    {'type': torch.nn.Sigmoid, 'params': {}}],
+                                   [{'type': torch.nn.Conv2d, # 256*4*4 -> 10*1*1
+                                     'params': {'in_channels': 256, 'out_channels': 10, 'kernel_size': 4,
+                                                'stride': 1, 'padding': 0, 'bias': False}}]]}
+  def __init__(self, config):
+    super().__init__()
+    # H_out = (H_in + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1
+    ACCNNDiscriminator.BASE_CONFIG['body_config'][0]['params']['in_channels'] = config.get('n_channels', 1)
+    ACCNNDiscriminator.BASE_CONFIG['heads_config'][1][0]['params']['out_channels'] = config.get('n_classes', 10)
+    self.config = {**ACCNNDiscriminator.BASE_CONFIG, **config}
+
+    body = []
+    for layer_config in self.config['body_config']:
+      body.append(layer_config['type'](**layer_config['params']))
+    self.body = torch.nn.Sequential(*body)
+
+    heads = []
+    for head in self.config['heads_config']:
+      head_layers = []
+      for layer_config in head:
+        head_layers.append(layer_config['type'](**layer_config['params']))
+      heads.append(torch.nn.Sequential(*head_layers))
+      
+    self.heads = torch.nn.ModuleList(heads)
+
+    self._reset_weights()
+
+  def forward(self, x):
+    out = self.body(x)
+    return [head(out) for head in self.heads]
+  
+  def _reset_weights(self):
+    self.body.apply(weights_init)
+    for head in self.heads:
+      head.apply(weights_init)
+
+
+class ConditionalACCNNDiscriminator(ACCNNDiscriminator):
+  def __init__(self, config):
+    config['n_channels'] = 2
+    super().__init__(config)
+    self.embed = torch.nn.Embedding(config.get('n_classes', 10), config.get('embedding_size', 28*28))
+  
+  def forward(self, x, labels):
+    embedding = self.embed(labels).view(x.shape[0], 1, x.shape[2], x.shape[3])
+    out = self.body(torch.cat([x, embedding], dim=1))
+    return [head(out) for head in self.heads]
+
+
 if __name__ == '__main__':
   mlp_generator = MLPGenerator({})
   print('\nMLPGenerator input=[4, 100]}')  # out = [4, 784]
@@ -194,3 +261,13 @@ if __name__ == '__main__':
   c_cnn_generator = ConditionalCNNGenerator({})
   print('\nConditionalCNNGenerator input=[4, 100, 1, 1], [4]')  # out = [4, 1, 28, 28]
   print(f'ConditionalCNNGenerator out={c_cnn_generator(torch.randn(4, 100, 1, 1), torch.randint(0, 10, (4,))).shape}')
+
+  ac_cnn_discriminator = ACCNNDiscriminator({})
+  print('\nACCNNDiscriminator input=[4, 1, 28, 28]')  # out = [4, 1, 1, 1], [4, 10, 1, 1]
+  out_real_fake, out_classif = ac_cnn_discriminator(torch.randn(4, 1, 28, 28))
+  print(f'ACCNNDiscriminator out_real_fake={out_real_fake.shape} | out_classif={out_classif.shape}')
+
+  c_ac_cnn_discriminator = ConditionalACCNNDiscriminator({})
+  print('\nConditionalACCNNDiscriminator input=[4, 1, 28, 28], [4]')  # out = [4, 1, 1, 1]
+  out_gan, out_classif = c_ac_cnn_discriminator(torch.randn(4, 1, 28, 28), torch.randint(0, 10, (4,)))
+  print(f'ConditionalACCNNDiscriminator out_gan={out_gan.shape} | out_classif={out_classif.shape}')
