@@ -76,7 +76,7 @@ class MNISTGANTrainer(object):
 
     return loss.item(), D_x, D_G_z
 
-  def generator_train_pass(self):
+  def generator_train_pass(self, target):
     self.generator.zero_grad()
 
     fake_img = self.generator(torch.randn(self.config['batch_size'], self.config['noise_dim'], device=self.device))
@@ -94,7 +94,7 @@ class MNISTGANTrainer(object):
       d_xs, d_g_z1s, d_g_z2s = [], [], []
       for img, target in tqdm(self.train_data_loader, leave=False):
         d_loss, d_x, d_g_z1 = self.discriminator_train_pass(img.to(self.device), target.to(self.device))
-        g_loss, d_g_z2 = self.generator_train_pass()
+        g_loss, d_g_z2 = self.generator_train_pass(target.to(self.device))
 
         d_losses.append(d_loss)
         g_losses.append(g_loss)
@@ -123,6 +123,8 @@ class MNISTGANTrainer(object):
   @torch.no_grad()
   def get_metrics(self, n_examples=10000):
     scores = {}
+    self.generator.eval()
+    self.discriminator.eval()
 
     # Discriminator f1 score on real train and test data
     real_data_preds = {'train': [], 'test': []}
@@ -146,13 +148,17 @@ class MNISTGANTrainer(object):
     
     scores['fake_data_f1'] = f1_score([0] * len(fake_data_preds), fake_data_preds, average='weighted')
 
+    self.generator.train()
+    self.discriminator.train()
     return scores
 
   @torch.no_grad()
   def evaluation(self, seed=42, save_name=None):
+    self.generator.eval()
     torch.manual_seed(seed)  # to generate images with always the same random inputs
     generated_imgs = self.generator(torch.randn(10, self.config['noise_dim'], device=self.device))
     plot_generated(generated_imgs.view(10, 28, 28).cpu(), save_name=save_name)
+    self.generator.train()
 
   def save_model(self, save_name=None):
     save_name = self.config['save_name'] if save_name is None else save_name
@@ -202,7 +208,7 @@ class MNISTDCGANTrainer(MNISTGANTrainer):
 
     return loss.item(), D_x, D_G_z
 
-  def generator_train_pass(self):
+  def generator_train_pass(self, target):
     self.generator.zero_grad()
 
     fake_img = self.generator(torch.randn(self.config['batch_size'], self.config['noise_dim'], 1, 1, device=self.device))
@@ -400,6 +406,92 @@ class MNISTSSDCGANTrainer(MNISTGANTrainer):
     plot_generated(generated_imgs.squeeze(1).cpu(), save_name=save_name)
 
 
+class MNISTConditionalDCGANTrainer(MNISTGANTrainer):
+  BASE_CONFIG = {'save_name': 'model/mnist_cdcgan_model.pt', 'save_img_folder': 'generated_cdcgan_imgs/',
+                 'betas': (0.5, 0.999), 'percent': 0.002}
+  def __init__(self, config):
+    super().__init__({**MNISTSSDCGANTrainer.BASE_CONFIG, **config})
+  
+  def instanciate_model(self):
+    self.discriminator = m.ConditionalCNNDiscriminator({}).to(self.device)
+    self.generator = m.ConditionalCNNGenerator({}).to(self.device)
+  
+  def discriminator_train_pass(self, img, target):  # img = [batch_size, 1, 28, 28]
+    self.discriminator.zero_grad()
+
+    # Train on real MNIST data
+    out = self.discriminator(img, target)
+    real_loss = self.criterion(out.view(out.shape[0], -1), torch.ones(img.shape[0], 1, device=self.device))
+    real_loss.backward()
+    D_x = out.mean().item()  # theoretically, this quantity should start close to 1 then converge to 0.5
+
+    # Train on fake MNIST data
+    fake_img = self.generator(torch.randn(img.shape[0], self.config['noise_dim'], 1, 1, device=self.device), target)
+    out = self.discriminator(fake_img, target)
+    fake_loss = self.criterion(out.view(out.shape[0], -1), torch.zeros(img.shape[0], 1, device=self.device))
+    fake_loss.backward()
+    D_G_z = out.mean().item()  # theoretically, this quantity should start close to 0 then converge to 0.5
+
+    # Optimize only discriminator's parameters
+    loss = real_loss + fake_loss
+    self.discriminator_optimizer.step()
+
+    return loss.item(), D_x, D_G_z
+
+  def generator_train_pass(self, target):
+    self.generator.zero_grad()
+
+    fake_img = self.generator(torch.randn(len(target), self.config['noise_dim'], 1, 1, device=self.device), target)
+    out = self.discriminator(fake_img, target)
+
+    loss = self.criterion(out.view(out.shape[0], -1), torch.ones(out.shape[0], 1, device=self.device))
+    loss.backward()
+    self.generator_optimizer.step()
+
+    return loss.item(), out.mean().item()
+  
+  @torch.no_grad()
+  def get_metrics(self, n_examples=10000):
+    scores = {}
+    self.generator.eval()
+    self.discriminator.eval()
+
+    # Discriminator f1 score on real train and test data
+    real_data_preds = {'train': [], 'test': []}
+    for train in [True, False]:
+      for img, target in tqdm(self.train_data_loader if train else self.test_data_loader, leave=False):
+        out = self.discriminator(img.to(self.device), target.to(self.device))
+        real_data_preds['train' if train else 'test'] += (out > 0.5).int().view(-1).cpu().tolist()
+
+        if len(real_data_preds['train' if train else 'test']) > n_examples:
+          break
+    
+    scores['real_train_data_f1'] = f1_score([1] * len(real_data_preds['train']), real_data_preds['train'], average='weighted')
+    scores['real_test_data_f1'] = f1_score([1] * len(real_data_preds['test']), real_data_preds['test'], average='weighted')
+    
+    # Discriminator f1 score on fake data from the Generator
+    fake_data_preds = []
+    for _ in tqdm(range(n_examples // self.config['batch_size'] + 1), leave=False):
+      targets = torch.randint(0, 10, (self.config['batch_size'],)).to(self.device)
+      fake_img = self.generator(torch.randn(self.config['batch_size'], self.config['noise_dim'], 1, 1, device=self.device), targets)
+      out = self.discriminator(fake_img, targets)
+      fake_data_preds += (out > 0.5).int().view(-1).cpu().tolist()
+    
+    scores['fake_data_f1'] = f1_score([0] * len(fake_data_preds), fake_data_preds, average='weighted')
+
+    self.generator.train()
+    self.discriminator.train()
+    return scores
+
+  @torch.no_grad()
+  def evaluation(self, seed=42, save_name=None):
+    torch.manual_seed(seed)  # to generate images with always the same random inputs
+    targets = torch.arange(0, 10).to(self.device)
+    generated_imgs = self.generator(torch.randn(10, self.config['noise_dim'], 1, 1, device=self.device), targets)
+    plot_generated(generated_imgs.squeeze(1).cpu(), save_name=save_name)
+  
+
+
 if __name__ == "__main__":
   # Tips & tricks to train GAN -> https://github.com/soumith/ganhacks
   # Comparison of different GAN -> https://sci-hub.mksa.top/https://link.springer.com/article/10.1007/s11042-019-08600-2
@@ -421,7 +513,8 @@ if __name__ == "__main__":
 
   torch.manual_seed(args.random_seed)
 
-  map_trainer = {'gan': MNISTGANTrainer, 'dcgan': MNISTDCGANTrainer, 'ssdcgan': MNISTSSDCGANTrainer}
+  map_trainer = {'gan': MNISTGANTrainer, 'dcgan': MNISTDCGANTrainer, 'ssdcgan': MNISTSSDCGANTrainer,
+                 'cdcgan': MNISTConditionalDCGANTrainer}
 
   mnist_trainer = map_trainer[args.trainer]({'dataset_path': args.dataset_path, 'n_workers': args.n_workers,
                                              'save_name': args.save_model, 'batch_size': args.batch_size,

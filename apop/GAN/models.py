@@ -144,6 +144,28 @@ class CNNDiscriminator(torch.nn.Module):
     self.network.apply(weights_init)
 
 
+class ConditionalCNNDiscriminator(CNNDiscriminator):
+  def __init__(self, config):
+    config['n_channels'] = 2
+    super().__init__(config)
+    self.embed = torch.nn.Embedding(config.get('n_classes', 10), config.get('embedding_size', 28*28))
+  
+  def forward(self, x, labels):
+    embedding = self.embed(labels).view(x.shape[0], 1, x.shape[2], x.shape[3])
+    return self.network(torch.cat([x, embedding], dim=1))
+
+
+class ConditionalCNNGenerator(CNNGenerator):
+  def __init__(self, config):
+    config['latent_vector_size'] = 100 + 100
+    super().__init__(config)
+    self.embed = torch.nn.Embedding(config.get('n_classes', 10), config.get('embedding_size', 100))
+  
+  def forward(self, x, labels):
+    embedding = self.embed(labels).unsqueeze(-1).unsqueeze(-1)
+    return self.network(torch.cat([x, embedding], dim=1))
+
+
 if __name__ == '__main__':
   mlp_generator = MLPGenerator({})
   print('\nMLPGenerator input=[4, 100]}')  # out = [4, 784]
@@ -164,3 +186,11 @@ if __name__ == '__main__':
   cnn_discriminator = CNNDiscriminator({'n_classes': 10})
   print('\nCNNDiscriminator input=[4, 1, 28, 28]')  # out = [4, 10, 1, 1]
   print(f'CNNDiscriminator out={cnn_discriminator(torch.randn(4, 1, 28, 28)).shape}')
+
+  c_cnn_discriminator = ConditionalCNNDiscriminator({})
+  print('\nConditionalCNNDiscriminator input=[4, 1, 28, 28], [4]')  # out = [4, 1, 1, 1]
+  print(f'ConditionalCNNDiscriminator out={c_cnn_discriminator(torch.randn(4, 1, 28, 28), torch.randint(0, 10, (4,))).shape}')
+
+  c_cnn_generator = ConditionalCNNGenerator({})
+  print('\nConditionalCNNGenerator input=[4, 100, 1, 1], [4]')  # out = [4, 1, 28, 28]
+  print(f'ConditionalCNNGenerator out={c_cnn_generator(torch.randn(4, 100, 1, 1), torch.randint(0, 10, (4,))).shape}')
