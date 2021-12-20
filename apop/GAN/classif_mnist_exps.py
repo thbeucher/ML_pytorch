@@ -72,11 +72,11 @@ class MNISTSiamese(MNIST):
       return (img, ref_imgs), (target, ref_targets)
 
 
-class CompTrainer(object):
+class TrainerInterface(object):
+  BASE_CONFIG = {'dataset_path': 'data/', 'batch_size': 128, 'n_workers': 8, 'save_name': 'model/comp_mnist_model.pt',
+                 'n_epochs': 101, 'eval_step': 20, 'percent': 1.}
   def __init__(self, config):
-    base_config = {'dataset_path': 'data/', 'batch_size': 128, 'n_workers': 8, 'save_name': 'model/comp_mnist_model.pt',
-                   'n_epochs': 101, 'eval_step': 20, 'percent': 1.}
-    self.config = {**base_config, **config}
+    self.config = {**TrainerInterface.BASE_CONFIG, **config}
     u.dump_dict(self.config, 'MNIST Experiment configuration')
 
     self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -88,12 +88,9 @@ class CompTrainer(object):
     self.optimizer = torch.optim.Adam(self.model.parameters())
 
     self.best_f1 = 0.
-  
-  def instanciate_model(self):  # 128 if 28x28, 1024 if 28x56
-    self.model = m.MNISTClassifier({'n_classes': 1,
-                                    'heads_config': [[{'type': torch.nn.Linear,
-                                                       'params': {'in_features': 1024, 'out_features': 1}}]]})
-    self.model.to(self.device)
+
+  def instanciate_model(self):
+    pass
 
   def set_dataloader(self):
     self.transform = Compose([ToTensor(), Normalize(mean=(0.5,), std=(0.5,))])
@@ -113,7 +110,41 @@ class CompTrainer(object):
                                                                       transform=self.transform, classif_mode=True),
                                                         batch_size=self.config['batch_size'], num_workers=self.config['n_workers'],
                                                         shuffle=False, pin_memory=True)
+
+  def train(self):
+    pass
+
+  def evaluation(self):
+    pass
+
+  def save_model(self, save_name=None):
+    save_name = self.config['save_name'] if save_name is None else save_name
+    if not os.path.isdir(os.path.dirname(save_name)):
+      os.makedirs(os.path.dirname(save_name))
+    torch.save({'model': self.model.state_dict()}, save_name)
+
+  def load_model(self, save_name=None, map_location=None):
+    save_name = self.config['save_name'] if save_name is None else save_name
+    if os.path.isfile(save_name):
+      data = torch.load(save_name, map_location=map_location)
+      self.model.load_state_dict(data['model'])
+    else:
+      print(f"File {save_name} doesn't exist")
+
+
+class CompTrainer(TrainerInterface):
+  BASE_CONFIG = {'dataset_path': 'data/', 'batch_size': 128, 'n_workers': 8, 'save_name': 'model/comp_mnist_model.pt',
+                 'n_epochs': 101, 'eval_step': 20, 'percent': 1.}
+  def __init__(self, config):
+    config = {**CompTrainer.BASE_CONFIG, **config}
+    super().__init__(config)
   
+  def instanciate_model(self):  # 128 if 28x28, 1024 if 28x56
+    self.model = m.MNISTClassifier({'n_classes': 1,
+                                    'heads_config': [[{'type': torch.nn.Linear,
+                                                       'params': {'in_features': 1024, 'out_features': 1}}]]})
+    self.model.to(self.device)
+
   def train_siamese(self):
     pass
 
@@ -166,22 +197,8 @@ class CompTrainer(object):
     else:
       return classification_report(targets, predictions, zero_division=0, output_dict=True)['weighted avg']['f1-score']
   
-  def save_model(self, save_name=None):
-    save_name = self.config['save_name'] if save_name is None else save_name
-    if not os.path.isdir(os.path.dirname(save_name)):
-      os.makedirs(os.path.dirname(save_name))
-    torch.save({'model': self.model.state_dict()}, save_name)
 
-  def load_model(self, save_name=None, map_location=None):
-    save_name = self.config['save_name'] if save_name is None else save_name
-    if os.path.isfile(save_name):
-      data = torch.load(save_name, map_location=map_location)
-      self.model.load_state_dict(data['model'])
-    else:
-      print(f"File {save_name} doesn't exist")
-
-
-class ClassifTrainer(CompTrainer):
+class ClassifTrainer(TrainerInterface):
   def __init__(self, config):
     config['save_name'] = 'model/classif_mnist_model.pt'
     super().__init__(config)
@@ -242,7 +259,7 @@ class ClassifTrainer(CompTrainer):
       return classification_report(targets, predictions, zero_division=0, output_dict=True)['weighted avg']['f1-score']
 
 
-class CompClassifTrainer(CompTrainer):
+class CompClassifTrainer(TrainerInterface):
   def __init__(self, config):
     config['save_name'] = 'model/comp_classif_mnist_model.pt'
     super().__init__(config)
@@ -308,7 +325,7 @@ if __name__ == "__main__":
   argparser.add_argument('--dataset_path', default='data/', type=str)
   argparser.add_argument('--n_workers', default=8, type=int)
   argparser.add_argument('--random_seed', default=42, type=int)
-  argparser.add_argument('--save_model', default='model/comp_mnist_model.pt', type=str)
+  argparser.add_argument('--save_model', default='', type=str)
   argparser.add_argument('--batch_size', default=128, type=int)
   argparser.add_argument('--trainer', default='comp', type=str)
   argparser.add_argument('--digits', default=2, type=int)
@@ -321,12 +338,15 @@ if __name__ == "__main__":
   trainers = {'classif': ClassifTrainer, 'comp': CompTrainer, 'comp_classif': CompClassifTrainer}
 
   mnist_trainer = trainers[args.trainer]({'dataset_path': args.dataset_path, 'n_workers': args.n_workers,
-                                          'save_name': args.save_model, 'batch_size': args.batch_size})
+                                          'batch_size': args.batch_size})
+  
+  if args.save_model != '':
+    mnist_trainer.config['save_name'] = args.save_model
   
   rep = input(f'Load {args.trainer} model? (y or n): ')
   if rep == 'y':
-    print(f'Load {args.save_model} model...')
-    mnist_trainer.load_model(map_location=mnist_trainer.device, save_name=args.save_model)
+    print(f"Load {mnist_trainer.config['save_name']} model...")
+    mnist_trainer.load_model(map_location=mnist_trainer.device, save_name=mnist_trainer.config['save_name'])
 
   rep = input(f'Start {args.trainer} training? (y or n): ')
   if rep == 'y':
