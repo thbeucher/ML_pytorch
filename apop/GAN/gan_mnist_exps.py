@@ -15,12 +15,12 @@ import models as m
 from plotter import plot_generated
 
 
-class MNISTGANTrainer(object):
+class GANTrainer(object):
   BASE_CONFIG = {'dataset_path': 'data/', 'batch_size': 128, 'n_workers': 8, 'save_name': 'model/mnist_gan_model.pt',
-                 'lr_generator': 2e-4, 'lr_discriminator': 2e-4, 'n_epochs': 200, 'noise_dim': 100, 'eval_step': 20,
+                 'lr_generator': 2e-4, 'lr_discriminator': 2e-4, 'n_epochs': 201, 'noise_dim': 100, 'eval_step': 20,
                  'betas': (0.9, 0.999), 'save_img_folder': 'generated_gan_imgs/'}
   def __init__(self, config):
-    self.config = {**MNISTGANTrainer.BASE_CONFIG, **config}
+    self.config = {**GANTrainer.BASE_CONFIG, **config}
 
     if not os.path.isdir(self.config['save_img_folder']):
       os.makedirs(self.config['save_img_folder'])
@@ -175,11 +175,11 @@ class MNISTGANTrainer(object):
       print(f"File {save_name} doesn't exist")
 
 
-class MNISTDCGANTrainer(MNISTGANTrainer):
+class DCGANTrainer(GANTrainer):
   BASE_CONFIG = {'save_name': 'model/mnist_dcgan_model.pt', 'save_img_folder': 'generated_dcgan_imgs/',
                  'betas': (0.5, 0.999)}
   def __init__(self, config):
-    super().__init__({**MNISTDCGANTrainer.BASE_CONFIG, **config})
+    super().__init__({**DCGANTrainer.BASE_CONFIG, **config})
   
   def instanciate_model(self):
     self.discriminator = m.CNNDiscriminator({}).to(self.device)
@@ -260,7 +260,7 @@ class MNISTDCGANTrainer(MNISTGANTrainer):
     self.generator.train()
 
 
-class MNISTSSDCGANTrainer(MNISTGANTrainer):
+class SSDCGANTrainer(GANTrainer):
   # With around 12 examples per class, a classifier CNN give f1 = 0.82 where SSDCGan give f1 = 0.9
   # With this current implementation, the training is slow and the more you add labeled example
   #                                   the more you loose advantage against a classic CNN classifier
@@ -277,7 +277,7 @@ class MNISTSSDCGANTrainer(MNISTGANTrainer):
   BASE_CONFIG = {'save_name': 'model/mnist_ssdcgan_model.pt', 'save_img_folder': 'generated_ssdcgan_imgs/',
                  'betas': (0.5, 0.999), 'percent': 0.002}
   def __init__(self, config):
-    super().__init__({**MNISTSSDCGANTrainer.BASE_CONFIG, **config})
+    super().__init__({**SSDCGANTrainer.BASE_CONFIG, **config})
     self.best_f1 = 0.
 
     self.activation = {}
@@ -411,11 +411,11 @@ class MNISTSSDCGANTrainer(MNISTGANTrainer):
     plot_generated(generated_imgs.squeeze(1).cpu(), save_name=save_name)
 
 
-class MNISTConditionalDCGANTrainer(MNISTGANTrainer):
+class ConditionalDCGANTrainer(GANTrainer):
   BASE_CONFIG = {'save_name': 'model/mnist_cdcgan_model.pt', 'save_img_folder': 'generated_cdcgan_imgs/',
                  'betas': (0.5, 0.999), 'percent': 0.002}
   def __init__(self, config):
-    super().__init__({**MNISTSSDCGANTrainer.BASE_CONFIG, **config})
+    super().__init__({**SSDCGANTrainer.BASE_CONFIG, **config})
   
   def instanciate_model(self):
     self.discriminator = m.ConditionalCNNDiscriminator({}).to(self.device)
@@ -496,11 +496,11 @@ class MNISTConditionalDCGANTrainer(MNISTGANTrainer):
     plot_generated(generated_imgs.squeeze(1).cpu(), save_name=save_name)
   
 
-class MNISTACDCGANTrainer(MNISTGANTrainer):
+class ACDCGANTrainer(GANTrainer):
   BASE_CONFIG = {'save_name': 'model/mnist_acdcgan_model.pt', 'save_img_folder': 'generated_acdcgan_imgs/',
                  'betas': (0.5, 0.999)}
   def __init__(self, config):
-    super().__init__({**MNISTACDCGANTrainer.BASE_CONFIG, **config})
+    super().__init__({**ACDCGANTrainer.BASE_CONFIG, **config})
 
     self.gan_criterion = torch.nn.BCELoss()
     self.classif_criterion = torch.nn.CrossEntropyLoss()
@@ -594,7 +594,7 @@ if __name__ == "__main__":
   # TODO
   # Feature matching | Minibatch discrimination | Historical averaging | One-sided label smoothing | Virtual batch normalization
   argparser = argparse.ArgumentParser(prog='gan_mnist_exps.py', description='')
-  argparser.add_argument('--log_file', default='_tmp_mnist_gan_logs.txt', type=str)
+  argparser.add_argument('--log_file', default='_tmp_gan_mnist_exps_logs.txt', type=str)
   argparser.add_argument('--dataset_path', default='data/', type=str)
   argparser.add_argument('--n_workers', default=8, type=int)
   argparser.add_argument('--random_seed', default=42, type=int)
@@ -609,8 +609,8 @@ if __name__ == "__main__":
 
   torch.manual_seed(args.random_seed)
 
-  map_trainer = {'gan': MNISTGANTrainer, 'dcgan': MNISTDCGANTrainer, 'ssdcgan': MNISTSSDCGANTrainer,
-                 'cdcgan': MNISTConditionalDCGANTrainer, 'acdcgan': MNISTACDCGANTrainer}
+  map_trainer = {'gan': GANTrainer, 'dcgan': DCGANTrainer, 'ssdcgan': SSDCGANTrainer,
+                 'cdcgan': ConditionalDCGANTrainer, 'acdcgan': ACDCGANTrainer}
 
   mnist_trainer = map_trainer[args.trainer]({'dataset_path': args.dataset_path, 'n_workers': args.n_workers,
                                              'save_name': args.save_model, 'batch_size': args.batch_size,

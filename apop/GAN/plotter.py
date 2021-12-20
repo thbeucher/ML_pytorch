@@ -6,8 +6,8 @@ import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 
-from PIL import Image
 from natsort import natsorted
+from PIL import Image, ImageDraw, ImageFont
 
 
 def plot_generated(generated_imgs, dim=(1, 10), figsize=(12, 2), save_name=None):
@@ -87,6 +87,12 @@ def plot_comp_imgs(folder='tmp_data/', fname='imgs_generated_epoch180.png'):
   img_dcgan = Image.open(os.path.join(folder, dcgan, fname))
   img_cdcgan = Image.open(os.path.join(folder, cdcgan, fname))
   img_acdcgan = Image.open(os.path.join(folder, acdcgan, fname))
+
+  font = ImageFont.truetype('open-sans/OpenSans-Regular.ttf', 20)
+
+  for text, tmp_img in zip(['DC-GAN', 'Conditional DC-GAN', 'AC-DC-GAN'], [img_dcgan, img_cdcgan, img_acdcgan]):
+    draw = ImageDraw.Draw(tmp_img)
+    draw.text((5, 5), text, font=font, fill=(0, 0, 0))
 
   img = Image.new('L', (img_dcgan.width, img_dcgan.height + img_cdcgan.height + img_acdcgan.height))
 

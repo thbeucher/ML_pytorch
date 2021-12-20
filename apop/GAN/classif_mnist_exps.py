@@ -18,6 +18,7 @@ from torchvision.transforms import Compose, ToTensor, Normalize
 sys.path.append(os.path.abspath(__file__).replace('GAN/classif_mnist_exps.py', ''))
 
 import utils as u
+import models as m
 
 
 class MNISTSiamese(MNIST):
@@ -71,53 +72,10 @@ class MNISTSiamese(MNIST):
       return (img, ref_imgs), (target, ref_targets)
 
 
-class CNNNetwork(torch.nn.Module):
-  def __init__(self, body_config=None):
-    base_body_config = {'layers_type': [torch.nn.Conv2d, torch.nn.ReLU, torch.nn.BatchNorm2d,
-                                        torch.nn.Conv2d, torch.nn.ReLU, torch.nn.BatchNorm2d,
-                                        torch.nn.Conv2d, torch.nn.ReLU, torch.nn.BatchNorm2d,
-                                        torch.nn.Dropout,
-                                        torch.nn.Conv2d, torch.nn.ReLU, torch.nn.BatchNorm2d,
-                                        torch.nn.Conv2d, torch.nn.ReLU, torch.nn.BatchNorm2d,
-                                        torch.nn.Conv2d, torch.nn.ReLU, torch.nn.BatchNorm2d,
-                                        torch.nn.Dropout,
-                                        torch.nn.Conv2d, torch.nn.ReLU, torch.nn.BatchNorm2d,
-                                        torch.nn.Flatten, torch.nn.Dropout],
-                        'layers_args': [{'in_channels': 1, 'out_channels': 32, 'kernel_size': 3, 'stride': 1, 'padding': 0},
-                                        {'inplace': True}, {'num_features': 32},
-                                        {'in_channels': 32, 'out_channels': 32, 'kernel_size': 3, 'stride': 1, 'padding': 0},
-                                        {'inplace': True}, {'num_features': 32},
-                                        {'in_channels': 32, 'out_channels': 32, 'kernel_size': 5, 'stride': 2, 'padding': 2},
-                                        {'inplace': True}, {'num_features': 32},
-                                        {'p': 0.4},
-                                        {'in_channels': 32, 'out_channels': 64, 'kernel_size': 3, 'stride': 1, 'padding': 0},
-                                        {'inplace': True}, {'num_features': 64},
-                                        {'in_channels': 64, 'out_channels': 64, 'kernel_size': 3, 'stride': 1, 'padding': 0},
-                                        {'inplace': True}, {'num_features': 64},
-                                        {'in_channels': 64, 'out_channels': 64, 'kernel_size': 5, 'stride': 2, 'padding': 2},
-                                        {'inplace': True}, {'num_features': 64},
-                                        {'p': 0.4},
-                                        {'in_channels': 64, 'out_channels': 128, 'kernel_size': 4, 'stride': 1, 'padding': 0},
-                                        {'inplace': True}, {'num_features': 128},
-                                        {}, {'p': 0.4}]}
-    super().__init__()
-    self.body_config = base_body_config if body_config is None else body_config
-
-    self.body = torch.nn.Sequential(*[bct(**bca) for bct, bca in zip(self.body_config['layers_type'],
-                                                                     self.body_config['layers_args'])])
-    self.head_comp = torch.nn.Sequential(torch.nn.Linear(1024, 1), torch.nn.Sigmoid())
-    self.head_classif = torch.nn.Linear(1025, 10)
-  
-  def forward(self, x):
-    out = self.body(x)
-    out_comp = self.head_comp(out)
-    return out_comp, self.head_classif(torch.cat([out, out_comp], dim=1))
-
-
-class MNISTCompTrainer(object):
+class CompTrainer(object):
   def __init__(self, config):
     base_config = {'dataset_path': 'data/', 'batch_size': 128, 'n_workers': 8, 'save_name': 'model/comp_mnist_model.pt',
-                   'n_epochs': 100, 'eval_step': 20, 'percent': 1.}
+                   'n_epochs': 101, 'eval_step': 20, 'percent': 1.}
     self.config = {**base_config, **config}
     u.dump_dict(self.config, 'MNIST Experiment configuration')
 
@@ -132,16 +90,9 @@ class MNISTCompTrainer(object):
     self.best_f1 = 0.
   
   def instanciate_model(self):  # 128 if 28x28, 1024 if 28x56
-    self.model = torch.nn.Sequential(torch.nn.Conv2d(1, 32, 3), torch.nn.ReLU(inplace=True), torch.nn.BatchNorm2d(32),
-                                     torch.nn.Conv2d(32, 32, 3), torch.nn.ReLU(inplace=True), torch.nn.BatchNorm2d(32),
-                                     torch.nn.Conv2d(32, 32, 5, 2, 2), torch.nn.ReLU(inplace=True), torch.nn.BatchNorm2d(32),
-                                     torch.nn.Dropout(0.4),
-                                     torch.nn.Conv2d(32, 64, 3), torch.nn.ReLU(inplace=True), torch.nn.BatchNorm2d(64),
-                                     torch.nn.Conv2d(64, 64, 3), torch.nn.ReLU(inplace=True), torch.nn.BatchNorm2d(64),
-                                     torch.nn.Conv2d(64, 64, 5, 2, 2), torch.nn.ReLU(inplace=True), torch.nn.BatchNorm2d(64),
-                                     torch.nn.Dropout(0.4),
-                                     torch.nn.Conv2d(64, 128, 4), torch.nn.ReLU(inplace=True), torch.nn.BatchNorm2d(128),
-                                     torch.nn.Flatten(), torch.nn.Dropout(0.4), torch.nn.Linear(1024, 1))
+    self.model = m.MNISTClassifier({'n_classes': 1,
+                                    'heads_config': [[{'type': torch.nn.Linear,
+                                                       'params': {'in_features': 1024, 'out_features': 1}}]]})
     self.model.to(self.device)
 
   def set_dataloader(self):
@@ -177,13 +128,13 @@ class MNISTCompTrainer(object):
         self.optimizer.step()
         losses.append(loss.item())
 
-      logging.info(f'MNISTCompTrainer - Epoch {epoch} | loss={np.mean(losses):.4f}')
+      logging.info(f'CompTrainer - Epoch {epoch} | loss={np.mean(losses):.4f}')
       f1 = self.evaluation()
-      logging.info(f'MNISTCompTrainer - Epoch {epoch} | f1 = {f1:.4f}')
+      logging.info(f'CompTrainer - Epoch {epoch} | f1 = {f1:.4f}')
 
       if f1 > self.best_f1:
         f1_classif = self.classif_evaluation()
-        logging.info(f'MNISTClassifTrainer - Epoch {epoch} | save model with f1={f1:.4f} | f1_classif={f1_classif:.4f}')
+        logging.info(f'CompTrainer - Epoch {epoch} | save model with f1={f1:.4f} | f1_classif={f1_classif:.4f}')
         self.save_model()
         self.best_f1 = f1
 
@@ -230,7 +181,7 @@ class MNISTCompTrainer(object):
       print(f"File {save_name} doesn't exist")
 
 
-class MNISTClassifTrainer(MNISTCompTrainer):
+class ClassifTrainer(CompTrainer):
   def __init__(self, config):
     config['save_name'] = 'model/classif_mnist_model.pt'
     super().__init__(config)
@@ -238,16 +189,7 @@ class MNISTClassifTrainer(MNISTCompTrainer):
     self.criterion = torch.nn.CrossEntropyLoss()
   
   def instanciate_model(self):
-    self.model = torch.nn.Sequential(torch.nn.Conv2d(1, 32, 3), torch.nn.ReLU(inplace=True), torch.nn.BatchNorm2d(32),
-                                     torch.nn.Conv2d(32, 32, 3), torch.nn.ReLU(inplace=True), torch.nn.BatchNorm2d(32),
-                                     torch.nn.Conv2d(32, 32, 5, 2, 2), torch.nn.ReLU(inplace=True), torch.nn.BatchNorm2d(32),
-                                     torch.nn.Dropout(0.4),
-                                     torch.nn.Conv2d(32, 64, 3), torch.nn.ReLU(inplace=True), torch.nn.BatchNorm2d(64),
-                                     torch.nn.Conv2d(64, 64, 3), torch.nn.ReLU(inplace=True), torch.nn.BatchNorm2d(64),
-                                     torch.nn.Conv2d(64, 64, 5, 2, 2), torch.nn.ReLU(inplace=True), torch.nn.BatchNorm2d(64),
-                                     torch.nn.Dropout(0.4),
-                                     torch.nn.Conv2d(64, 128, 4), torch.nn.ReLU(inplace=True), torch.nn.BatchNorm2d(128),
-                                     torch.nn.Flatten(), torch.nn.Dropout(0.4), torch.nn.Linear(128, 10))
+    self.model = m.MNISTClassifier({})
     self.model.to(self.device)
   
   def set_dataloader(self):
@@ -276,12 +218,12 @@ class MNISTClassifTrainer(MNISTCompTrainer):
         self.optimizer.step()
         losses.append(loss.item())
 
-      logging.info(f'MNISTClassifTrainer - Epoch {epoch} | loss={np.mean(losses):.4f}')
+      logging.info(f'ClassifTrainer - Epoch {epoch} | loss={np.mean(losses):.4f}')
       f1 = self.evaluation()
-      logging.info(f'MNISTClassifTrainer - Epoch {epoch} | f1 = {f1:.4f}')
+      logging.info(f'ClassifTrainer - Epoch {epoch} | f1 = {f1:.4f}')
 
       if f1 > self.best_f1:
-        logging.info(f'MNISTClassifTrainer - Epoch {epoch} | save model with f1={f1:.4f}')
+        logging.info(f'ClassifTrainer - Epoch {epoch} | save model with f1={f1:.4f}')
         self.save_model()
         self.best_f1 = f1
 
@@ -300,7 +242,7 @@ class MNISTClassifTrainer(MNISTCompTrainer):
       return classification_report(targets, predictions, zero_division=0, output_dict=True)['weighted avg']['f1-score']
 
 
-class MNISTCompClassifTrainer(MNISTCompTrainer):
+class CompClassifTrainer(CompTrainer):
   def __init__(self, config):
     config['save_name'] = 'model/comp_classif_mnist_model.pt'
     super().__init__(config)
@@ -308,7 +250,12 @@ class MNISTCompClassifTrainer(MNISTCompTrainer):
     self.criterion_classif = torch.nn.CrossEntropyLoss()
   
   def instanciate_model(self):
-    self.model = CNNNetwork()
+    self.model = m.MNISTClassifier({'n_classes': 1,
+                                    'heads_config': [[{'type': torch.nn.Linear,
+                                                       'params': {'in_features': 1024, 'out_features': 1}},
+                                                       {'type': torch.nn.Sigmoid, 'params': {}}],
+                                                      [{'type': torch.nn.Linear,
+                                                        'params': {'in_features': 1025, 'out_features': 10}}]]})
     self.model.to(self.device)
   
   def train(self):
@@ -324,12 +271,12 @@ class MNISTCompClassifTrainer(MNISTCompTrainer):
         self.optimizer.step()
         losses.append(loss.item())
 
-      logging.info(f'MNISTCompClassifTrainer - Epoch {epoch} | loss={np.mean(losses):.4f}')
+      logging.info(f'CompClassifTrainer - Epoch {epoch} | loss={np.mean(losses):.4f}')
       f1_comp, f1_classif = self.evaluation()
-      logging.info(f'MNISTCompClassifTrainer - Epoch {epoch} | f1_comp = {f1_comp:.4f} | f1_classif = {f1_classif:.4f}')
+      logging.info(f'CompClassifTrainer - Epoch {epoch} | f1_comp = {f1_comp:.4f} | f1_classif = {f1_classif:.4f}')
 
       if f1_classif > self.best_f1:
-        logging.info(f'MNISTCompClassifTrainer - Epoch {epoch} | save model with f1={f1_comp:.4f} | f1_classif={f1_classif:.4f}')
+        logging.info(f'CompClassifTrainer - Epoch {epoch} | save model with f1={f1_comp:.4f} | f1_classif={f1_classif:.4f}')
         self.save_model()
         self.best_f1 = f1_classif
 
@@ -357,7 +304,7 @@ class MNISTCompClassifTrainer(MNISTCompTrainer):
 
 if __name__ == "__main__":
   argparser = argparse.ArgumentParser(prog='classif_mnist_exps.py', description='')
-  argparser.add_argument('--log_file', default='_tmp_classif_exps_mnist_logs.txt', type=str)
+  argparser.add_argument('--log_file', default='_tmp_classif_mnist_exps_logs.txt', type=str)
   argparser.add_argument('--dataset_path', default='data/', type=str)
   argparser.add_argument('--n_workers', default=8, type=int)
   argparser.add_argument('--random_seed', default=42, type=int)
@@ -371,7 +318,7 @@ if __name__ == "__main__":
 
   torch.manual_seed(args.random_seed)
 
-  trainers = {'classif': MNISTClassifTrainer, 'comp': MNISTCompTrainer, 'comp_classif': MNISTCompClassifTrainer}
+  trainers = {'classif': ClassifTrainer, 'comp': CompTrainer, 'comp_classif': CompClassifTrainer}
 
   mnist_trainer = trainers[args.trainer]({'dataset_path': args.dataset_path, 'n_workers': args.n_workers,
                                           'save_name': args.save_model, 'batch_size': args.batch_size})
