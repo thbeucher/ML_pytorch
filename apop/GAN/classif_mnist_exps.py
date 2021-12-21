@@ -201,12 +201,14 @@ class CompTrainer(TrainerInterface):
 class ClassifTrainer(TrainerInterface):
   def __init__(self, config):
     config['save_name'] = 'model/classif_mnist_model.pt'
+    config['model_type'] = config.get('model_type', 'mnist_classifier')
     super().__init__(config)
+    u.dump_dict(self.config, 'ClassifTrainer config')
 
     self.criterion = torch.nn.CrossEntropyLoss()
   
   def instanciate_model(self):
-    self.model = m.MNISTClassifier({})
+    self.model = m.MNISTClassifier({}) if self.config['model_type'] == 'mnist_classifier' else m.CNNDiscriminator({'n_classes': 10})
     self.model.to(self.device)
   
   def set_dataloader(self):
@@ -229,6 +231,8 @@ class ClassifTrainer(TrainerInterface):
       losses = []
       for img, target in tqdm(self.train_data_loader, leave=False):
         out = self.model(img.to(self.device))
+        if len(out.shape) > 2:
+          out = out.squeeze(-1).squeeze(-1)
         loss = self.criterion(out, target.to(self.device))
         self.model.zero_grad()
         loss.backward()
@@ -251,6 +255,8 @@ class ClassifTrainer(TrainerInterface):
     for img, target in tqdm(self.test_data_loader, leave=False):
       targets += target.tolist()
       out = self.model(img.to(self.device))
+      if len(out.shape) > 2:
+        out = out.squeeze(-1).squeeze(-1)
       predictions += out.argmax(-1).cpu().tolist()
     self.model.train()
     if print_res:
@@ -329,6 +335,7 @@ if __name__ == "__main__":
   argparser.add_argument('--batch_size', default=128, type=int)
   argparser.add_argument('--trainer', default='comp', type=str)
   argparser.add_argument('--digits', default=2, type=int)
+  argparser.add_argument('--model_type', default='mnist_classifier', type=str)
   args = argparser.parse_args()
 
   logging.basicConfig(filename=args.log_file, filemode='a', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -338,7 +345,7 @@ if __name__ == "__main__":
   trainers = {'classif': ClassifTrainer, 'comp': CompTrainer, 'comp_classif': CompClassifTrainer}
 
   mnist_trainer = trainers[args.trainer]({'dataset_path': args.dataset_path, 'n_workers': args.n_workers,
-                                          'batch_size': args.batch_size})
+                                          'batch_size': args.batch_size, 'model_type': args.model_type})
   
   if args.save_model != '':
     mnist_trainer.config['save_name'] = args.save_model

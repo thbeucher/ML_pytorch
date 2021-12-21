@@ -587,6 +587,37 @@ class ACDCGANTrainer(GANTrainer):
     plot_generated(generated_imgs.squeeze(1).cpu(), save_name=save_name)
     self.generator.train()
 
+  def fine_tune_discriminator_classif(self, n_epochs=50):
+    best_f1 = 0.
+    for epoch in tqdm(range(n_epochs)):
+      losses = []
+      for img, target in tqdm(self.train_data_loader, leave=False):
+        _, out = self.discriminator(img.to(self.device))
+        loss = self.classif_criterion(out.squeeze(-1).squeeze(-1), target.to(self.device))
+        self.discriminator.zero_grad()
+        loss.backward()
+        self.discriminator_optimizer.step()
+        losses.append(loss.item())
+      
+      with torch.no_grad():
+        self.discriminator.eval()
+
+        preds, targets = [], []
+        for img, target in tqdm(self.test_data_loader, leave=False):
+          targets += target.tolist()
+          _, out = self.discriminator(img.to(self.device))
+          preds += out.squeeze(-1).squeeze(-1).argmax(-1).cpu().tolist()
+
+        f1 = f1_score(targets, preds, average='weighted')
+        
+        self.discriminator.train()
+      
+      if f1 > best_f1:
+        best_f1 = f1
+        logging.info(f'ACDCGANTrainer - fine_tuning - Epoch {epoch} - train_loss = {np.mean(losses):.4f} - test_f1 = {f1:.3f} (best)')
+      else:
+        logging.info(f'ACDCGANTrainer - fine_tuning - Epoch {epoch} - train_loss = {np.mean(losses):.4f} - test_f1 = {f1:.3f}')
+
 
 if __name__ == "__main__":
   # Tips & tricks to train GAN -> https://github.com/soumith/ganhacks
@@ -598,11 +629,11 @@ if __name__ == "__main__":
   argparser.add_argument('--dataset_path', default='data/', type=str)
   argparser.add_argument('--n_workers', default=8, type=int)
   argparser.add_argument('--random_seed', default=42, type=int)
-  argparser.add_argument('--save_model', default='model/mnist_gan_model.pt', type=str)
+  argparser.add_argument('--save_model', default='', type=str)
   argparser.add_argument('--batch_size', default=128, type=int)
   argparser.add_argument('--trainer', default='gan', type=str)
   argparser.add_argument('--percent', default=0.002, type=float)
-  argparser.add_argument('--save_img_folder', default='generated_gan_imgs/', type=str)
+  argparser.add_argument('--save_img_folder', default='', type=str)
   args = argparser.parse_args()
 
   logging.basicConfig(filename=args.log_file, filemode='a', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -613,12 +644,17 @@ if __name__ == "__main__":
                  'cdcgan': ConditionalDCGANTrainer, 'acdcgan': ACDCGANTrainer}
 
   mnist_trainer = map_trainer[args.trainer]({'dataset_path': args.dataset_path, 'n_workers': args.n_workers,
-                                             'save_name': args.save_model, 'batch_size': args.batch_size,
-                                             'percent': args.percent, 'save_img_folder': args.save_img_folder})
+                                             'batch_size': args.batch_size, 'percent': args.percent})
+  
+  if args.save_model != '':
+    mnist_trainer.config['save_name'] = args.save_model
+  
+  if args.save_img_folder != '':
+    mnist_trainer.config['save_img_folder'] = args.save_img_folder
 
   rep = input(f'Load MNIST {args.trainer.upper()} model? (y or n): ')
   if rep == 'y':
-    print(f'Model {args.save_model} loaded.')
+    print(f"Model {mnist_trainer.config['save_name']} loaded.")
     mnist_trainer.load_model(map_location=mnist_trainer.device)
 
   rep = input(f'Train MNIST {args.trainer.upper()}? (y or n): ')
@@ -628,3 +664,8 @@ if __name__ == "__main__":
   rep = input(f'Eval MNIST {args.trainer.upper()}? (y or n): ')
   if rep == 'y':
     mnist_trainer.evaluation()
+  
+  if args.trainer in ['acdcgan']:
+    rep = input(f'Fine-tune {args.trainer.upper()} classifier? (y or n): ')
+    if rep == 'y':
+      mnist_trainer.fine_tune_discriminator_classif()
