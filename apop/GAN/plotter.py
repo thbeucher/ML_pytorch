@@ -23,6 +23,7 @@ def plot_generated(generated_imgs, dim=(1, 10), figsize=(12, 2), save_name=None)
     plt.show()
   else:
     plt.savefig(save_name)
+    plt.close()
 
 
 def create_gif(img_folder, save_gif_name=None, fps=5):

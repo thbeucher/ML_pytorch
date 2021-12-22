@@ -265,6 +265,160 @@ class MNISTClassifier(torch.nn.Module):
       return out_comp, self.heads[1](torch.cat([out, out_comp], dim=1))
 
 
+# Modified version from https://nbviewer.org/github/zalandoresearch/pytorch-vq-vae/blob/master/vq-vae.ipynb
+class VectorQuantizer(torch.nn.Module):
+  BASE_CONFIG = {'n_embeddings': 512, 'embedding_dim': 64, 'commitment_cost': 0.25, 'decay': 0.99, 'eps': 1e-5, 'ema': False}
+  def __init__(self, config):
+    super().__init__()
+    self.config = {**VectorQuantizer.BASE_CONFIG, **config}
+    
+    self.embedding = torch.nn.Embedding(self.config['n_embeddings'], self.config['embedding_dim'])
+
+    if self.config['ema']:
+      self.embedding.weight.data.normal_()
+      # parameters in register_buffer appeared in state_dict but not in model.parameters()
+      # so the optimizer will not update them
+      self.register_buffer('ema_cluster_size', torch.zeros(self.config['n_embeddings']))
+      self.ema_w = torch.nn.Parameter(torch.Tensor(self.config['n_embeddings'], self.config['embedding_dim']))
+      self.ema_w.data.normal_()
+    else:
+      self.embedding.weight.data.uniform_(-1/self.config['n_embeddings'], 1/self.config['n_embeddings'])
+    
+
+  def forward(self, inputs):
+    # convert inputs from BCHW -> BHWC
+    inputs = inputs.permute(0, 2, 3, 1).contiguous()
+    input_shape = inputs.shape
+    
+    # Flatten input
+    flat_input = inputs.view(-1, self.config['embedding_dim'])
+    
+    # Calculate distances
+    distances = (torch.sum(flat_input**2, dim=1, keepdim=True) 
+                + torch.sum(self.embedding.weight**2, dim=1)
+                - 2 * torch.matmul(flat_input, self.embedding.weight.T))
+        
+    # Encoding
+    encoding_indices = torch.argmin(distances, dim=1).unsqueeze(1)
+    encodings = torch.zeros(encoding_indices.shape[0], self.config['n_embeddings'], device=inputs.device)
+    encodings.scatter_(1, encoding_indices, 1)
+    
+    # Quantize and unflatten
+    quantized = torch.matmul(encodings, self.embedding.weight).view(input_shape)
+
+    # Use EMA to update the embedding vectors
+    if self.config['ema'] and self.training:
+      self.ema_cluster_size = self.ema_cluster_size * self.config['decay'] + (1 - self.config['decay']) * torch.sum(encodings, 0)
+      
+      # Laplace smoothing of the cluster size
+      n = torch.sum(self.ema_cluster_size.data)
+      self.ema_cluster_size = ((self.ema_cluster_size + self.config['eps']) 
+                                / (n + self.config['n_embeddings'] * self.config['eps']) * n)
+      
+      dw = torch.matmul(encodings.T, flat_input)
+      self.ema_w = torch.nn.Parameter(self.ema_w * self.config['decay'] + (1 - self.config['decay']) * dw)
+      
+      self.embedding.weight = torch.nn.Parameter(self.ema_w / self.ema_cluster_size.unsqueeze(1))
+    
+    # Loss
+    e_latent_loss = torch.nn.functional.mse_loss(quantized.detach(), inputs)
+    if self.config['ema']:
+      loss = self.config['commitment_cost'] * e_latent_loss
+    else:
+      q_latent_loss = torch.nn.functional.mse_loss(quantized, inputs.detach())
+      loss = q_latent_loss + self.config['commitment_cost'] * e_latent_loss
+    
+    quantized = inputs + (quantized - inputs).detach()
+    avg_probs = torch.mean(encodings, dim=0)
+    perplexity = torch.exp(-torch.sum(avg_probs * torch.log(avg_probs + 1e-10)))
+    
+    # convert quantized from BHWC -> BCHW
+    return loss, quantized.permute(0, 3, 1, 2).contiguous(), perplexity, encodings
+
+
+class ResidualCNN(torch.nn.Module):
+  BASE_CONFIG = {'layers_config': [
+    {'type': torch.nn.ReLU, 'params': {'inplace': True}},
+    {'type': torch.nn.Conv2d,
+     'params': {'in_channels': 128, 'out_channels': 32, 'kernel_size': 3, 'stride': 1, 'padding': 1, 'bias': False}},
+    {'type': torch.nn.ReLU, 'params': {'inplace': True}},
+    {'type': torch.nn.Conv2d,
+     'params': {'in_channels': 32, 'out_channels': 128, 'kernel_size': 1, 'stride': 1, 'padding': 0, 'bias': False}}]}
+  def __init__(self, config):
+    super().__init__()
+    self.config = {**ResidualCNN.BASE_CONFIG, **config}
+    self.network = sequential_constructor(self.config['layers_config'])
+  
+  def forward(self, x):
+    return x + self.network(x)
+
+
+class VQVAEEncoder(torch.nn.Module):
+  # H_out = (H_in + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1
+  BASE_CONFIG = {'layers_config': [
+    # 1*28*28 -> 64*14*14
+    {'type': torch.nn.Conv2d, 'params': {'in_channels': 1, 'out_channels': 64, 'kernel_size': 4, 'stride': 2, 'padding': 1}},
+    {'type': torch.nn.ReLU, 'params': {'inplace': True}},
+    # 64*14*14 -> 128*7*7
+    {'type': torch.nn.Conv2d, 'params': {'in_channels': 64, 'out_channels': 128, 'kernel_size': 4, 'stride': 2, 'padding': 1}},
+    {'type': torch.nn.ReLU, 'params': {'inplace': True}},
+    # 128*7*7 -> 128*7*7
+    {'type': torch.nn.Conv2d, 'params': {'in_channels': 128, 'out_channels': 128, 'kernel_size': 3, 'stride': 1, 'padding': 1}},
+    # 2 Residual blocks
+    {'type': ResidualCNN, 'params': {'config': {}}},
+    {'type': ResidualCNN, 'params': {'config': {}}},
+    {'type': torch.nn.ReLU, 'params': {'inplace': True}}]}
+  def __init__(self, config):
+    super().__init__()
+    VQVAEEncoder.BASE_CONFIG['layers_config'][0]['params']['in_channels'] = config.get('n_channels', 1)
+    self.config = {**VQVAEEncoder.BASE_CONFIG, **config}
+    self.network = sequential_constructor(self.config['layers_config'])
+  
+  def forward(self, x):
+    return self.network(x)
+
+
+class VQVAEDecoder(torch.nn.Module):
+  # H_out = (H_in - 1) * stride - 2 * padding + dilation * (kernel_size - 1) + output_padding + 1
+  BASE_CONFIG = {'layers_config': [
+    # 64*7*7 -> 128*7*7
+    {'type': torch.nn.Conv2d, 'params': {'in_channels': 64, 'out_channels': 128, 'kernel_size': 3, 'stride': 1, 'padding': 1}},
+    # 2 Residual blocks
+    {'type': ResidualCNN, 'params': {'config': {}}},
+    {'type': ResidualCNN, 'params': {'config': {}}},
+    # 128*7*7 -> 64*14*14
+    {'type': torch.nn.ConvTranspose2d, 'params': {'in_channels': 128, 'out_channels': 64, 'kernel_size': 4, 'stride': 2, 'padding': 1}},
+    {'type': torch.nn.ReLU, 'params': {'inplace': True}},
+    # 64*14*14 -> 3*28*28
+    {'type': torch.nn.ConvTranspose2d, 'params': {'in_channels': 64, 'out_channels': 1, 'kernel_size': 4, 'stride': 2, 'padding': 1}}]}
+  def __init__(self, config):
+    super().__init__()
+    VQVAEDecoder.BASE_CONFIG['layers_config'][0]['params']['in_channels'] = config.get('embedding_dim', 64)
+    VQVAEDecoder.BASE_CONFIG['layers_config'][-1]['params']['out_channels'] = config.get('n_channels', 1)
+    self.config = {**VQVAEDecoder.BASE_CONFIG, **config}
+    self.network = sequential_constructor(self.config['layers_config'])
+  
+  def forward(self, x):
+    return self.network(x)
+
+
+class VQVAEModel(torch.nn.Module):
+  def __init__(self, config):
+    super().__init__()
+    self.encoder = VQVAEEncoder(config.get('encoder_config', {}))
+    self.pre_vq_conv = torch.nn.Conv2d(**config.get('pre_vq_conv_config', {'in_channels': 128, 'out_channels': 64,
+                                                                           'kernel_size': 1, 'stride': 1, 'padding': 0}))
+    self.vq = VectorQuantizer(config.get('vq_config', {}))
+    self.decoder = VQVAEDecoder(config.get('decoder_config', {}))
+  
+  def forward(self, x):
+    z = self.encoder(x)  # [128, 1, 28, 28] -> [128, 128, 7, 7]
+    z = self.pre_vq_conv(z)  # -> [128, 64, 7, 7]
+    loss, quantized, perplexity, encodings = self.vq(z)
+    x_rec = self.decoder(quantized)  # [128, 64, 7, 7] -> [128, 1, 28, 28]
+    return loss, x_rec, perplexity, encodings
+
+
 if __name__ == '__main__':
   import pandas as pd
   from tabulate import tabulate
@@ -280,7 +434,9 @@ if __name__ == '__main__':
             {'type': ConditionalCNNDiscriminator, 'args': {}},
             {'type': ConditionalCNNGenerator,     'args': {}},
             {'type': ACCNNDiscriminator,          'args': {}},
-            {'type': MNISTClassifier,             'args': {}}]
+            {'type': MNISTClassifier,             'args': {}},
+            {'type': VQVAEEncoder,                'args': {}},
+            {'type': VQVAEDecoder,                'args': {}}]
   
   inputs = [ {'type': torch.randn, 'args': (4, 100)},
              {'type': torch.randn, 'args': (4, 28*28)},
@@ -290,7 +446,9 @@ if __name__ == '__main__':
             [{'type': torch.randn, 'args': (4, 1, 28, 28)}, {'type': torch.randint, 'args': [0, 10, (4,)]}],
             [{'type': torch.randn, 'args': (4, 100, 1, 1)}, {'type': torch.randint, 'args': [0, 10, (4,)]}],
              {'type': torch.randn, 'args': (4, 1, 28, 28)},
-             {'type': torch.randn, 'args': (4, 1, 28, 28)}]
+             {'type': torch.randn, 'args': (4, 1, 28, 28)},
+             {'type': torch.randn, 'args': (4, 1, 28, 28)},
+             {'type': torch.randn, 'args': (4, 64, 7, 7)}]
   
   tab = {'Classname': [], 'input_shape': [], 'output_shape': [], 'n_parameters': []}
   for model, inp in zip(models, inputs):
