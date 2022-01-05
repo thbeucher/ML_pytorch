@@ -15,7 +15,7 @@ from models import VQVAEModel
 
 class VQVAETrainer(object):
   BASE_CONFIG = {'dataset_path': 'data/', 'batch_size': 128, 'n_workers': 8, 'save_name': 'model/vqvae_mnist_model.pt',
-                 'n_training_update': 15001, 'eval_step': 100, 'percent': 1., 'save_img_folder': 'generated_vqvae_imgs/',
+                 'n_training_update': 5001, 'eval_step': 100, 'percent': 1., 'save_img_folder': 'generated_vqvae_imgs/',
                  'lr': 1e-3, 'n_examples': 10}
   def __init__(self, config):
     super().__init__()
@@ -63,7 +63,7 @@ class VQVAETrainer(object):
       for img, _ in tqdm(self.train_data_loader, leave=False):
         img = img.to(self.device)
         self.optimizer.zero_grad()
-        vq_loss, img_rec, perplexity, encodings = self.model(img)
+        vq_loss, img_rec, perplexity, encodings, quantized = self.model(img)
         rec_loss = self.criterion(img_rec, img)
         loss = vq_loss + rec_loss
         loss.backward()
@@ -76,6 +76,7 @@ class VQVAETrainer(object):
           logging.info(f'Step {i} | rec_loss={np.mean(rec_losses)} | perplexity={np.mean(perplexities)}')
           rec_losses, perplexities = [], []
           self.generate_img(save_name=os.path.join(self.config['save_img_folder'], f'imgs_reconstructed_step{i}.png'))
+          self.save_model()
         
         i += 1
 
@@ -90,7 +91,7 @@ class VQVAETrainer(object):
   @torch.no_grad()
   def generate_img(self, save_name=None):
     self.model.eval()
-    _, img_rec, _, _ = self.model(self.test_imgs_to_rec.to(self.device))
+    _, img_rec, _, _, _ = self.model(self.test_imgs_to_rec.to(self.device))
     save_image(make_grid(img_rec.cpu(), nrow=10), save_name)
     self.model.train()
 

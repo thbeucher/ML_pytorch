@@ -155,13 +155,15 @@ class ConditionalCNNDiscriminator(CNNDiscriminator):
 
 class ConditionalCNNGenerator(CNNGenerator):
   def __init__(self, config):
-    config['latent_vector_size'] = 100 + 100
+    config['merging_type'] = config.get('merging_type', 'cat')  # cat or mul
+    config['latent_vector_size'] = 100 + 100 if config['merging_type'] == 'cat' else 100
     super().__init__(config)
     self.embed = torch.nn.Embedding(config.get('n_classes', 10), config.get('embedding_size', 100))
   
   def forward(self, x, labels):
     embedding = self.embed(labels).unsqueeze(-1).unsqueeze(-1)
-    return self.network(torch.cat([x, embedding], dim=1))
+    inp = torch.cat([x, embedding], dim=1) if self.config['merging_type'] == 'cat' else torch.mul(x, embedding)
+    return self.network(inp)
 
 
 class ACCNNDiscriminator(torch.nn.Module):
@@ -416,7 +418,7 @@ class VQVAEModel(torch.nn.Module):
     z = self.pre_vq_conv(z)  # -> [128, 64, 7, 7]
     loss, quantized, perplexity, encodings = self.vq(z)
     x_rec = self.decoder(quantized)  # [128, 64, 7, 7] -> [128, 1, 28, 28]
-    return loss, x_rec, perplexity, encodings
+    return loss, x_rec, perplexity, encodings, quantized
 
 
 if __name__ == '__main__':
