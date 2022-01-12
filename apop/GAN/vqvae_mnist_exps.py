@@ -5,12 +5,13 @@ import argparse
 import numpy as np
 
 from tqdm import tqdm
+from sklearn.metrics import f1_score
 from torchvision.datasets import MNIST
 from torchvision.utils import make_grid, save_image
 from sklearn.model_selection import train_test_split
 from torchvision.transforms import Compose, ToTensor, Normalize
 
-from models import VQVAEModel
+import models as m
 
 
 class VQVAETrainer(object):
@@ -39,7 +40,7 @@ class VQVAETrainer(object):
     # plt.imshow(grid_img.permute(1, 2, 0), cmap='gray_r')
   
   def instanciate_model(self):
-    self.model = VQVAEModel({}).to(self.device)
+    self.model = m.VQVAEModel({}).to(self.device)
 
   def set_dataloader(self):
     self.transform = Compose([ToTensor(), Normalize(mean=(0.5,), std=(0.5,))])
@@ -91,7 +92,7 @@ class VQVAETrainer(object):
   @torch.no_grad()
   def generate_img(self, save_name=None):
     self.model.eval()
-    _, img_rec, _, _, _ = self.model(self.test_imgs_to_rec.to(self.device))
+    _, img_rec, *_ = self.model(self.test_imgs_to_rec.to(self.device))
     save_image(make_grid(img_rec.cpu(), nrow=10), save_name)
     self.model.train()
 
@@ -110,8 +111,79 @@ class VQVAETrainer(object):
       print(f"File {save_name} doesn't exist")
 
 
+class VQVAEClassifierTrainer(VQVAETrainer):
+  BASE_CONFIG = {'dataset_path': 'data/', 'batch_size': 128, 'n_workers': 8, 'save_name': 'model/vqvae_classif_mnist_model.pt',
+                 'n_training_update': 15001, 'eval_step': 100, 'percent': 1., 'save_img_folder': 'generated_vqvae_classif_imgs/',
+                 'lr': 1e-3, 'n_examples': 10}
+  def __init__(self, config):
+    config = {**VQVAEClassifierTrainer.BASE_CONFIG, **config}
+    super().__init__(config)
+    self.classifier_criterion = torch.nn.CrossEntropyLoss()
+  
+  def instanciate_model(self):
+    self.model = m.VQVAEClassifierModel({}).to(self.device)
+  
+  def train(self):
+    rec_losses, perplexities, classif_losses = [], [], []
+    i = 0
+    f1_memory = 0.
+    for _ in tqdm(range(self.config['n_training_update'])):
+      for img, target in tqdm(self.train_data_loader, leave=False):
+        img = img.to(self.device)
+        self.optimizer.zero_grad()
+        vq_loss, img_rec, perplexity, encodings, quantized, out_classif = self.model(img)
+        rec_loss = self.criterion(img_rec, img)
+        classif_loss = self.classifier_criterion(out_classif, target.to(self.device))
+        loss = vq_loss + rec_loss + classif_loss
+        loss.backward()
+        self.optimizer.step()
+
+        rec_losses.append(rec_loss.item())
+        perplexities.append(perplexity.item())
+        classif_losses.append(classif_loss.item())
+
+        if i % self.config['eval_step'] == 0:
+          logging.info(f'Step {i} | rec_loss={np.mean(rec_losses)} | perplexity={np.mean(perplexities)}')
+          rec_losses, perplexities = [], []
+          self.generate_img(save_name=os.path.join(self.config['save_img_folder'], f'imgs_reconstructed_step{i}.png'))
+          self.save_model()
+
+          f1 = self.evaluation()
+          logging.info(f"Step {i} | ({'new_best' if f1 > f1_memory else ''}) f1 = {f1:.3f}")
+          f1_memory = f1 if f1 > f1_memory else f1_memory
+        
+        i += 1
+
+        if i > self.config['n_training_update']:
+          return
+  
+  @torch.no_grad()
+  def evaluation(self):
+    self.model.eval()
+    preds, targets = [], []
+    for img, target in tqdm(self.test_data_loader, leave=False):
+      targets += target.tolist()
+      _, _, _, _, _, out_classif = self.model(img.to(self.device))
+      preds += out_classif.argmax(-1).cpu().tolist()
+    self.model.train()
+    return f1_score(targets, preds, average='weighted')
+
+
+class VQVAETClassifierTrainer(VQVAEClassifierTrainer):
+  BASE_CONFIG = {'dataset_path': 'data/', 'batch_size': 128, 'n_workers': 8, 'save_name': 'model/vqvae_Tclassif_mnist_model.pt',
+                 'n_training_update': 15001, 'eval_step': 100, 'percent': 1., 'save_img_folder': 'generated_vqvae_Tclassif_imgs/',
+                 'lr': 1e-3, 'n_examples': 10}
+  def __init__(self, config):
+    config = {**VQVAETClassifierTrainer.BASE_CONFIG, **config}
+    super().__init__(config)
+    self.classifier_criterion = torch.nn.CrossEntropyLoss()
+  
+  def instanciate_model(self):
+    self.model = m.VQVAEClassifierModel({'classifier_type': m.TransformerHead}).to(self.device)
+
 
 if __name__ == "__main__":
+  # https://nbviewer.org/github/zalandoresearch/pytorch-vq-vae/blob/master/vq-vae.ipynb
   argparser = argparse.ArgumentParser(prog='vqvae_mnist_exps.py', description='')
   argparser.add_argument('--log_file', default='_tmp_mnist_vqvae_logs.txt', type=str)
   argparser.add_argument('--dataset_path', default='data/', type=str)
@@ -128,7 +200,7 @@ if __name__ == "__main__":
 
   torch.manual_seed(args.random_seed)
 
-  map_trainer = {'vqvae': VQVAETrainer}
+  map_trainer = {'vqvae': VQVAETrainer, 'vqvae_classif': VQVAEClassifierTrainer, 'vqvae_Tclassif': VQVAETClassifierTrainer}
 
   mnist_trainer = map_trainer[args.trainer]({'dataset_path': args.dataset_path, 'n_workers': args.n_workers,
                                              'batch_size': args.batch_size, 'percent': args.percent})
@@ -151,3 +223,7 @@ if __name__ == "__main__":
   # rep = input(f'Eval MNIST {args.trainer.upper()}? (y or n): ')
   # if rep == 'y':
   #   mnist_trainer.evaluation()
+
+  rep = input(f'Generate Images with current model? (y or n): ')
+  if rep == 'y':
+    mnist_trainer.generate_img(save_name=f"{mnist_trainer.config['save_img_folder']}current_model_generated_imgs.png")

@@ -8,7 +8,6 @@ import torchvision
 import numpy as np
 
 from PIL import Image
-from torchvision import transforms
 from tqdm import tqdm
 from torchvision.datasets import MNIST
 from sklearn.metrics import classification_report
@@ -207,7 +206,7 @@ class ClassifTrainer(TrainerInterface):
 
     self.criterion = torch.nn.CrossEntropyLoss()
   
-  def instanciate_model(self):
+  def instanciate_model(self):  # f1=0.9927 for CNNDiscriminator and f1=0.9964 for MNISTClassifier
     self.model = m.MNISTClassifier({}) if self.config['model_type'] == 'mnist_classifier' else m.CNNDiscriminator({'n_classes': 10})
     self.model.to(self.device)
   

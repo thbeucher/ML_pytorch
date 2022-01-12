@@ -156,7 +156,8 @@ class ConditionalCNNDiscriminator(CNNDiscriminator):
 class ConditionalCNNGenerator(CNNGenerator):
   def __init__(self, config):
     config['merging_type'] = config.get('merging_type', 'cat')  # cat or mul
-    config['latent_vector_size'] = 100 + 100 if config['merging_type'] == 'cat' else 100
+    default_lat_vect_size = 100 + 100 if config['merging_type'] == 'cat' else 100
+    config['latent_vector_size'] = config.get('latent_vector_size', default_lat_vect_size)
     super().__init__(config)
     self.embed = torch.nn.Embedding(config.get('n_classes', 10), config.get('embedding_size', 100))
   
@@ -211,35 +212,37 @@ class ACCNNDiscriminator(torch.nn.Module):
 
 
 class MNISTClassifier(torch.nn.Module):
+  # H_out = (H_in + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1
   BASE_CONFIG = {'body_config': [
+    # 1*28*28 -> 32*26*26
     {'type': torch.nn.Conv2d, 'params': {'in_channels': 1, 'out_channels': 32, 'kernel_size': 3, 'stride': 1, 'padding': 0}},
     {'type': torch.nn.ReLU, 'params': {'inplace': True}},
     {'type': torch.nn.BatchNorm2d, 'params': {'num_features': 32}},
-
+    # 32*26*26 -> 32*24*24
     {'type': torch.nn.Conv2d, 'params': {'in_channels': 32, 'out_channels': 32, 'kernel_size': 3, 'stride': 1, 'padding': 0}},
     {'type': torch.nn.ReLU, 'params': {'inplace': True}},
     {'type': torch.nn.BatchNorm2d, 'params': {'num_features': 32}},
-
+    # 32*24*24 -> 32*12*12
     {'type': torch.nn.Conv2d, 'params': {'in_channels': 32, 'out_channels': 32, 'kernel_size': 5, 'stride': 2, 'padding': 2}},
     {'type': torch.nn.ReLU, 'params': {'inplace': True}},
     {'type': torch.nn.BatchNorm2d, 'params': {'num_features': 32}},
 
     {'type': torch.nn.Dropout, 'params': {'p': 0.4}},
-
+    # 32*12*12 -> 64*10*10
     {'type': torch.nn.Conv2d, 'params': {'in_channels': 32, 'out_channels': 64, 'kernel_size': 3, 'stride': 1, 'padding': 0}},
     {'type': torch.nn.ReLU, 'params': {'inplace': True}},
     {'type': torch.nn.BatchNorm2d, 'params': {'num_features': 64}},
-
+    # 64*10*10 -> 64*8*8
     {'type': torch.nn.Conv2d, 'params': {'in_channels': 64, 'out_channels': 64, 'kernel_size': 3, 'stride': 1, 'padding': 0}},
     {'type': torch.nn.ReLU, 'params': {'inplace': True}},
     {'type': torch.nn.BatchNorm2d, 'params': {'num_features': 64}},
-
+    # 64*8*8 -> 64*4*4
     {'type': torch.nn.Conv2d, 'params': {'in_channels': 64, 'out_channels': 64, 'kernel_size': 5, 'stride': 2, 'padding': 2}},
     {'type': torch.nn.ReLU, 'params': {'inplace': True}},
     {'type': torch.nn.BatchNorm2d, 'params': {'num_features': 64}},
 
     {'type': torch.nn.Dropout, 'params': {'p': 0.4}},
-
+    # 64*4*4 -> 128*1*1
     {'type': torch.nn.Conv2d, 'params': {'in_channels': 64, 'out_channels': 128, 'kernel_size': 4, 'stride': 1, 'padding': 0}},
     {'type': torch.nn.ReLU, 'params': {'inplace': True}},
     {'type': torch.nn.BatchNorm2d, 'params': {'num_features': 128}},
@@ -421,6 +424,58 @@ class VQVAEModel(torch.nn.Module):
     return loss, x_rec, perplexity, encodings, quantized
 
 
+class MLPHead(torch.nn.Module):
+  BASE_CONFIG = {'layers_config': [{'type': torch.nn.Flatten, 'params': {}},  #          3136
+                                   {'type': torch.nn.Linear,  'params': {'in_features': 64*7*7, 'out_features': 1024}},
+                                   {'type': torch.nn.ReLU,    'params': {'inplace': True}},
+                                   {'type': torch.nn.Linear,  'params': {'in_features': 1024, 'out_features': 10}}]}
+  def __init__(self, config):
+    MLPHead.BASE_CONFIG['layers_config'][-1]['params']['out_features'] = config.get('n_classes', 10)
+    super().__init__()
+    self.config = {**MLPHead.BASE_CONFIG, **config}
+    self.network = sequential_constructor(self.config['layers_config'])
+  
+  def forward(self, x):
+    return self.network(x)
+
+
+class TransformerHead(torch.nn.Module):
+  BASE_CONFIG = {'layers_config': [{'type': torch.nn.Flatten,                 'params': {'start_dim': -2}},
+                                   {'type': torch.nn.Linear,                  'params': {'in_features': 7*7, 'out_features': 32}},
+                                   {'type': torch.nn.TransformerEncoderLayer, 'params': {'d_model': 32, 'nhead': 8,
+                                                                                         'dim_feedforward': 2048, 'dropout': 0.1,
+                                                                                         'batch_first': True}},
+                                   {'type': torch.nn.Flatten,                 'params': {}},
+                                   {'type': torch.nn.Linear,                  'params':{'in_features': 2048, 'out_features': 10}}]}
+  def __init__(self, config):
+    TransformerHead.BASE_CONFIG['layers_config'][-1]['params']['out_features'] = config.get('n_classes', 10)
+    super().__init__()
+    self.config = {**TransformerHead.BASE_CONFIG, **config}
+    self.network = sequential_constructor(self.config['layers_config'])
+  
+  def forward(self, x):
+    return self.network(x)
+
+
+class VQVAEClassifierModel(torch.nn.Module):
+  def __init__(self, config):
+    super().__init__()
+    self.encoder = VQVAEEncoder(config.get('encoder_config', {}))
+    self.pre_vq_conv = torch.nn.Conv2d(**config.get('pre_vq_conv_config', {'in_channels': 128, 'out_channels': 64,
+                                                                           'kernel_size': 1, 'stride': 1, 'padding': 0}))
+    self.vq = VectorQuantizer(config.get('vq_config', {}))
+    self.decoder = VQVAEDecoder(config.get('decoder_config', {}))
+    self.classifier = config.get('classifier_type', MLPHead)(config.get('classifier_config', {}))
+  
+  def forward(self, x):
+    z = self.encoder(x)  # [128, 1, 28, 28] -> [128, 128, 7, 7]
+    z = self.pre_vq_conv(z)  # -> [128, 64, 7, 7]
+    loss, quantized, perplexity, encodings = self.vq(z)
+    x_rec = self.decoder(quantized)  # [128, 64, 7, 7] -> [128, 1, 28, 28]
+    out = self.classifier(quantized)
+    return loss, x_rec, perplexity, encodings, quantized, out
+
+
 if __name__ == '__main__':
   import pandas as pd
   from tabulate import tabulate
@@ -438,7 +493,8 @@ if __name__ == '__main__':
             {'type': ACCNNDiscriminator,          'args': {}},
             {'type': MNISTClassifier,             'args': {}},
             {'type': VQVAEEncoder,                'args': {}},
-            {'type': VQVAEDecoder,                'args': {}}]
+            {'type': VQVAEDecoder,                'args': {}},
+            {'type': MLPHead,                     'args': {}}]
   
   inputs = [ {'type': torch.randn, 'args': (4, 100)},
              {'type': torch.randn, 'args': (4, 28*28)},
@@ -450,6 +506,7 @@ if __name__ == '__main__':
              {'type': torch.randn, 'args': (4, 1, 28, 28)},
              {'type': torch.randn, 'args': (4, 1, 28, 28)},
              {'type': torch.randn, 'args': (4, 1, 28, 28)},
+             {'type': torch.randn, 'args': (4, 64, 7, 7)},
              {'type': torch.randn, 'args': (4, 64, 7, 7)}]
   
   tab = {'Classname': [], 'input_shape': [], 'output_shape': [], 'n_parameters': []}
