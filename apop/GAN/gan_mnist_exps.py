@@ -1,4 +1,5 @@
 import os
+import sys
 import torch
 import logging
 import argparse
@@ -11,7 +12,9 @@ from torch.utils.data import DataLoader
 from sklearn.model_selection import train_test_split
 from torchvision.transforms import Compose, ToTensor, Normalize
 
-import models as m
+sys.path.append(os.path.abspath(__file__).replace('GAN/gan_mnist_exps.py', ''))
+
+import models.gan_vae_divers as m
 from plotter import plot_generated
 
 

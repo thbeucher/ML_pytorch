@@ -1,5 +1,5 @@
+import math
 import torch
-from torch.nn.modules.activation import Tanh
 
 
 def weights_init(m, mean=0.0, std=0.02):
@@ -341,6 +341,53 @@ class VectorQuantizer(torch.nn.Module):
     return loss, quantized.permute(0, 3, 1, 2).contiguous(), perplexity, encodings
 
 
+class VectorQuantizerGSSoft(torch.nn.Module):
+  BASE_CONFIG = {'n_embeddings': 128, 'embedding_dim': 8, 'latent_dim': 8,
+                 'commitment_cost': 0.25, 'decay': 0.99, 'eps': 1e-5, 'ema': False}
+  def __init__(self, config):
+    super().__init__()
+    self.config = {**VectorQuantizerGSSoft.BASE_CONFIG, **config}
+
+    self.embedding = torch.nn.Parameter(torch.Tensor(self.config['latent_dim'],
+                                                     self.config['n_embeddings'],
+                                                     self.config['embedding_dim']))
+    torch.nn.init.uniform_(self.embedding, -1/self.config['n_embeddings'], 1/self.config['n_embeddings'])
+
+  def forward(self, x):
+    B, C, H, W = x.size()
+    N, M, D = self.embedding.size()
+    assert C == N * D
+
+    x = x.view(B, N, D, H, W).permute(1, 0, 3, 4, 2)
+    x_flat = x.reshape(N, -1, D)
+
+    distances = torch.baddbmm(torch.sum(self.embedding ** 2, dim=2).unsqueeze(1) +
+                              torch.sum(x_flat ** 2, dim=2, keepdim=True),
+                              x_flat, self.embedding.transpose(1, 2),
+                              alpha=-2.0, beta=1.0)
+    distances = distances.view(N, B, H, W, M)
+
+    dist = torch.distributions.RelaxedOneHotCategorical(0.2, logits=-distances)
+    if self.training:
+      samples = dist.rsample().view(N, -1, M)
+    else:
+      samples = torch.argmax(dist.probs, dim=-1)
+      samples = torch.nn.functional.one_hot(samples, M).float()
+      samples = samples.view(N, -1, M)
+
+    quantized = torch.bmm(samples, self.embedding)
+    quantized = quantized.view_as(x)
+
+    KL = dist.probs * (dist.logits + math.log(M))
+    KL[(dist.probs == 0).expand_as(KL)] = 0
+    KL = KL.sum(dim=(0, 2, 3, 4)).mean()
+
+    avg_probs = torch.mean(samples, dim=1)
+    perplexity = torch.exp(-torch.sum(avg_probs * torch.log(avg_probs + 1e-10), dim=-1))
+
+    return KL, quantized.permute(1, 0, 4, 2, 3).reshape(B, C, H, W), perplexity.sum(), samples
+
+
 class ResidualCNN(torch.nn.Module):
   BASE_CONFIG = {'layers_config': [
     {'type': torch.nn.ReLU, 'params': {'inplace': True}},
@@ -430,6 +477,7 @@ class MLPHead(torch.nn.Module):
                                    {'type': torch.nn.ReLU,    'params': {'inplace': True}},
                                    {'type': torch.nn.Linear,  'params': {'in_features': 1024, 'out_features': 10}}]}
   def __init__(self, config):
+    MLPHead.BASE_CONFIG['layers_config'][1]['params']['in_features'] = config.get('in_features', 3136)
     MLPHead.BASE_CONFIG['layers_config'][-1]['params']['out_features'] = config.get('n_classes', 10)
     super().__init__()
     self.config = {**MLPHead.BASE_CONFIG, **config}
@@ -463,7 +511,7 @@ class VQVAEClassifierModel(torch.nn.Module):
     self.encoder = VQVAEEncoder(config.get('encoder_config', {}))
     self.pre_vq_conv = torch.nn.Conv2d(**config.get('pre_vq_conv_config', {'in_channels': 128, 'out_channels': 64,
                                                                            'kernel_size': 1, 'stride': 1, 'padding': 0}))
-    self.vq = VectorQuantizer(config.get('vq_config', {}))
+    self.vq = config.get('vq_type', VectorQuantizer)(config.get('vq_config', {}))
     self.decoder = VQVAEDecoder(config.get('decoder_config', {}))
     self.classifier = config.get('classifier_type', MLPHead)(config.get('classifier_config', {}))
   

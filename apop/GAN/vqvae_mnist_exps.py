@@ -1,4 +1,5 @@
 import os
+import sys
 import torch
 import logging
 import argparse
@@ -11,7 +12,9 @@ from torchvision.utils import make_grid, save_image
 from sklearn.model_selection import train_test_split
 from torchvision.transforms import Compose, ToTensor, Normalize
 
-import models as m
+sys.path.append(os.path.abspath(__file__).replace('GAN/vqvae_mnist_exps.py', ''))
+
+import models.gan_vae_divers as m
 
 
 class VQVAETrainer(object):
@@ -182,6 +185,27 @@ class VQVAETClassifierTrainer(VQVAEClassifierTrainer):
     self.model = m.VQVAEClassifierModel({'classifier_type': m.TransformerHead}).to(self.device)
 
 
+class VQVAEGSClassifierTrainer(VQVAEClassifierTrainer):
+  BASE_CONFIG = {'dataset_path': 'data/', 'batch_size': 128, 'n_workers': 8, 'save_name': 'model/vqvae_gs_classif_mnist_model.pt',
+                 'n_training_update': 15001, 'eval_step': 100, 'percent': 1., 'save_img_folder': 'generated_vqvae_gs_classif_imgs/',
+                 'lr': 1e-3, 'n_examples': 10}
+  def __init__(self, config):
+    config = {**VQVAEGSClassifierTrainer.BASE_CONFIG, **config}
+    super().__init__(config)
+    self.classifier_criterion = torch.nn.CrossEntropyLoss()
+    self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.config['lr'])
+  
+  def instanciate_model(self):
+    self.model = m.VQVAEClassifierModel({'vq_type': m.VectorQuantizerGSSoft,
+                                         'vq_config': {'embedding_dim': 8, 'latent_dim': 8}}).to(self.device)
+    # self.model = m.VQVAEClassifierModel({'vq_type': m.VectorQuantizerGSSoft,
+    #                                      'vq_config': {'embedding_dim': 32, 'latent_dim': 8},
+    #                                      'pre_vq_conv_config': {'in_channels': 128, 'out_channels': 256,
+    #                                                             'kernel_size': 1, 'stride': 1, 'padding': 0},
+    #                                      'decoder_config': {'embedding_dim': 256},
+    #                                      'classifier_config': {'in_features': 12544}}).to(self.device)
+
+
 if __name__ == "__main__":
   # https://nbviewer.org/github/zalandoresearch/pytorch-vq-vae/blob/master/vq-vae.ipynb
   argparser = argparse.ArgumentParser(prog='vqvae_mnist_exps.py', description='')
@@ -200,7 +224,8 @@ if __name__ == "__main__":
 
   torch.manual_seed(args.random_seed)
 
-  map_trainer = {'vqvae': VQVAETrainer, 'vqvae_classif': VQVAEClassifierTrainer, 'vqvae_Tclassif': VQVAETClassifierTrainer}
+  map_trainer = {'vqvae': VQVAETrainer, 'vqvae_classif': VQVAEClassifierTrainer, 'vqvae_Tclassif': VQVAETClassifierTrainer,
+                 'vqvae_gs_classif': VQVAEGSClassifierTrainer}
 
   mnist_trainer = map_trainer[args.trainer]({'dataset_path': args.dataset_path, 'n_workers': args.n_workers,
                                              'batch_size': args.batch_size, 'percent': args.percent})

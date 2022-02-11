@@ -4,7 +4,6 @@ import torch
 import random
 import logging
 import argparse
-import torchvision
 import numpy as np
 
 from PIL import Image
@@ -17,7 +16,7 @@ from torchvision.transforms import Compose, ToTensor, Normalize
 sys.path.append(os.path.abspath(__file__).replace('GAN/classif_mnist_exps.py', ''))
 
 import utils as u
-import models as m
+import models.gan_vae_divers as m
 
 
 class MNISTSiamese(MNIST):
