@@ -14,6 +14,7 @@ import torchvision.transforms as tvt
 
 from tqdm import tqdm
 from collections import deque
+from torchvision.io import read_image
 from torchvision.utils import make_grid, save_image
 
 sys.path.append('../../../robot/')
@@ -46,28 +47,28 @@ class GlobalTrainer(object):
     self.instanciate_model()
     self.instanciate_optimizers_n_criterions()
 
-    # self.transform = tvt.Compose([tvt.ToTensor(), tvt.Normalize((0.5,0.5,0.5), (1.0,1.0,1.0))])
-    self.transform = tvt.ToTensor()
+    self.loss_plot = None
   
   def instanciate_model(self):
     # vfl = visual_feature_learner
+    # with batch normalization, it learns faster but creates some artefacts
     vfl_residualCNN_config = {'layers_config': [
       {'type': torch.nn.ReLU, 'params': {'inplace': True}},
       {'type': torch.nn.Conv2d, 'params': {'in_channels': 64, 'out_channels': 16, 'kernel_size': 3, 'stride': 1,
                                            'padding': 1, 'bias': False}},
       {'type': torch.nn.ReLU, 'params': {'inplace': True}},
-      # {'type': torch.nn.BatchNorm2d, 'params': {'num_features': 16}},
+      {'type': torch.nn.BatchNorm2d, 'params': {'num_features': 16}},
       {'type': torch.nn.Conv2d, 'params': {'in_channels': 16, 'out_channels': 64, 'kernel_size': 1, 'stride': 1,
                                            'padding': 0, 'bias': False}}]}
     vfl_encoder_config = {'layers_config': [
       # 3*180*180 -> 32*90*90
       {'type': torch.nn.Conv2d, 'params': {'in_channels': 3, 'out_channels': 32, 'kernel_size': 4, 'stride': 2, 'padding': 1}},
       {'type': torch.nn.ReLU, 'params': {'inplace': True}},
-      # {'type': torch.nn.BatchNorm2d, 'params': {'num_features': 32}},
+      {'type': torch.nn.BatchNorm2d, 'params': {'num_features': 32}},
       # 32*90*90 -> 64*45*45
       {'type': torch.nn.Conv2d, 'params': {'in_channels': 32, 'out_channels': 64, 'kernel_size': 4, 'stride': 2, 'padding': 1}},
       {'type': torch.nn.ReLU, 'params': {'inplace': True}},
-      # {'type': torch.nn.BatchNorm2d, 'params': {'num_features': 64}},
+      {'type': torch.nn.BatchNorm2d, 'params': {'num_features': 64}},
       # 64*45*45 -> 64*45*45
       {'type': torch.nn.Conv2d, 'params': {'in_channels': 64, 'out_channels': 64, 'kernel_size': 3, 'stride': 1, 'padding': 1}},
       # 2 Residual blocks
@@ -99,15 +100,20 @@ class GlobalTrainer(object):
     self.vfl_replay_memory = ReplayMemory(12800)
   
   def get_state(self):
-    # screen = torch.from_numpy(env.get_screen()).permute(2, 0, 1).float()
-    screen = self.transform(env.get_screen())
+    screen = tvt.functional.to_tensor(env.get_screen())
     screen_cropped = tvt.functional.crop(screen, 140, 115, 180, 245)
     screen_resized = tvt.functional.resize(screen_cropped, [180, 180])
     return screen_resized
   
+  def plot_loss(self, loss, iteration):
+    if self.loss_plot is None:
+      self.loss_plot = vis.line(X=np.array([iteration, iteration]), Y=np.array([loss.item(), loss.item()]), win='loss',
+                                opts={'ylabel': 'loss', 'xlabel': 'iteration', 'title': 'loss evolution'})
+    else:
+      vis.line(X=np.array([iteration]), Y=np.array([loss.item()]), win='loss', update='append')
+  
   def train(self):
-    loss_plot = None
-
+    # fill the replay memory to have minimal batch size
     state = self.get_state()
     for _ in range(self.config['batch_size']):
       self.vfl_replay_memory.push(state)
@@ -118,7 +124,7 @@ class GlobalTrainer(object):
       state = self.get_state()
       self.vfl_replay_memory.push(state)
 
-      # [32, 3, 180, 180], uint8
+      # Learn visual features
       states_batch = torch.stack(self.vfl_replay_memory.sample(self.config['batch_size'])).to(self.device)
       vq_loss, state_rec, perplexity, encodings, quantized = self.visual_feature_learner(states_batch)
       self.vfl_optimizer.zero_grad()
@@ -127,16 +133,14 @@ class GlobalTrainer(object):
       loss.backward()
       self.vfl_optimizer.step()
 
+      # Plot images target and reconstructed using visdom
       vis.image(make_grid(states_batch[:6].cpu(), nrow=3), win='state', opts={'title': 'state'})
-      vis.image(make_grid(state_rec[:6].cpu(), nrow=3), win='rec', opts={'title': 'reconstructed'})
-      # print(plt.imsave('test_rec.png', state_rec[0].detach().permute(1, 2, 0).clamp(0, 1).numpy()))
+      # Strangely, it plots black image so an hack is to save the image first then load it to pass it to visdom
+      # vis.image(make_grid(state_rec[:6].cpu(), nrow=3), win='rec', opts={'title': 'reconstructed'})
       save_image(make_grid(state_rec[:6].cpu(), nrow=3), 'test_make_grid.png')
+      vis.image(read_image('test_make_grid.png'), win='rec', opts={'title': 'reconstructed'})
 
-      if loss_plot is None:
-        loss_plot = vis.line(X=np.array([i, i]), Y=np.array([loss.item(), loss.item()]), win='loss',
-                            opts={'ylabel': 'loss', 'xlabel': 'iteration', 'title': 'loss evolution'})
-      else:
-        vis.line(X=np.array([i]), Y=np.array([loss.item()]), win='loss', update='append')
+      self.plot_loss(loss, i)
 
 
 def stream_img(win_id=None):
