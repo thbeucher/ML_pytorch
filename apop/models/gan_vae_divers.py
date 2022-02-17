@@ -304,9 +304,9 @@ class VectorQuantizer(torch.nn.Module):
                 - 2 * torch.matmul(flat_input, self.embedding.weight.T))
         
     # Encoding
-    encoding_indices = torch.argmin(distances, dim=1).unsqueeze(1)
+    encoding_indices = torch.argmin(distances, dim=1).unsqueeze(1)  # [B*H*W, 1]
     encodings = torch.zeros(encoding_indices.shape[0], self.config['n_embeddings'], device=inputs.device)
-    encodings.scatter_(1, encoding_indices, 1)
+    encodings.scatter_(1, encoding_indices, 1)  # [B*H*W, n_embeddings]
     
     # Quantize and unflatten
     quantized = torch.matmul(encodings, self.embedding.weight).view(input_shape)
