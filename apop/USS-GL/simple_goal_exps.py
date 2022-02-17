@@ -86,9 +86,11 @@ class ActionPredictor(torch.nn.Module):
 
 
 class ReplayMemory(object):
-  def __init__(self, capacity, transition):
+  def __init__(self, capacity, transition, save_folder='replay_memory/'):
+    self.capacity = capacity
     self.memory = deque([], maxlen=capacity)
     self.transition = transition
+    self.save_folder = save_folder
 
   def push(self, *args):
     self.memory.append(self.transition(*args))
@@ -98,6 +100,27 @@ class ReplayMemory(object):
 
   def __len__(self):
     return len(self.memory)
+  
+  def save(self):
+    if not os.path.isdir(self.save_folder):
+      os.makedirs(self.save_folder)
+
+    ids_taken = set([int(fname.replace('.pt', '')) for fname in os.listdir(self.save_folder)])
+    ids_to_save = []
+    i = 0
+    while len(ids_to_save) < len(self.memory):
+      if i not in ids_taken and i not in ids_to_save:
+        ids_to_save.append(i)
+      else:
+        i += 1
+    
+    for i, transition in zip(ids_to_save, self.memory):
+      torch.save(list(transition), os.path.join(self.save_folder, f'{i}.pt'))
+
+  def load(self):
+    for fname in random.sample(os.listdir(self.save_folder), self.capacity):
+      transition = torch.load(os.path.join(self.save_folder, fname))
+      self.push(*transition)
 
 
 class GlobalTrainer(object):
@@ -215,29 +238,37 @@ class GlobalTrainer(object):
     else:
       print(f"File {save_name} doesn't exist")
   
-  def fill_visual_feature_learner_memory(self, strategy='random', memory_fname='vfl_memory.pt'):
+  def fill_visual_feature_learner_memory(self, strategy='random', load=True):
+    ori_screen = env.screen
+    env.screen = pygame.Surface(env.config['window_size'])
+
     print('Fill Visual Feature Learner Memory...')
     if strategy == 'random':
-      if os.path.isfile(memory_fname):
-        memory_obj = torch.load(memory_fname)
-        for state, action, next_state in memory_obj:
-          self.vfl_memory.push(state, action ,next_state, 0)
+      if load and os.path.isdir(self.vfl_memory.save_folder)\
+              and len(os.listdir(self.vfl_memory.save_folder)) == self.config['vfl_memory_size']:
+        print(f'-> load transitions from folder {self.vfl_memory.save_folder}')
+        self.vfl_memory.load()
       else:
-        memory_obj = []
         for _ in tqdm(range(self.config['vfl_memory_size'])):
           env.reset()
-          time.sleep(0.03)  # As the pygame run at 60fps, we give it the time to render the changes (taking a margin)
+          env.render(mode='robot')
+
           state = self.get_state()
           action = random.randint(0, 4)
+
           env.step(action)
-          time.sleep(0.03)
+          env.render(mode='robot')
+
           next_state = self.get_state()
           self.vfl_memory.push(state, torch.LongTensor([action]), next_state, 0)
-          memory_obj.append([state, torch.LongTensor([action]), next_state])
-        torch.save(memory_obj, memory_fname)
+        self.vfl_memory.save()
+
+    env.screen = ori_screen
+    global memory_filling_finished
+    memory_filling_finished = True
   
-  def train_visual_feature_learner(self, n_iterations=1000, plot_progress=True, save_model=True):
-    self.fill_visual_feature_learner_memory()
+  def train_visual_feature_learner(self, n_iterations=1000, plot_progress=True, save_model=True, load_memory=True):
+    self.fill_visual_feature_learner_memory(load=load_memory)
     print(f'Training Visual Feature Learner for {n_iterations} iterations...')
 
     with tqdm(total=n_iterations) as t:
@@ -379,15 +410,15 @@ class GlobalTrainer(object):
     if save_model:
       self.save_model(self.action_predictor, save_name='action_predictor.pt')
   
-  def train(self, force_retrain=False):
+  def train(self, force_retrain=False, load_vfl_memory=True):
     if not os.path.isfile(os.path.join(self.config['models_folder'], 'visual_feature_learner.pt')):
-      self.train_visual_feature_learner(n_iterations=self.config['n_training_iterations'])
+      self.train_visual_feature_learner(n_iterations=self.config['n_training_iterations'], load_memory=load_vfl_memory)
     else:
       print('Loading Visual Feature Learner model...')
       self.load_model(self.visual_feature_learner, save_name='visual_feature_learner.pt')
 
       if force_retrain:
-        self.train_visual_feature_learner(n_iterations=self.config['n_training_iterations'])
+        self.train_visual_feature_learner(n_iterations=self.config['n_training_iterations'], load_memory=load_vfl_memory)
     
     if not os.path.isfile(os.path.join(self.config['models_folder'], 'next_states_predictor.pt')):
       self.train_next_states_predictor(n_iterations=self.config['n_training_iterations'])
@@ -413,8 +444,7 @@ def experiment(args):
   print(f'visual_feature_learner n_parameters={sum(p.numel() for p in gt.visual_feature_learner.parameters() if p.requires_grad):,}')
   print(f'next_states_predictor n_parameters={sum(p.numel() for p in gt.next_states_predictor.parameters() if p.requires_grad):,}')
   print(f'action_predictor n_parameters={sum(p.numel() for p in gt.action_predictor.parameters() if p.requires_grad):,}')
-  time.sleep(10)
-  gt.train(force_retrain=args.force_retrain)
+  gt.train(force_retrain=args.force_retrain, load_vfl_memory=args.load_vfl_memory)
 
 
 def fake_press_a():
@@ -431,6 +461,7 @@ if __name__ == '__main__':
                                       description='Experiment on 2-DOF robot arm that learn to reach a target point')
   argparser.add_argument('--log_file', default='_tmp_simple_goal_exps_logs.txt', type=str)
   argparser.add_argument('--force_retrain', default=False, type=ast.literal_eval)
+  argparser.add_argument('--load_vfl_memory', default=True, type=ast.literal_eval)
   args = argparser.parse_args()
 
   logging.basicConfig(filename=args.log_file, filemode='a', level=logging.INFO,
@@ -450,34 +481,35 @@ if __name__ == '__main__':
 
   done = False
   act = False
+  memory_filling_finished = False
 
   th = threading.Thread(target=experiment, args=(args,))
-  # th = threading.Thread(target=fake_press_a)
   th.start()
 
   while not done:
-    for event in pygame.event.get():
-      if event.type == pygame.QUIT:
-        done = True
-      elif event.type == pygame.KEYDOWN:
-        if event.key == pygame.K_a:
-          env.step(1)  # INC_J1
-          act = True
-        elif event.key == pygame.K_z:
-          env.step(2)  # DEC_J1
-          act = True
-        elif event.key == pygame.K_o:
-          env.step(3)  # INC_J2
-          act = True
-        elif event.key == pygame.K_p:
-          env.step(4)  # DEC_J2
-          act = True
-    
-    if act:
-      print('Action taken!')
-      act = False
-    
-    env.render()
+    if memory_filling_finished:
+      for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+          done = True
+        elif event.type == pygame.KEYDOWN:
+          if event.key == pygame.K_a:
+            env.step(1)  # INC_J1
+            act = True
+          elif event.key == pygame.K_z:
+            env.step(2)  # DEC_J1
+            act = True
+          elif event.key == pygame.K_o:
+            env.step(3)  # INC_J2
+            act = True
+          elif event.key == pygame.K_p:
+            env.step(4)  # DEC_J2
+            act = True
+      
+      if act:
+        print('Action taken!')
+        act = False
+      
+      env.render()
 
   env.close()
   th.join()
