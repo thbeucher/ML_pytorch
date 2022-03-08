@@ -2,6 +2,15 @@ import math
 import torch
 
 
+def orthogonal_loss(t):
+  # eq (2) from https://arxiv.org/abs/2112.00384
+  n = t.shape[0]
+  normed_codes = torch.nn.functional.normalize(t, p=2, dim=-1)
+  identity = torch.eye(n, device=t.device)
+  cosine_sim = torch.einsum('i d, j d -> i j', normed_codes, normed_codes)
+  return ((cosine_sim - identity) ** 2).sum() / (n ** 2)
+
+
 def weights_init(m, mean=0.0, std=0.02):
   # from https://pytorch.org/tutorials/beginner/dcgan_faces_tutorial.html
   # Initialization preconised by https://arxiv.org/pdf/1511.06434.pdf
@@ -272,7 +281,8 @@ class MNISTClassifier(torch.nn.Module):
 
 # Modified version from https://nbviewer.org/github/zalandoresearch/pytorch-vq-vae/blob/master/vq-vae.ipynb
 class VectorQuantizer(torch.nn.Module):
-  BASE_CONFIG = {'n_embeddings': 512, 'embedding_dim': 64, 'commitment_cost': 0.25, 'decay': 0.99, 'eps': 1e-5, 'ema': False}
+  BASE_CONFIG = {'n_embeddings': 512, 'embedding_dim': 64, 'commitment_cost': 0.25, 'decay': 0.99, 'eps': 1e-5,
+                 'ema': False, 'orthogonal_loss': 0.}
   def __init__(self, config):
     super().__init__()
     self.config = {**VectorQuantizer.BASE_CONFIG, **config}
@@ -332,6 +342,9 @@ class VectorQuantizer(torch.nn.Module):
     else:
       q_latent_loss = torch.nn.functional.mse_loss(quantized, inputs.detach())
       loss = q_latent_loss + self.config['commitment_cost'] * e_latent_loss
+    
+    if self.config['orthogonal_loss'] > 0:
+      loss += orthogonal_loss(self.embedding.weight) * self.config['orthogonal_loss']
     
     quantized = inputs + (quantized - inputs).detach()
     avg_probs = torch.mean(encodings, dim=0)
@@ -467,6 +480,136 @@ class VQVAEModel(torch.nn.Module):
     z = self.encoder(x)  # [128, 1, 28, 28] -> [128, 128, 7, 7]
     z = self.pre_vq_conv(z)  # -> [128, 64, 7, 7]
     loss, quantized, perplexity, encodings = self.vq(z)
+    x_rec = self.decoder(quantized)  # [128, 64, 7, 7] -> [128, 1, 28, 28]
+    return loss, x_rec, perplexity, encodings, quantized
+
+
+class VQVAE2Residual(torch.nn.Module):
+  BASE_CONVS_CONFIG = [[[128, 32, 3, 1, 1], torch.nn.ReLU],
+                       [[32, 128, 1, 1, 0], torch.nn.ReLU]]
+  def __init__(self, config={}, bias=False):
+    '''
+    config : dict like {'convs_config': [[conv_config=[in_chan, out_chan, kernel, stride, padding], activation_fn], ...]}
+    '''
+    super().__init__()
+    blocks = []
+    for conv_conf, act_fn in config.get('convs_config', VQVAE2Residual.BASE_CONVS_CONFIG):
+      blocks.append(torch.nn.Conv2d(*conv_conf, bias=bias))
+      if act_fn is not None:
+        blocks.append(act_fn())
+    self.network = torch.nn.Sequential(*blocks)
+  
+  def forward(self, x):  # [B, C, H, W]
+    return self.network(x)
+
+
+class VQVAE2Encoder(torch.nn.Module):
+  # H_out = (H_in + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1
+  BASE_CONVS_CONFIG = [[[1, 64, 4, 2, 1], torch.nn.ReLU],
+                       [[64, 128, 4, 2, 1], torch.nn.ReLU],
+                       [[128, 128, 3, 1, 1], torch.nn.ReLU]]
+  BASE_RESCONVS_CONFIG = [{}, {}]
+  def __init__(self, config={}):
+    '''
+    config : dict like {'down_convs_config': [[[in_chan, out_chan, kernel, stride, padding], activation_fn], ...],
+                        'residual_convs_config': [{'convs_config': [[i, o, k, s, p], act_fn]}, ...]}
+    '''
+    super().__init__()
+    blocks = []
+    for dconv_conf, act_fn in config.get('down_convs_config', VQVAE2Encoder.BASE_CONVS_CONFIG):
+      blocks.append(torch.nn.Conv2d(*dconv_conf))
+      if config.get('batch_norm', False):
+        blocks.append(torch.nn.BatchNorm2d(dconv_conf[1]))
+      if act_fn is not None:
+        blocks.append(act_fn())
+
+    for res_conv_conf in config.get('residual_convs_config', VQVAE2Encoder.BASE_RESCONVS_CONFIG):
+      blocks.append(VQVAE2Residual(res_conv_conf))
+    
+    self.network = torch.nn.Sequential(*blocks)
+  
+  def forward(self, x):
+    return self.network(x)
+
+
+class VQVAE2Decoder(torch.nn.Module):
+  BASE_CONVS_CONFIG = [[64, 128, 3, 1, 1]]
+  BASE_RESCONVS_CONFIG = [{}, {}]
+  BASE_TRANSCONVS_CONFIG = [[[128, 64, 4, 2, 1], torch.nn.ReLU],
+                            [[64, 1, 4, 2, 1], None]]
+  def __init__(self, config={}):
+    super().__init__()
+    blocks = []
+    for conv_conf in config.get('convs_config', VQVAE2Decoder.BASE_CONVS_CONFIG):
+      blocks.append(torch.nn.Conv2d(*conv_conf))
+
+    for res_conv_conf in config.get('residual_convs_config', VQVAE2Decoder.BASE_RESCONVS_CONFIG):
+      blocks.append(VQVAE2Residual(res_conv_conf))
+    
+    for tconv_conf, act_fn in config.get('transpose_convs_config', VQVAE2Decoder.BASE_TRANSCONVS_CONFIG):
+      blocks.append(torch.nn.ConvTranspose2d(*tconv_conf))
+      if config.get('batch_norm', False):
+        blocks.append(torch.nn.BatchNorm2d(tconv_conf[1]))
+      if act_fn is not None:
+        blocks.append(act_fn())
+    
+    self.network = torch.nn.Sequential(*blocks)
+  
+  def forward(self, x):
+    return self.network(x)
+
+
+class VQVAE2(torch.nn.Module):
+  # H_out = (H_in + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1
+  def __init__(self, config={}):
+    super().__init__()
+    self.encoder_bottom = VQVAE2Encoder(config.get('encoder_bottom_config', {}))
+    self.encoder_top = VQVAE2Encoder(config.get('encoder_top_config', {'down_convs_config': [[[128, 64, 3, 2, 1], torch.nn.ReLU],
+                                                                                             [[64, 128, 3, 1, 1], torch.nn.ReLU]]}))
+    self.pre_vq_top = torch.nn.Conv2d(*config.get('pre_vq_top_config', [128, 64, 1, 1, 0]))
+    self.pre_vq_bottom = torch.nn.Conv2d(*config.get('pre_vq_bottom_config', [192, 64, 1, 1, 0]))
+    self.vq_top = VectorQuantizer(config.get('vq_top_config', {}))
+    self.vq_bottom = VectorQuantizer(config.get('vq_bottom_config', {}))
+    self.decoder_top = VQVAE2Decoder(config.get('decoder_top_config', {'transpose_convs_config': [[[128, 64, 3, 2, 1], None]]}))
+    self.decoder_bottom = VQVAE2Decoder(config.get('decoder_bottom_config', {'convs_config': [[128, 128, 3, 1, 1]]}))
+    self.upsample_top = torch.nn.ConvTranspose2d(*config.get('upsample_top_config', [64, 64, 3, 2, 1]))
+  
+  def forward(self, x):
+    z_bottom = self.encoder_bottom(x)  # [B, C=1, H=28, W=28] -> [B, 128, 7, 7]
+    z_top = self.encoder_top(z_bottom)  # [B, 128, 7, 7] -> [B, 128, 4, 4]
+    loss_top, quantized_top, pt, et = self.vq_top(self.pre_vq_top(z_top))  # [B, 64, 4, 4]
+    rec_top = self.decoder_top(quantized_top)  # [B, 64, 7, 7]
+    z_bottom = torch.cat([rec_top, z_bottom], 1)  # [B, 192, 7, 7]
+    loss_bottom, quantized_bottom, pb, eb = self.vq_bottom(self.pre_vq_bottom(z_bottom))  # [B, 64, 7, 7]
+    upsampled_quantized_top = self.upsample_top(quantized_top)  # [B, 64, 7, 7]
+    quantized = torch.cat([upsampled_quantized_top, quantized_bottom], 1)  # [B, 128, 7, 7]
+    x_rec = self.decoder_bottom(quantized)  # [B, 1, 28, 28]
+    return loss_top + loss_bottom, x_rec, pt + pb, None, quantized
+
+
+class VQVAETransformerModel(torch.nn.Module):
+  def __init__(self, config):
+    super().__init__()
+    self.encoder = VQVAEEncoder(config.get('encoder_config', {}))
+    self.pre_vq_conv = torch.nn.Conv2d(**config.get('pre_vq_conv_config', {'in_channels': 128, 'out_channels': 64,
+                                                                           'kernel_size': 1, 'stride': 1, 'padding': 0}))
+    self.pre_q_t = torch.nn.TransformerEncoder(torch.nn.TransformerEncoderLayer(**config.get('pre_q_t', {'d_model': 64,
+                                                                                                         'nhead': 4,
+                                                                                                         'dim_feedforward': 256})),
+                                               config.get('pre_q_t_n_layers', 2))
+    self.vq = VectorQuantizer(config.get('vq_config', {}))
+    self.post_q_t = torch.nn.TransformerEncoder(torch.nn.TransformerEncoderLayer(**config.get('pre_q_t', {'d_model': 64,
+                                                                                                          'nhead': 4,
+                                                                                                          'dim_feedforward': 256})),
+                                                config.get('post_q_t_n_layers', 2))
+    self.decoder = VQVAEDecoder(config.get('decoder_config', {}))
+  
+  def forward(self, x):
+    z = self.encoder(x)  # [128, 1, 28, 28] -> [128, 128, 7, 7]
+    z = self.pre_vq_conv(z)  # -> [128, 64, 7, 7]
+    z = self.pre_q_t(z)
+    loss, quantized, perplexity, encodings = self.vq(z)
+    quantized = self.post_q_t(quantized)
     x_rec = self.decoder(quantized)  # [128, 64, 7, 7] -> [128, 1, 28, 28]
     return loss, x_rec, perplexity, encodings, quantized
 

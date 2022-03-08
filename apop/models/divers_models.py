@@ -58,14 +58,14 @@ class ConvDepthPointWise(nn.Module):
 
 
 class ConvDepthPointWiseBlock(nn.Module):
-  def __init__(self, in_chan, out_chan, kernel, repeat):
+  def __init__(self, in_chan, out_chan, kernel, repeat, conv_type=nn.Conv1d):
     super().__init__()
-    net = [nn.Conv1d(in_chan, in_chan, kernel, groups=in_chan, padding=kernel//2),
-           nn.Conv1d(in_chan, out_chan, 1)]
+    net = [conv_type(in_chan, in_chan, kernel, groups=in_chan, padding=kernel//2),
+           conv_type(in_chan, out_chan, 1)]
     for _ in range(repeat - 1):
       net.insert(0, nn.ReLU(inplace=True))
-      net.insert(0, nn.Conv1d(in_chan, in_chan, 1))  # point-wise conv
-      net.insert(0, nn.Conv1d(in_chan, in_chan, kernel, groups=in_chan, padding=kernel//2))  # depth-wise conv
+      net.insert(0, conv_type(in_chan, in_chan, 1))  # point-wise conv
+      net.insert(0, conv_type(in_chan, in_chan, kernel, groups=in_chan, padding=kernel//2))  # depth-wise conv
     self.net = nn.Sequential(*net)
 
   def forward(self, x):

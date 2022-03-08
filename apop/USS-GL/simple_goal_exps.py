@@ -1,7 +1,6 @@
 import os
 import ast
 import sys
-from turtle import title
 import gym
 import time
 import torch
@@ -15,6 +14,7 @@ import numpy as np
 import torchvision.transforms as tvt
 
 from tqdm import tqdm
+from PIL import Image
 from itertools import islice
 from torchvision.io import read_image
 from collections import deque, namedtuple
@@ -24,6 +24,17 @@ sys.path.append('../../../robot/')
 sys.path.append(os.path.abspath(__file__).replace('USS-GL/simple_goal_exps.py', ''))
 
 import models.gan_vae_divers as gvd
+
+
+def tensor_to_img(tensor):
+  grid = make_grid(tensor)
+  ndarr = grid.mul(255).add_(0.5).clamp_(0, 255).permute(1, 2, 0).to("cpu", torch.uint8).numpy()
+  im = Image.fromarray(ndarr)
+  return im
+
+
+def state_to_label(tensor):
+  return tensor.mul(255).add_(0.5).clamp_(0, 255)
 
 
 class NextStatesPredictor(torch.nn.Module):
@@ -118,7 +129,7 @@ class ReplayMemory(object):
       torch.save(list(transition), os.path.join(self.save_folder, f'{i}.pt'))
 
   def load(self):
-    for fname in random.sample(os.listdir(self.save_folder), self.capacity):
+    for fname in tqdm(random.sample(os.listdir(self.save_folder), self.capacity)):
       transition = torch.load(os.path.join(self.save_folder, fname))
       self.push(*transition)
 
@@ -191,7 +202,7 @@ class GlobalTrainer(object):
                                                     'stride': 2, 'padding': 1}}]}
     self.visual_feature_learner = gvd.VQVAEModel({'encoder_config': vfl_encoder_config,
                                                   'pre_vq_conv_config': vfl_pre_vq_conv_config,
-                                                  'vq_config': {'n_embeddings': 512, 'embedding_dim': 32},
+                                                  'vq_config': {'n_embeddings': 32, 'embedding_dim': 32},
                                                   'decoder_config': vfl_decoder_config}).to(self.device)
     self.next_states_predictor = NextStatesPredictor({}).to(self.device)
     self.action_predictor = ActionPredictor({}).to(self.device)
@@ -238,14 +249,14 @@ class GlobalTrainer(object):
     else:
       print(f"File {save_name} doesn't exist")
   
-  def fill_visual_feature_learner_memory(self, strategy='random', load=True):
+  def fill_visual_feature_learner_memory(self, strategy='random', load=False, save=False):
     ori_screen = env.screen
     env.screen = pygame.Surface(env.config['window_size'])
 
     print('Fill Visual Feature Learner Memory...')
     if strategy == 'random':
       if load and os.path.isdir(self.vfl_memory.save_folder)\
-              and len(os.listdir(self.vfl_memory.save_folder)) == self.config['vfl_memory_size']:
+              and len(os.listdir(self.vfl_memory.save_folder)) >= self.config['vfl_memory_size']:
         print(f'-> load transitions from folder {self.vfl_memory.save_folder}')
         self.vfl_memory.load()
       else:
@@ -261,7 +272,9 @@ class GlobalTrainer(object):
 
           next_state = self.get_state()
           self.vfl_memory.push(state, torch.LongTensor([action]), next_state, 0)
-        self.vfl_memory.save()
+        
+        if save:
+          self.vfl_memory.save()
 
     env.screen = ori_screen
     global memory_filling_finished
@@ -299,6 +312,48 @@ class GlobalTrainer(object):
     
     if save_model:
       self.save_model(self.visual_feature_learner, save_name='visual_feature_learner.pt')
+  
+  def online_visual_feature_learner_training(self, n_iterations=10000, plot_progress=True, save_model=True):
+    ori_screen = env.screen
+    env.screen = pygame.Surface(env.config['window_size'])
+
+    print(f'Online Training of Visual Feature Learner for {n_iterations} iterations...')
+    with tqdm(total=n_iterations) as t:
+      for i in range(n_iterations):
+        env.reset()
+        env.render(mode='robot')
+
+        state = self.get_state().unsqueeze(0).to(self.device)
+        action = random.randint(0, 4)
+
+        env.step(action)
+        env.render(mode='robot')
+
+        vq_loss, state_rec, perplexity, encodings, quantized = self.visual_feature_learner(state)
+
+        self.vfl_optimizer.zero_grad()
+        rec_loss = self.mse_criterion(state_rec, state)
+        loss = vq_loss + rec_loss
+        loss.backward()
+        self.vfl_optimizer.step()
+
+        if plot_progress and (i % 50 == 0 or i == (n_iterations-1)):
+          vis.image(make_grid(state.cpu(), nrow=1), win='state', opts={'title': 'state'})
+
+          # Strangely, it plots black image so an hack is to save the image first then load it to pass it to visdom
+          # vis.image(make_grid(state_rec[:6].cpu(), nrow=3), win='rec', opts={'title': 'reconstructed'})
+          save_image(make_grid(state_rec.cpu(), nrow=1), 'test_make_grid.png')
+          vis.image(read_image('test_make_grid.png'), win='rec', opts={'title': 'reconstructed'})
+
+          self.plot_loss(loss.item(), i)
+        
+        t.set_description(f'Loss={loss.item():.3f}')
+        t.update(1)
+    
+    if save_model:
+      self.save_model(self.visual_feature_learner, save_name='visual_feature_learner.pt')
+    
+    env.screen = ori_screen
   
   @torch.no_grad()
   def fill_nsp_memory(self, n_step_ahead=1):
@@ -344,8 +399,7 @@ class GlobalTrainer(object):
         self.nsp_optimizer.step()
 
         if plot_progress and (i % 50 == 0 or i == (n_iterations-1)):
-          self.plot_loss(rec_loss.item(), i, win='rec_quantized_loss',
-                         title='rec_quantized_loss evolution')
+          self.plot_loss(rec_loss.item(), i, win='rec_quantized_loss', title='rec_quantized_loss evolution')
 
         t.set_description(f'Loss={rec_loss.item():.3f}')
         t.update(1)
@@ -461,7 +515,7 @@ if __name__ == '__main__':
                                       description='Experiment on 2-DOF robot arm that learn to reach a target point')
   argparser.add_argument('--log_file', default='_tmp_simple_goal_exps_logs.txt', type=str)
   argparser.add_argument('--force_retrain', default=False, type=ast.literal_eval)
-  argparser.add_argument('--load_vfl_memory', default=True, type=ast.literal_eval)
+  argparser.add_argument('--load_vfl_memory', default=False, type=ast.literal_eval)
   args = argparser.parse_args()
 
   logging.basicConfig(filename=args.log_file, filemode='a', level=logging.INFO,
@@ -513,3 +567,82 @@ if __name__ == '__main__':
 
   env.close()
   th.join()
+
+
+## LEGACY ##
+# def joint_train_vfl_nsp(self, n_iterations=1000, plot_progress=True, save_model=True, load_memory=True, n_step_ahead=1):
+#   self.fill_visual_feature_learner_memory(load=load_memory)
+#   print(f'Training Visual Feature Learner for {n_iterations} iterations...')
+
+#   with tqdm(total=n_iterations) as t:
+#     for i in range(n_iterations):
+#       transitions = self.vfl_memory.sample(self.config['batch_size'])
+#       batch = self.transition_vfl(*zip(*transitions))
+#       states_batch = torch.stack(batch.state).to(self.device)
+#       vq_loss, state_rec, perplexity, encodings, quantized = self.visual_feature_learner(states_batch)
+
+#       action_batch = torch.nn.functional.one_hot(torch.cat(batch.action), self.config['n_actions']).unsqueeze(1)
+#       predicted_quantized = self.next_states_predictor(quantized, action_batch.to(self.device))
+#       next_state_rec = self.visual_feature_learner.decoder(predicted_quantized.squeeze(0))
+
+#       next_states_batch = torch.stack(batch.next_state).to(self.device)
+
+#       self.vfl_optimizer.zero_grad()
+#       self.nsp_optimizer.zero_grad()
+
+#       state_rec_loss = self.mse_criterion(state_rec, states_batch)
+#       next_state_rec_loss = self.mse_criterion(next_state_rec, next_states_batch)
+#       loss = vq_loss + state_rec_loss + next_state_rec_loss
+#       loss.backward()
+
+#       self.vfl_optimizer.step()
+#       self.nsp_optimizer.step()
+
+#       if plot_progress and (i % 50 == 0 or i == (n_iterations-1)):
+#         vis.image(make_grid(states_batch[:6].cpu(), nrow=3), win='state', opts={'title': 'state'})
+#         save_image(make_grid(state_rec[:6].cpu(), nrow=3), 'test_make_grid.png')
+#         vis.image(read_image('test_make_grid.png'), win='rec', opts={'title': 'reconstructed'})
+
+#         self.plot_loss(loss.item(), i)
+#         self.plot_loss(state_rec_loss.item(), i, win='s_rec_loss', title='state_rec_loss evolution')
+#         self.plot_loss(next_state_rec_loss.item(), i, win='ns_rec_loss', title='next_state_rec_loss evolution')
+      
+#       t.set_description(f'Loss={loss.item():.3f}')
+#       t.update(1)
+  
+#   if save_model:
+#     self.save_model(self.visual_feature_learner, save_name='visual_feature_learner.pt')
+#     self.save_model(self.next_states_predictor, save_name='next_states_predictor.pt')
+
+
+# VQ-VAE-2
+# self.visual_feature_learner = gvd.VQVAE2({
+#       'encoder_bottom_config': {
+#           'batch_norm': True,
+#           'down_convs_config': [[[3, 32, 4, 2, 1], torch.nn.ReLU],  # 3*180*180 -> 32*90*90
+#                                 [[32, 64, 4, 2, 1], torch.nn.ReLU],  # 32*90*90 -> 64*45*45
+#                                 [[64, 128, 5, 2, 1], torch.nn.ReLU],  # 64*45*45 -> 128*22*22
+#                                 [[128, 256, 5, 2, 1], torch.nn.ReLU]],  # 128*22*22 -> 256*10*10
+#           'residual_convs_config': [{'convs_config': [[[256, 64, 3, 1, 1], torch.nn.ReLU], [[64, 256, 1, 1, 0], torch.nn.ReLU]]},
+#                                     {'convs_config': [[[256, 64, 3, 1, 1], torch.nn.ReLU], [[64, 256, 1, 1, 0], torch.nn.ReLU]]}]},
+#       'encoder_top_config': {
+#           'batch_norm': True,
+#           'down_convs_config': [[[256, 128, 3, 2, 1], torch.nn.ReLU],  # 256*10*10 -> 128*5*5
+#                                 [[128, 256, 3, 1, 1], torch.nn.ReLU]],
+#           'residual_convs_config': [{'convs_config': [[[256, 64, 3, 1, 1], torch.nn.ReLU], [[64, 256, 1, 1, 0], torch.nn.ReLU]]},
+#                                     {'convs_config': [[[256, 64, 3, 1, 1], torch.nn.ReLU], [[64, 256, 1, 1, 0], torch.nn.ReLU]]}]},
+#       'pre_vq_top_config': [256, 32, 1, 1, 0],
+#       'pre_vq_bottom_config': [256+32, 32, 1, 1, 0],
+#       'vq_top_config': {'n_embeddings': 64, 'embedding_dim': 32},
+#       'vq_bottom_config': {'n_embeddings': 32, 'embedding_dim': 32},
+#       'decoder_top_config': {'convs_config': [[32, 128, 3, 1, 1]],
+#                             #  'residual_convs_config': [],
+#                              'transpose_convs_config': [[[128, 32, 4, 2, 1], torch.nn.ReLU]]},
+#       'decoder_bottom_config': {'convs_config': [[64, 128, 3, 1, 1]],
+#                                 # 'residual_convs_config': [],
+#                                 'transpose_convs_config': [[[128, 256, 6, 2, 1], torch.nn.ReLU],
+#                                                            [[256, 128, 5, 2, 1], torch.nn.ReLU],
+#                                                            [[128, 64, 4, 2, 1], torch.nn.ReLU],
+#                                                            [[64, 3, 4, 2, 1], None]]},
+#       'upsample_top_config': [32, 32, 4, 2, 1]
+#       }).to(self.device)
