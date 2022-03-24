@@ -518,10 +518,10 @@ class VQVAE2Encoder(torch.nn.Module):
     blocks = []
     for dconv_conf, act_fn in config.get('down_convs_config', VQVAE2Encoder.BASE_CONVS_CONFIG):
       blocks.append(torch.nn.Conv2d(*dconv_conf))
-      if config.get('batch_norm', False):
-        blocks.append(torch.nn.BatchNorm2d(dconv_conf[1]))
       if act_fn is not None:
         blocks.append(act_fn())
+      if config.get('batch_norm', False):
+        blocks.append(torch.nn.BatchNorm2d(dconv_conf[1]))
 
     for res_conv_conf in config.get('residual_convs_config', VQVAE2Encoder.BASE_RESCONVS_CONFIG):
       blocks.append(VQVAE2Residual(res_conv_conf))
@@ -548,10 +548,10 @@ class VQVAE2Decoder(torch.nn.Module):
     
     for tconv_conf, act_fn in config.get('transpose_convs_config', VQVAE2Decoder.BASE_TRANSCONVS_CONFIG):
       blocks.append(torch.nn.ConvTranspose2d(*tconv_conf))
-      if config.get('batch_norm', False):
-        blocks.append(torch.nn.BatchNorm2d(tconv_conf[1]))
       if act_fn is not None:
         blocks.append(act_fn())
+      if config.get('batch_norm', False):
+        blocks.append(torch.nn.BatchNorm2d(tconv_conf[1]))
     
     self.network = torch.nn.Sequential(*blocks)
   

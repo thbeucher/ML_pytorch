@@ -14,63 +14,65 @@ import numpy as np
 import torchvision.transforms as tvt
 
 from tqdm import tqdm
-from PIL import Image
-from itertools import islice
 from torchvision.io import read_image
-from collections import deque, namedtuple
 from torchvision.utils import make_grid, save_image
 
 sys.path.append('../../../robot/')
-sys.path.append(os.path.abspath(__file__).replace('USS-GL/simple_goal_exps.py', ''))
+sys.path.append(os.path.abspath(__file__).replace('USS-GL/simple_goal_exps2_env1.py', ''))
 
 import models.gan_vae_divers as gvd
 
 
-def tensor_to_img(tensor):
-  grid = make_grid(tensor)
-  ndarr = grid.mul(255).add_(0.5).clamp_(0, 255).permute(1, 2, 0).to("cpu", torch.uint8).numpy()
-  im = Image.fromarray(ndarr)
-  return im
-
-
-def state_to_label(tensor):
-  return tensor.mul(255).add_(0.5).clamp_(0, 255)
-
-
-class NextStatesPredictor(torch.nn.Module):
-  # nspc = next_state_predictor_config
-  BASE_CONFIG = {'vq_emb_size': 32,
-                 'nspc': {'input_size': 32+5, 'hidden_size': 128, 'num_layers': 1, 'bias': True,
-                          'batch_first': False, 'dropout': 0., 'bidirectional': True}}
-  def __init__(self, config):
+class NSP(torch.nn.Module):  # NSP=Next State Predictor
+  def __init__(self):
     super().__init__()
-    self.config = {**NextStatesPredictor.BASE_CONFIG, **config}
-    self.next_state_predictor = torch.nn.GRU(**self.config['nspc'])
-    self.nsp_out = torch.nn.Linear(self.config['nspc']['hidden_size'] * 2, self.config['vq_emb_size'])
+    self.nsp_in_proj = torch.nn.Linear(32*10*10 + 4 + 8 + 8, 512)
+    self.nsp = torch.nn.GRUCell(input_size=512, hidden_size=1024, bias=True)
+    self.nsp_out_proj = torch.nn.Linear(1024, 32*10*10)
+
+    self.action_embedder = torch.nn.Embedding(num_embeddings=5, embedding_dim=4)
+    self.shoulder_embedder = torch.nn.Embedding(num_embeddings=91, embedding_dim=8)
+    self.elbow_embedder = torch.nn.Embedding(num_embeddings=181, embedding_dim=8)
+
+  def forward(self, quantized, action, shoulder_info, elbow_info, hidden=None):
+    action_emb = self.action_embedder(action)  # [B] -> [B, 4]
+    shoulder_emb = self.shoulder_embedder(shoulder_info)  # [B] -> [B, 8]
+    elbow_emb = self.elbow_embedder(elbow_info)  # [B] -> [B, 8]
+    # [B, 32*10*10 + 4 + 8 + 8] -> [B, 512]
+    enriched_quantized = self.nsp_in_proj(torch.cat([quantized.view(action.size(0), -1),
+                                                     action_emb, shoulder_emb, elbow_emb], 1))
+    next_hidden = self.nsp(enriched_quantized, hidden)  # [B, 512] -> [B, 1024]
+    next_quantized = self.nsp_out_proj(next_hidden)  # [B, 1024] -> [B, 32*10*10]
+    return next_quantized.view(quantized.shape), next_hidden  # [B, 32*10*10] -> [B, 32, 10, 10]
+
+
+class VFL(torch.nn.Module):  # VFL=Visual Feature Learner
+  def __init__(self, config={}):
+    super().__init__()
+    self.encoder = gvd.VQVAE2Encoder(config.get('encoder_config', {
+      'batch_norm': True,
+      'down_convs_config': [[[3, 32, 4, 2, 1], torch.nn.ReLU],  # 3*180*180 -> 32*90*90
+                            [[32, 64, 4, 2, 1], torch.nn.ReLU],  # 32*90*90 -> 64*45*45
+                            [[64, 128, 5, 2, 1], torch.nn.ReLU],  # 64*45*45 -> 128*22*22
+                            [[128, 128, 5, 2, 1], torch.nn.ReLU]],  # 128*22*22 -> 128*10*10
+      'residual_convs_config': [{'convs_config': [[[128, 32, 3, 1, 1], torch.nn.ReLU], [[32, 128, 1, 1, 0], torch.nn.ReLU]]},
+                                {'convs_config': [[[128, 32, 3, 1, 1], torch.nn.ReLU], [[32, 128, 1, 1, 0], torch.nn.ReLU]]}]}))
+    self.pre_vq_conv = torch.nn.Conv2d(*config.get('pre_vq_conv_config', [128, 32, 1, 1, 0]))
+    self.vq = gvd.VectorQuantizer(config.get('vq_config', {'n_embeddings': 32, 'embedding_dim': 32}))
+    self.decoder = gvd.VQVAE2Decoder(config.get('decoder_config', {
+      'batch_norm': False,
+      'convs_config': [[32, 128, 3, 1, 1]],
+      # 'residual_convs_config': [],
+      'transpose_convs_config': [[[128, 128, 6, 2, 1], torch.nn.ReLU],
+                                 [[128, 64, 5, 2, 1], torch.nn.ReLU],
+                                 [[64, 32, 4, 2, 1], torch.nn.ReLU],
+                                 [[32, 3, 4, 2, 1], None]]}))
   
-  def forward(self, states, actions, next_states=None):
-    '''
-    parameters:
-      * states : torch.Tensor, shape=[B, C, H, W]
-      * actions : torch.Tensor, shape=[B, n_step_ahead, n_actions]
-      * next_states (optional, default=None) : torch.Tensor, shape=[n_step_ahead, B, C, H, W]
-    '''
-    B, C, H, W = states.shape
-    states = states.permute(2, 3, 0, 1).contiguous().view(-1, B, C)  # [HW, B, C]
-
-    predicted_next_states = []
-    for i in range(actions.size(1)):
-      action = actions[:, i].unsqueeze(0).repeat(states.size(0), 1, 1)
-      predicted_next_state, _ = self.next_state_predictor(torch.cat([states, action], -1))  # [HW, B, hidden_size*2]
-      predicted_next_state = self.nsp_out(predicted_next_state)  # [HW, B, C]
-      predicted_next_states.append(predicted_next_state.permute(1, 2, 0).contiguous().view(B, C, H, W))
-
-      if next_states is None:
-        states = predicted_next_state
-      else:
-        states = next_states[i]
-    
-    return torch.stack(predicted_next_states)  # [n_step_ahead, B, C, H, W]
+  def forward(self, visual_input):  # [B, C, H, W]
+    visual_latent = self.pre_vq_conv(self.encoder(visual_input))  # [B, 3, 180, 180] -> [B, 256, 10, 10] -> [B, 32, 10, 10]
+    loss, quantized, perplexity, encodings = self.vq(visual_latent)
+    next_state = self.decoder(quantized)  # [B, 32, 10, 10] -> [B, 3, 180, 180]
+    return next_state, loss, quantized
 
 
 class ActionPredictor(torch.nn.Module):
@@ -96,46 +98,135 @@ class ActionPredictor(torch.nn.Module):
     return self.predictor(torch.cat([state, next_state], 1))
 
 
-class ReplayMemory(object):
-  def __init__(self, capacity, transition, save_folder='replay_memory/'):
-    self.capacity = capacity
-    self.memory = deque([], maxlen=capacity)
-    self.transition = transition
-    self.save_folder = save_folder
-
-  def push(self, *args):
-    self.memory.append(self.transition(*args))
-
-  def sample(self, batch_size):
-    return random.sample(self.memory, batch_size)
-
-  def __len__(self):
-    return len(self.memory)
+class ActorCriticBaseModel(torch.nn.Module):
+  BASE_CONFIG = {'actor_config': [{'type': torch.nn.Linear,  'params': {'in_features': 3200, 'out_features': 2048}},
+                                  {'type': torch.nn.ReLU,    'params': {}},
+                                  {'type': torch.nn.Linear,  'params': {'in_features': 2048, 'out_features': 1024}},
+                                  {'type': torch.nn.ReLU,    'params': {}},
+                                  {'type': torch.nn.Linear,  'params': {'in_features': 1024, 'out_features': 5}},
+                                  {'type': torch.nn.Softmax, 'params': {'dim': -1}}],
+                 'critic_config': [{'type': torch.nn.Linear,  'params': {'in_features': 3200, 'out_features': 2048}},
+                                   {'type': torch.nn.ReLU,    'params': {}},
+                                   {'type': torch.nn.Linear,  'params': {'in_features': 2048, 'out_features': 1024}},
+                                   {'type': torch.nn.ReLU,    'params': {}},
+                                   {'type': torch.nn.Linear,  'params': {'in_features': 1024, 'out_features': 1}}],
+                 'player': 'actor'}
+  def __init__(self, config={}):
+    super().__init__()
+    self.config = {**ActorCriticBaseModel.BASE_CONFIG, **config}
+    self.network = gvd.sequential_constructor(self.config[f"{self.config['player']}_config"])
   
-  def save(self):
-    if not os.path.isdir(self.save_folder):
-      os.makedirs(self.save_folder)
+  def forward(self, state):
+    out = self.network(state)
+    return torch.distributions.categorical.Categorical(out) if self.config['player'] == 'actor' else out
 
-    ids_taken = set([int(fname.replace('.pt', '')) for fname in os.listdir(self.save_folder)])
-    ids_to_save = []
-    i = 0
-    while len(ids_to_save) < len(self.memory):
-      if i not in ids_taken and i not in ids_to_save:
-        ids_to_save.append(i)
-      else:
-        i += 1
+
+class ActorCritic(torch.nn.Module):
+  def __init__(self, config={}):
+    super().__init__()
+    self.actor = ActorCriticBaseModel()
+    self.critic = ActorCriticBaseModel({'player': 'critic'})
+  
+  def get_action(self, state):
+    dist = self.actor(state)
+    action = dist.sample()
+    action_logprob = dist.log_prob(action)
+    return action.detach(), action_logprob.detach()
+  
+  def evaluate(self, state, action):
+    dist = self.actor(state)
+    action_logprob = dist.log_prob(action)
+    state_value = self.critic(state)
+    return action_logprob, state_value, dist.entropy()
+
+
+class ReplayMemory(object):
+  def __init__(self):
+    self.states = []
+    self.actions = []
+    self.logprobs = []
+    self.rewards = []
+    self.is_terminals = []
+  
+  def push(self, state, action, logprob, reward, is_terminal):
+    self.states.append(state)
+    self.actions.append(action)
+    self.logprobs.append(logprob)
+    self.rewards.append(reward)
+    self.is_terminals.append(is_terminal)
+  
+  def clear(self):
+    self.actions.clear()
+    self.states.clear()
+    self.logprobs.clear()
+    self.rewards.clear()
+    self.is_terminals.clear()
+
+
+class PPOAgent(object):
+  BASE_CONFIG = {'max_ep_len': 60, 'device': torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
+                 'lr_actor': 1e-4, 'lr_critic': 1e-3, 'gamma': 0.99, 'batch_size': 32,
+                 'n_training_timestep': 12000, 'update_timestep': 16, 'n_epochs': 4, 'eps_clip': 0.2}
+  def __init__(self, config={}):
+    self.config = {**PPOAgent.BASE_CONFIG, **config}
+
+    self.memory = ReplayMemory()
+
+    self.policy = ActorCritic().to(self.config['device'])
+    self.optimizer = torch.optim.AdamW([{'params': self.policy.actor.parameters(), 'lr': self.config['lr_actor']},
+                                        {'params': self.policy.critic.parameters(), 'lr': self.config['lr_critic']}])
+
+    self.old_policy = ActorCritic().to(self.config['device'])
+    self.old_policy.load_state_dict(self.policy.state_dict())
+
+    self.mse_criterion = torch.nn.MSELoss()
+  
+  @torch.no_grad()
+  def get_action(self, state):
+    action, action_logprob = self.old_policy.get_action(state)
+    return action, action_logprob
+
+  def learn(self):
+    rewards, discounted_reward = [], 0
+    for reward, is_terminal in zip(reversed(self.memory.rewards), reversed(self.memory.is_terminals)):
+      if is_terminal:
+        discounted_reward = 0
+      discounted_reward = reward + self.config['gamma'] * discounted_reward
+      rewards.insert(0, discounted_reward)
     
-    for i, transition in zip(ids_to_save, self.memory):
-      torch.save(list(transition), os.path.join(self.save_folder, f'{i}.pt'))
+    rewards = torch.FloatTensor(rewards).to(self.config['device'])
+    rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-7)  # Normalizing the rewards
 
-  def load(self):
-    for fname in tqdm(random.sample(os.listdir(self.save_folder), self.capacity)):
-      transition = torch.load(os.path.join(self.save_folder, fname))
-      self.push(*transition)
+    old_states = torch.cat(self.memory.states, dim=0).to(self.config['device'])  # list of [1, 3200] -> [batch_size, 3200]
+    old_actions = torch.cat(self.memory.actions, dim=0).to(self.config['device'])  # [batch_size]
+    old_logprobs = torch.cat(self.memory.logprobs, dim=0).to(self.config['device'])  # [batch_size]
+
+    # Optimize policy for n epochs
+    for _ in range(self.config['n_epochs']):
+      # Evaluating old actions and values
+      logprobs, state_values, dist_entropy = self.policy.evaluate(old_states, old_actions)
+      state_values = state_values.view(-1)
+      # Finding policy ratio = policy/old_policy
+      ratios = torch.exp(logprobs - old_logprobs)
+      # Finding surrogate loss
+      advantages = rewards - state_values
+      surrogate1 = ratios * advantages
+      surrogate2 = torch.clamp(ratios, 1 - self.config['eps_clip'], 1 + self.config['eps_clip']) * advantages
+      # Final loss
+      loss = -torch.min(surrogate1, surrogate2) + 0.5 * self.mse_criterion(state_values, rewards) - 0.01 * dist_entropy
+      # Optimize
+      self.optimizer.zero_grad()
+      loss.mean().backward()
+      self.optimizer.step()
+    
+    # Copy new weights into old policy network
+    self.old_policy.load_state_dict(self.policy.state_dict())
+
+    self.memory.clear()
 
 
 class GlobalTrainer(object):
-  BASE_CONFIG = {'batch_size': 32, 'n_actions': 5, 'vfl_memory_size': 12800, 'nsp_memory_size': 12800,
+  BASE_CONFIG = {'batch_size': 32, 'n_actions': 5, 'memory_size': 6400,
                  'models_folder': 'models/', 'n_training_iterations': 3000}
   def __init__(self, config):
     self.config = {**GlobalTrainer.BASE_CONFIG, **config}
@@ -144,83 +235,19 @@ class GlobalTrainer(object):
 
     self.instanciate_model()
     self.instanciate_optimizers_n_criterions()
+
+    self.memory = []
   
   def instanciate_model(self):
-    # vfl = visual_feature_learner
-    # with batch normalization, it learns faster but creates some artefacts
-    vfl_residualCNN_config = {'layers_config': [
-      {'type': torch.nn.ReLU, 'params': {'inplace': True}},
-      {'type': torch.nn.Conv2d, 'params': {'in_channels': 64, 'out_channels': 16, 'kernel_size': 3, 'stride': 1,
-                                           'padding': 1, 'bias': False}},
-      {'type': torch.nn.ReLU, 'params': {'inplace': True}},
-      {'type': torch.nn.Conv2d, 'params': {'in_channels': 16, 'out_channels': 64, 'kernel_size': 1, 'stride': 1,
-                                           'padding': 0, 'bias': False}}]}
-    vfl_encoder_config = {'layers_config': [
-      # 3*180*180 -> 32*90*90
-      {'type': torch.nn.Conv2d, 'params': {'in_channels': 3, 'out_channels': 32, 'kernel_size': 4, 'stride': 2, 'padding': 1}},
-      {'type': torch.nn.ReLU, 'params': {'inplace': True}},
-      {'type': torch.nn.BatchNorm2d, 'params': {'num_features': 32}},
-      # 32*90*90 -> 64*45*45
-      {'type': torch.nn.Conv2d, 'params': {'in_channels': 32, 'out_channels': 64, 'kernel_size': 4, 'stride': 2, 'padding': 1}},
-      {'type': torch.nn.ReLU, 'params': {'inplace': True}},
-      {'type': torch.nn.BatchNorm2d, 'params': {'num_features': 64}},
-      # 64*45*45 -> 64*22*22
-      {'type': torch.nn.Conv2d, 'params': {'in_channels': 64, 'out_channels': 64, 'kernel_size': 5, 'stride': 2, 'padding': 1}},
-      {'type': torch.nn.ReLU, 'params': {'inplace': True}},
-      {'type': torch.nn.BatchNorm2d, 'params': {'num_features': 64}},
-      # 64*22*22 -> 64*10*10
-      {'type': torch.nn.Conv2d, 'params': {'in_channels': 64, 'out_channels': 64, 'kernel_size': 5, 'stride': 2, 'padding': 1}},
-      {'type': torch.nn.ReLU, 'params': {'inplace': True}},
-      {'type': torch.nn.BatchNorm2d, 'params': {'num_features': 64}},
-      # 64*10*10 -> 64*10*10
-      {'type': torch.nn.Conv2d, 'params': {'in_channels': 64, 'out_channels': 64, 'kernel_size': 3, 'stride': 1, 'padding': 1}},
-      # 2 Residual blocks
-      {'type': gvd.ResidualCNN, 'params': {'config': vfl_residualCNN_config}},
-      {'type': gvd.ResidualCNN, 'params': {'config': vfl_residualCNN_config}},
-      {'type': torch.nn.ReLU, 'params': {'inplace': True}}]}
-    vfl_pre_vq_conv_config = {'in_channels': 64, 'out_channels': 32, 'kernel_size': 1, 'stride': 1, 'padding': 0}
-    vfl_decoder_config = {'layers_config': [
-      # 32*10*10 -> 64*10*10
-      {'type': torch.nn.Conv2d, 'params': {'in_channels': 32, 'out_channels': 64, 'kernel_size': 3, 'stride': 1, 'padding': 1}},
-      # 2 Residual blocks
-      {'type': gvd.ResidualCNN, 'params': {'config': vfl_residualCNN_config}},
-      {'type': gvd.ResidualCNN, 'params': {'config': vfl_residualCNN_config}},
-      # 64*10*10 -> 64*22*22
-      {'type': torch.nn.ConvTranspose2d, 'params': {'in_channels': 64, 'out_channels': 64, 'kernel_size': 6,
-                                                    'stride': 2, 'padding': 1}},
-      {'type': torch.nn.ReLU, 'params': {'inplace': True}},
-      # 64*22*22 -> 64*45*45
-      {'type': torch.nn.ConvTranspose2d, 'params': {'in_channels': 64, 'out_channels': 64, 'kernel_size': 5,
-                                                    'stride': 2, 'padding': 1}},
-      {'type': torch.nn.ReLU, 'params': {'inplace': True}},
-      # 64*45*45 -> 32*90*90
-      {'type': torch.nn.ConvTranspose2d, 'params': {'in_channels': 64, 'out_channels': 32, 'kernel_size': 4,
-                                                    'stride': 2, 'padding': 1}},
-      {'type': torch.nn.ReLU, 'params': {'inplace': True}},
-      # 32*90*90 -> 3*180*180
-      {'type': torch.nn.ConvTranspose2d, 'params': {'in_channels': 32, 'out_channels': 3, 'kernel_size': 4,
-                                                    'stride': 2, 'padding': 1}}]}
-    self.visual_feature_learner = gvd.VQVAEModel({'encoder_config': vfl_encoder_config,
-                                                  'pre_vq_conv_config': vfl_pre_vq_conv_config,
-                                                  'vq_config': {'n_embeddings': 32, 'embedding_dim': 32},
-                                                  'decoder_config': vfl_decoder_config}).to(self.device)
-    self.next_states_predictor = NextStatesPredictor({}).to(self.device)
-    self.action_predictor = ActionPredictor({}).to(self.device)
+    self.vfl_learner = VFL().to(self.device)
+    self.nsp_predictor = NSP().to(self.device)
+    self.ppo_agent = PPOAgent()
   
   def instanciate_optimizers_n_criterions(self):
-    self.transition_vfl = namedtuple('Transition_vfl', ('state', 'action', 'next_state', 'reward'))
-    self.transition_nsp = namedtuple('Transition_msap', ('quantized', 'action', 'next_quantized'))
-
     self.mse_criterion = torch.nn.MSELoss()
-    self.ce_criterion = torch.nn.CrossEntropyLoss()
 
-    self.vfl_optimizer = torch.optim.AdamW(self.visual_feature_learner.parameters())
-    self.vfl_memory = ReplayMemory(self.config['vfl_memory_size'], self.transition_vfl)
-
-    self.nsp_optimizer = torch.optim.AdamW(self.next_states_predictor.parameters())  # nsp = next_state_predictor
-    self.nsp_memory = ReplayMemory(self.config['nsp_memory_size'], self.transition_nsp)
-
-    self.ap_optimizer = torch.optim.AdamW(self.action_predictor.parameters())
+    self.vfl_optimizer = torch.optim.AdamW(self.vfl_learner.parameters())
+    self.nsp_optimizer = torch.optim.AdamW(self.nsp_predictor.parameters())
 
   def get_state(self):
     screen = tvt.functional.to_tensor(env.get_screen())
@@ -249,255 +276,187 @@ class GlobalTrainer(object):
     else:
       print(f"File {save_name} doesn't exist")
   
-  def fill_visual_feature_learner_memory(self, strategy='random', load=False, save=False):
-    ori_screen = env.screen
-    env.screen = pygame.Surface(env.config['window_size'])
+  def fill_vfl_memory(self):
+    n_step = 0
+    self.memory = []
+    for _ in tqdm(range(self.config['memory_size'])):
+      env.render()
 
-    print('Fill Visual Feature Learner Memory...')
-    if strategy == 'random':
-      if load and os.path.isdir(self.vfl_memory.save_folder)\
-              and len(os.listdir(self.vfl_memory.save_folder)) >= self.config['vfl_memory_size']:
-        print(f'-> load transitions from folder {self.vfl_memory.save_folder}')
-        self.vfl_memory.load()
-      else:
-        for _ in tqdm(range(self.config['vfl_memory_size'])):
-          env.reset()
-          env.render(mode='robot')
+      state = self.get_state()
+      action = random.randint(0, 4)
 
-          state = self.get_state()
-          action = random.randint(0, 4)
+      joints_angle, reward, done, _ = env.step(action)
+      shoulder, elbow = map(lambda x: round(x), joints_angle)
 
-          env.step(action)
-          env.render(mode='robot')
+      env.render()
+      next_state = self.get_state()
 
-          next_state = self.get_state()
-          self.vfl_memory.push(state, torch.LongTensor([action]), next_state, 0)
-        
-        if save:
-          self.vfl_memory.save()
+      self.memory.append([state, next_state, action, shoulder, elbow])
+      n_step += 1
 
-    env.screen = ori_screen
-    global memory_filling_finished
-    memory_filling_finished = True
-  
-  def train_visual_feature_learner(self, n_iterations=1000, plot_progress=True, save_model=True, load_memory=True):
-    self.fill_visual_feature_learner_memory(load=load_memory)
-    print(f'Training Visual Feature Learner for {n_iterations} iterations...')
-
-    with tqdm(total=n_iterations) as t:
-      for i in range(n_iterations):
-        transitions = self.vfl_memory.sample(self.config['batch_size'])
-        batch = self.transition_vfl(*zip(*transitions))
-        states_batch = torch.stack(batch.state).to(self.device)
-        vq_loss, state_rec, perplexity, encodings, quantized = self.visual_feature_learner(states_batch)
-
-        self.vfl_optimizer.zero_grad()
-        rec_loss = self.mse_criterion(state_rec, states_batch)
-        loss = vq_loss + rec_loss
-        loss.backward()
-        self.vfl_optimizer.step()
-
-        if plot_progress and (i % 50 == 0 or i == (n_iterations-1)):
-          vis.image(make_grid(states_batch[:6].cpu(), nrow=3), win='state', opts={'title': 'state'})
-
-          # Strangely, it plots black image so an hack is to save the image first then load it to pass it to visdom
-          # vis.image(make_grid(state_rec[:6].cpu(), nrow=3), win='rec', opts={'title': 'reconstructed'})
-          save_image(make_grid(state_rec[:6].cpu(), nrow=3), 'test_make_grid.png')
-          vis.image(read_image('test_make_grid.png'), win='rec', opts={'title': 'reconstructed'})
-
-          self.plot_loss(loss.item(), i)
-        
-        t.set_description(f'Loss={loss.item():.3f}')
-        t.update(1)
-    
-    if save_model:
-      self.save_model(self.visual_feature_learner, save_name='visual_feature_learner.pt')
-  
-  def online_visual_feature_learner_training(self, n_iterations=10000, plot_progress=True, save_model=True):
-    ori_screen = env.screen
-    env.screen = pygame.Surface(env.config['window_size'])
-
-    print(f'Online Training of Visual Feature Learner for {n_iterations} iterations...')
-    with tqdm(total=n_iterations) as t:
-      for i in range(n_iterations):
+      if done or n_step == 60:
         env.reset()
-        env.render(mode='robot')
+        n_step = 0
 
-        state = self.get_state().unsqueeze(0).to(self.device)
-        action = random.randint(0, 4)
+  def train_vfl_learner(self, n_iterations=3000, plot_progress=True, save_model=True):
+    print('Fill vfl_memory...')
+    self.fill_vfl_memory()
 
-        env.step(action)
-        env.render(mode='robot')
+    print(f'Train vfl_learner for {n_iterations} iterations...')
+    with tqdm(total=n_iterations) as t:
+      for i in range(n_iterations):
+        states, _, _, _, _ = zip(*random.sample(self.memory, self.config['batch_size']))
+        states = torch.stack(states, 0).to(self.device)
 
-        vq_loss, state_rec, perplexity, encodings, quantized = self.visual_feature_learner(state)
+        states_rec, vq_loss, _ = self.vfl_learner(states)
 
         self.vfl_optimizer.zero_grad()
-        rec_loss = self.mse_criterion(state_rec, state)
+        rec_loss = self.mse_criterion(states_rec, states)
         loss = vq_loss + rec_loss
         loss.backward()
         self.vfl_optimizer.step()
 
         if plot_progress and (i % 50 == 0 or i == (n_iterations-1)):
-          vis.image(make_grid(state.cpu(), nrow=1), win='state', opts={'title': 'state'})
+          vis.image(make_grid(states[:6].cpu(), nrow=3), win='state', opts={'title': 'state'})
 
           # Strangely, it plots black image so an hack is to save the image first then load it to pass it to visdom
           # vis.image(make_grid(state_rec[:6].cpu(), nrow=3), win='rec', opts={'title': 'reconstructed'})
-          save_image(make_grid(state_rec.cpu(), nrow=1), 'test_make_grid.png')
+          save_image(make_grid(states_rec[:6].cpu(), nrow=3), 'test_make_grid.png')
           vis.image(read_image('test_make_grid.png'), win='rec', opts={'title': 'reconstructed'})
 
-          self.plot_loss(loss.item(), i)
+          self.plot_loss(loss.item(), i, win='vfl_loss', title='VFL loss evolution')
         
         t.set_description(f'Loss={loss.item():.3f}')
         t.update(1)
     
     if save_model:
-      self.save_model(self.visual_feature_learner, save_name='visual_feature_learner.pt')
-    
-    env.screen = ori_screen
+      self.save_model(self.vfl_learner, save_name='visual_feature_learner.pt')
   
   @torch.no_grad()
-  def fill_nsp_memory(self, n_step_ahead=1):
-    if n_step_ahead == 1:
-      if len(self.vfl_memory) == 0:
-        self.fill_visual_feature_learner_memory()
-      print('Fill Next States Predictor Memory...')
-      for _ in tqdm(range(self.config['nsp_memory_size']//self.config['batch_size'])):
-        transitions = self.vfl_memory.sample(self.config['batch_size'])
-        batch = self.transition_vfl(*zip(*transitions))
+  def fill_nsp_memory(self):
+    if len(self.memory) < self.config['memory_size']:
+      self.fill_vfl_memory()
 
-        states_batch = torch.stack(batch.state).to(self.device)  # [B, C=3, H=180, W=180]
-        _, _, _, _, quantized = self.visual_feature_learner(states_batch)  # [B, C=32, H=10, W=10]
+    for i in tqdm(range(0, len(self.memory), self.config['batch_size'])):
+      states, next_states, actions, shoulders, elbows = zip(*self.memory[i:i+self.config['batch_size']])
 
-        next_states_batch = torch.stack(batch.next_state).to(self.device) # [B, C=3, H=180, W=180]
-        _, _, _, _, next_quantized = self.visual_feature_learner(next_states_batch)  # [B, C=32, H=10, W=10]
-        actions_batch = torch.nn.functional.one_hot(torch.cat(batch.action), self.config['n_actions']).unsqueeze(1)  # [B, 1, N_a]
+      states = torch.stack(states, 0).to(self.device)
+      next_states = torch.stack(next_states).to(self.device)
 
-        for q, a, nq in zip(quantized.cpu(), actions_batch, next_quantized.cpu()):
-          self.nsp_memory.push(q, a, nq.unsqueeze(0))
-    else:
-      pass
+      actions = torch.LongTensor(actions)
+      shoulders = torch.LongTensor(shoulders)
+      elbows = torch.LongTensor(elbows)
 
-  def train_next_states_predictor(self, n_iterations=1000, plot_progress=True, save_model=True, n_step_ahead=1):
-    self.fill_nsp_memory(n_step_ahead=n_step_ahead)
-    print(f'Training Next States Predictor for {n_iterations} iterations...')
+      _, _, quantized = self.vfl_learner(states)
+      _, _, next_quantized = self.vfl_learner(next_states)
 
+      for j, (s, ns, q, nq, a, sh, e) in enumerate(zip(states.cpu(), next_states.cpu(), quantized.cpu(),
+                                                       next_quantized.cpu(), actions, shoulders, elbows)):
+        self.memory[i+j] = [s, ns, q, nq, a, sh, e]
+
+  def train_nsp_predictor(self, n_iterations=3000, plot_progress=True, save_model=True):
+    print('Fill nsp_memory...')
+    self.fill_nsp_memory()
+
+    print(f'Train nsp_predictor for {n_iterations} iterations...')
+    i, hidden = 0, None
     with tqdm(total=n_iterations) as t:
-      for i in range(n_iterations):
-        transitions = self.nsp_memory.sample(self.config['batch_size'])
-        batch = self.transition_nsp(*zip(*transitions))
-        quantized_batch = torch.stack(batch.quantized).to(self.device)  # [B, C=32, H=10, W=10]
-        action_batch = torch.stack(batch.action).to(self.device)  # [B, n_step_ahead=1, n_actions=5]
-        next_quantized_batch = torch.stack(batch.next_quantized, 1).to(self.device)  # [n_step_ahead=1, B, C=32, H=10, W=10]
+      for _ in range(n_iterations):
+        _, next_states, quantized, next_quantized, actions, shoulders, elbows = zip(*self.memory[i:i+self.config['batch_size']])
 
-        # [n_step_ahead=1, B, C=32, H=10, W=10]
-        predicted_quantized = self.next_states_predictor(quantized_batch, action_batch, next_states=next_quantized_batch)
-        
+        next_states = torch.stack(next_states, 0)
+        quantized = torch.stack(quantized, 0).to(self.device)
+        next_quantized = torch.stack(next_quantized, 0).to(self.device)
+        actions = torch.stack(actions, 0).to(self.device)
+        shoulders = torch.stack(shoulders, 0).to(self.device)
+        elbows = torch.stack(elbows, 0).to(self.device)
+
+        pred_next_quantized, hidden = self.nsp_predictor(quantized, actions, shoulders, elbows, hidden=hidden)
+        hidden = hidden.detach()
+
         self.nsp_optimizer.zero_grad()
-        rec_loss = self.mse_criterion(predicted_quantized.view(-1, *quantized_batch.shape[1:]),
-                                      next_quantized_batch.view(-1, *quantized_batch.shape[1:]))
-        rec_loss.backward()
+        loss = self.mse_criterion(pred_next_quantized, next_quantized)
+        loss.backward()
         self.nsp_optimizer.step()
 
         if plot_progress and (i % 50 == 0 or i == (n_iterations-1)):
-          self.plot_loss(rec_loss.item(), i, win='rec_quantized_loss', title='rec_quantized_loss evolution')
+          with torch.no_grad():
+            next_state_rec = self.vfl_learner.decoder(next_quantized)
+            pred_next_state_rec = self.vfl_learner.decoder(pred_next_quantized)
 
-        t.set_description(f'Loss={rec_loss.item():.3f}')
-        t.update(1)
-    
-    if save_model:
-      self.save_model(self.next_states_predictor, save_name='next_states_predictor.pt')
-  
-  @torch.no_grad()
-  def eval_action_predictor(self, n_samples=40):
-    preds, targets = [], []
-    for i in range(0, self.config['batch_size']*n_samples, self.config['batch_size']):
-      transitions = list(islice(self.nsp_memory.memory, i, i+self.config['batch_size']))
-      batch = self.transition_nsp(*zip(*transitions))
-      quantized_batch = torch.stack(batch.quantized).to(self.device)
-      action_batch = torch.stack(batch.action).to(self.device)
-      next_quantized_batch = torch.stack(batch.next_quantized, 1).to(self.device)
-      predicted_action = self.action_predictor(quantized_batch, next_quantized_batch[0])
+          vis.image(make_grid(next_states[:3], nrow=3), win='next_state', opts={'title': 'next_state'})
 
-      preds += predicted_action.argmax(-1).cpu().tolist()
-      targets += action_batch[:, 0].argmax(-1).cpu().tolist()
-    # print(f'Accuracy = {sum([1 for p, t in zip(preds, targets) if p == t])/len(preds):.3f}')
-    return sum([1 for p, t in zip(preds, targets) if p == t])/len(preds)
+          save_image(make_grid(next_state_rec[:3].cpu(), nrow=3), 'test_make_grid1.png')
+          vis.image(read_image('test_make_grid1.png'), win='next_state_rec', opts={'title': 'next_state_rec'})
 
-  def train_action_predictor(self, n_iterations=1000, plot_progress=True, save_model=True):
-    if len(self.nsp_memory) < GlobalTrainer.BASE_CONFIG['nsp_memory_size']:
-      self.fill_nsp_memory()
-    
-    transitions = self.vfl_memory.sample(self.config['batch_size'])
-    batch = self.transition_vfl(*zip(*transitions))
-    states_batch = torch.stack(batch.state).to(self.device)
-    vq_loss, state_rec, perplexity, encodings, quantized = self.visual_feature_learner(states_batch)
-    vis.image(make_grid(states_batch[:6].cpu(), nrow=3), win='state', opts={'title': 'state'})
-    save_image(make_grid(state_rec[:6].cpu(), nrow=3), 'test_make_grid.png')
-    vis.image(read_image('test_make_grid.png'), win='rec', opts={'title': 'reconstructed'})
-    
-    print(f'Training Action Predictor for {n_iterations} iterations...')
-    with tqdm(total=n_iterations) as t:
-      for i in range(n_iterations):
-        transitions = self.nsp_memory.sample(self.config['batch_size'])
-        batch = self.transition_nsp(*zip(*transitions))
-        quantized_batch = torch.stack(batch.quantized).to(self.device)  # [B, C=32, H=10, W=10]
-        action_batch = torch.stack(batch.action).to(self.device)  # [B, n_step_ahead=1, n_actions=5]
-        next_quantized_batch = torch.stack(batch.next_quantized, 1).to(self.device)  # [n_step_ahead=1, B, C=32, H=10, W=10]
+          save_image(make_grid(pred_next_state_rec[:3].cpu(), nrow=3), 'test_make_grid2.png')
+          vis.image(read_image('test_make_grid2.png'), win='pred_next_state_rec', opts={'title': 'pred_next_state_rec'})
 
-        predicted_action = self.action_predictor(quantized_batch, next_quantized_batch[0])
-
-        self.ap_optimizer.zero_grad()
-        loss = self.ce_criterion(predicted_action, action_batch[:, 0].float().argmax(-1))
-        loss.backward()
-        self.ap_optimizer.step()
-
-        if plot_progress:
-          if i % 50 == 0 or i == (n_iterations-1):
-            self.plot_loss(loss.item(), i, win='ap_loss', title='action_predictor_loss evolution')
-
-            acc = self.eval_action_predictor()
-            self.plot_loss(acc, i, win='acc_action_predictor', title='action_predictor accuracy')
+          self.plot_loss(loss.item(), i, win='nsp_loss', title='NSP loss evolution')
 
         t.set_description(f'Loss={loss.item():.3f}')
         t.update(1)
-      
+
+        i += 1
+        if i + self.config['batch_size'] >= len(self.memory):
+          i = 0
+    
     if save_model:
-      self.save_model(self.action_predictor, save_name='action_predictor.pt')
+      self.save_model(self.nsp_predictor, save_name='next_state_predictor.pt')
   
-  def train(self, force_retrain=False, load_vfl_memory=True):
-    if not os.path.isfile(os.path.join(self.config['models_folder'], 'visual_feature_learner.pt')):
-      self.train_visual_feature_learner(n_iterations=self.config['n_training_iterations'], load_memory=load_vfl_memory)
-    else:
-      print('Loading Visual Feature Learner model...')
-      self.load_model(self.visual_feature_learner, save_name='visual_feature_learner.pt')
+  def train_policy_network(self, save_model=True):
+    for i in tqdm(range(1, self.ppo_agent.config['n_training_timestep'] + 1)):
+      env.reset(only_target=True)
+      env.render()
+      state = self.get_state().unsqueeze(0).to(self.device)  # [1, 3, 180, 180]
 
-      if force_retrain:
-        self.train_visual_feature_learner(n_iterations=self.config['n_training_iterations'], load_memory=load_vfl_memory)
+      cum_reward = 0
+      for t in range(1, self.ppo_agent.config['max_ep_len'] + 1):
+        with torch.no_grad():
+          _, _, quantized = self.vfl_learner(state)  # [1, 32, 10, 10]
+        quantized = quantized.view(1, -1)  # [1, 3200] -> todo=add body_info
+
+        action, action_log_prob = self.ppo_agent.get_action(quantized)
+        body_info, reward, done, _ = env.step(action.item())
+
+        self.ppo_agent.memory.push(quantized.detach().cpu(), action.cpu(), action_log_prob.cpu(), reward, done)
+
+        env.render()
+        state = self.get_state().unsqueeze(0).to(self.device)
+
+        cum_reward += reward
+
+        if done:
+          break
+      
+      self.plot_loss(cum_reward / t, i-1, win='ep_rewards', title='Episodic rewards')
+      
+      if i % self.ppo_agent.config['update_timestep'] == 0:
+        self.ppo_agent.learn()
     
-    if not os.path.isfile(os.path.join(self.config['models_folder'], 'next_states_predictor.pt')):
-      self.train_next_states_predictor(n_iterations=self.config['n_training_iterations'])
+    if save_model:
+      self.save_model(self.ppo_agent.policy, save_name='policy_network.pt')
+
+  def train_routine(self, force_retrain, model_name, model_train_fn, model):
+    if not os.path.isfile(os.path.join(self.config['models_folder'], model_name)):
+      model_train_fn(n_iterations=self.config['n_training_iterations'])
     else:
-      print('Loading Next States Predictor model...')
-      self.load_model(self.next_states_predictor, save_name='next_states_predictor.pt')
+      print(f'Loading {model_name} model...')
+      self.load_model(model, save_name=model_name)
 
       if force_retrain:
-        self.train_next_states_predictor(n_iterations=self.config['n_training_iterations'])
-    
-    if not os.path.isfile(os.path.join(self.config['models_folder'], 'action_predictor.pt')):
-      self.train_action_predictor(n_iterations=self.config['n_training_iterations'])
-    else:
-      print('Loading Next States Predictor model...')
-      self.load_model(self.action_predictor, save_name='action_predictor.pt')
+        model_train_fn(n_iterations=self.config['n_training_iterations'])
 
-      if force_retrain:
-        self.train_action_predictor(n_iterations=self.config['n_training_iterations'])
+  def train(self, force_retrain=False):
+    self.train_routine(force_retrain, 'visual_feature_learner.pt', self.train_vfl_learner, self.vfl_learner)
+    self.train_routine(force_retrain, 'next_state_predictor.pt', self.train_nsp_predictor, self.nsp_predictor)
+    self.train_routine(force_retrain, 'policy_network.pt', self.train_policy_network, self.ppo_agent.policy)
 
 
 def experiment(args):
   gt = GlobalTrainer({})
-  print(f'visual_feature_learner n_parameters={sum(p.numel() for p in gt.visual_feature_learner.parameters() if p.requires_grad):,}')
-  print(f'next_states_predictor n_parameters={sum(p.numel() for p in gt.next_states_predictor.parameters() if p.requires_grad):,}')
-  print(f'action_predictor n_parameters={sum(p.numel() for p in gt.action_predictor.parameters() if p.requires_grad):,}')
+  print(f'vfl_learner -> n_parameters={sum(p.numel() for p in gt.vfl_learner.parameters() if p.requires_grad):,}')
+  print(f'nsp_predictor -> n_parameters={sum(p.numel() for p in gt.nsp_predictor.parameters() if p.requires_grad):,}')
   gt.train(force_retrain=args.force_retrain, load_vfl_memory=args.load_vfl_memory)
 
 
@@ -515,7 +474,6 @@ if __name__ == '__main__':
                                       description='Experiment on 2-DOF robot arm that learn to reach a target point')
   argparser.add_argument('--log_file', default='_tmp_simple_goal_exps_logs.txt', type=str)
   argparser.add_argument('--force_retrain', default=False, type=ast.literal_eval)
-  argparser.add_argument('--load_vfl_memory', default=False, type=ast.literal_eval)
   args = argparser.parse_args()
 
   logging.basicConfig(filename=args.log_file, filemode='a', level=logging.INFO,
@@ -529,120 +487,19 @@ if __name__ == '__main__':
   # env.get_screen() = np.ndarray = [400, 400, 3]
 
   # MAIN LOOP SIMULATION
+  env = gym.make('gym_robot_arm:robot-arm-v1')
+  env.reset()
+  env.render()
+
+  gt = GlobalTrainer({})
+
+  print(f'vfl_learner -> n_parameters={sum(p.numel() for p in gt.vfl_learner.parameters() if p.requires_grad):,}')
+  print(f'nsp_predictor -> n_parameters={sum(p.numel() for p in gt.nsp_predictor.parameters() if p.requires_grad):,}')
+
+  gt.train(force_retrain=args.force_retrain)
+
+  env.close()
+
   env = gym.make('gym_robot_arm:robot-arm-v0')
   env.render()
   env.reset()
-
-  done = False
-  act = False
-  memory_filling_finished = False
-
-  th = threading.Thread(target=experiment, args=(args,))
-  th.start()
-
-  while not done:
-    if memory_filling_finished:
-      for event in pygame.event.get():
-        if event.type == pygame.QUIT:
-          done = True
-        elif event.type == pygame.KEYDOWN:
-          if event.key == pygame.K_a:
-            env.step(1)  # INC_J1
-            act = True
-          elif event.key == pygame.K_z:
-            env.step(2)  # DEC_J1
-            act = True
-          elif event.key == pygame.K_o:
-            env.step(3)  # INC_J2
-            act = True
-          elif event.key == pygame.K_p:
-            env.step(4)  # DEC_J2
-            act = True
-      
-      if act:
-        print('Action taken!')
-        act = False
-      
-      env.render()
-
-  env.close()
-  th.join()
-
-
-## LEGACY ##
-# def joint_train_vfl_nsp(self, n_iterations=1000, plot_progress=True, save_model=True, load_memory=True, n_step_ahead=1):
-#   self.fill_visual_feature_learner_memory(load=load_memory)
-#   print(f'Training Visual Feature Learner for {n_iterations} iterations...')
-
-#   with tqdm(total=n_iterations) as t:
-#     for i in range(n_iterations):
-#       transitions = self.vfl_memory.sample(self.config['batch_size'])
-#       batch = self.transition_vfl(*zip(*transitions))
-#       states_batch = torch.stack(batch.state).to(self.device)
-#       vq_loss, state_rec, perplexity, encodings, quantized = self.visual_feature_learner(states_batch)
-
-#       action_batch = torch.nn.functional.one_hot(torch.cat(batch.action), self.config['n_actions']).unsqueeze(1)
-#       predicted_quantized = self.next_states_predictor(quantized, action_batch.to(self.device))
-#       next_state_rec = self.visual_feature_learner.decoder(predicted_quantized.squeeze(0))
-
-#       next_states_batch = torch.stack(batch.next_state).to(self.device)
-
-#       self.vfl_optimizer.zero_grad()
-#       self.nsp_optimizer.zero_grad()
-
-#       state_rec_loss = self.mse_criterion(state_rec, states_batch)
-#       next_state_rec_loss = self.mse_criterion(next_state_rec, next_states_batch)
-#       loss = vq_loss + state_rec_loss + next_state_rec_loss
-#       loss.backward()
-
-#       self.vfl_optimizer.step()
-#       self.nsp_optimizer.step()
-
-#       if plot_progress and (i % 50 == 0 or i == (n_iterations-1)):
-#         vis.image(make_grid(states_batch[:6].cpu(), nrow=3), win='state', opts={'title': 'state'})
-#         save_image(make_grid(state_rec[:6].cpu(), nrow=3), 'test_make_grid.png')
-#         vis.image(read_image('test_make_grid.png'), win='rec', opts={'title': 'reconstructed'})
-
-#         self.plot_loss(loss.item(), i)
-#         self.plot_loss(state_rec_loss.item(), i, win='s_rec_loss', title='state_rec_loss evolution')
-#         self.plot_loss(next_state_rec_loss.item(), i, win='ns_rec_loss', title='next_state_rec_loss evolution')
-      
-#       t.set_description(f'Loss={loss.item():.3f}')
-#       t.update(1)
-  
-#   if save_model:
-#     self.save_model(self.visual_feature_learner, save_name='visual_feature_learner.pt')
-#     self.save_model(self.next_states_predictor, save_name='next_states_predictor.pt')
-
-
-# VQ-VAE-2
-# self.visual_feature_learner = gvd.VQVAE2({
-#       'encoder_bottom_config': {
-#           'batch_norm': True,
-#           'down_convs_config': [[[3, 32, 4, 2, 1], torch.nn.ReLU],  # 3*180*180 -> 32*90*90
-#                                 [[32, 64, 4, 2, 1], torch.nn.ReLU],  # 32*90*90 -> 64*45*45
-#                                 [[64, 128, 5, 2, 1], torch.nn.ReLU],  # 64*45*45 -> 128*22*22
-#                                 [[128, 256, 5, 2, 1], torch.nn.ReLU]],  # 128*22*22 -> 256*10*10
-#           'residual_convs_config': [{'convs_config': [[[256, 64, 3, 1, 1], torch.nn.ReLU], [[64, 256, 1, 1, 0], torch.nn.ReLU]]},
-#                                     {'convs_config': [[[256, 64, 3, 1, 1], torch.nn.ReLU], [[64, 256, 1, 1, 0], torch.nn.ReLU]]}]},
-#       'encoder_top_config': {
-#           'batch_norm': True,
-#           'down_convs_config': [[[256, 128, 3, 2, 1], torch.nn.ReLU],  # 256*10*10 -> 128*5*5
-#                                 [[128, 256, 3, 1, 1], torch.nn.ReLU]],
-#           'residual_convs_config': [{'convs_config': [[[256, 64, 3, 1, 1], torch.nn.ReLU], [[64, 256, 1, 1, 0], torch.nn.ReLU]]},
-#                                     {'convs_config': [[[256, 64, 3, 1, 1], torch.nn.ReLU], [[64, 256, 1, 1, 0], torch.nn.ReLU]]}]},
-#       'pre_vq_top_config': [256, 32, 1, 1, 0],
-#       'pre_vq_bottom_config': [256+32, 32, 1, 1, 0],
-#       'vq_top_config': {'n_embeddings': 64, 'embedding_dim': 32},
-#       'vq_bottom_config': {'n_embeddings': 32, 'embedding_dim': 32},
-#       'decoder_top_config': {'convs_config': [[32, 128, 3, 1, 1]],
-#                             #  'residual_convs_config': [],
-#                              'transpose_convs_config': [[[128, 32, 4, 2, 1], torch.nn.ReLU]]},
-#       'decoder_bottom_config': {'convs_config': [[64, 128, 3, 1, 1]],
-#                                 # 'residual_convs_config': [],
-#                                 'transpose_convs_config': [[[128, 256, 6, 2, 1], torch.nn.ReLU],
-#                                                            [[256, 128, 5, 2, 1], torch.nn.ReLU],
-#                                                            [[128, 64, 4, 2, 1], torch.nn.ReLU],
-#                                                            [[64, 3, 4, 2, 1], None]]},
-#       'upsample_top_config': [32, 32, 4, 2, 1]
-#       }).to(self.device)
