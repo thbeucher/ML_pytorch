@@ -28,6 +28,15 @@ def load_model(model, models_folder='models/', save_name='global_trainer_model.p
     print(f"File {save_name} doesn't exist")
 
 
+def msg_if_not_exist(save_path):
+  if os.path.isfile(save_path):
+    print(f'Loading {save_path}...')
+    return True
+  else:
+    print(f'No model named {save_path} found...')
+    return False
+
+
 def plot_metric(vis, metric, iteration, win='loss', title='loss evolution', ylabel='loss', xlabel='iteration'):
   if iteration == 0:
     vis.line(X=np.array([iteration, iteration]), Y=np.array([metric, metric]), win=win,
