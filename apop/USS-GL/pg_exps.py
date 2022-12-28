@@ -102,7 +102,7 @@ def train(game_view=False, lr=1e-3, max_game_timestep=200, n_game_scoring_averag
 
     if target_reached or current_game_timestep > max_game_timestep:
       if target_reached:  # update policy only if the target is reached as there is no reward before that
-        pgu.reinforce_update(rewards, log_probs, optimizer)
+        pgu.reinforce_update(rewards, log_probs, optimizer, clear_data=False)
 
         time_to_target_memory.append(current_game_timestep / dist_eff_target)
 
@@ -120,6 +120,40 @@ def train(game_view=False, lr=1e-3, max_game_timestep=200, n_game_scoring_averag
       env.reset(to_reset='target')
       dist_eff_target = env.current_dist
       current_game_timestep = 0
+      rewards.clear()
+      log_probs.clear()
+  
+  env.close()
+
+
+@torch.no_grad()
+def run_model(save_name='models/toyModel.pt', max_game_timestep=200):
+  env, render_mode = get_game_env(game_view=True)
+
+  model = TOYModel()
+  u.load_model(model.model, save_name)
+
+  state = (torch.FloatTensor(env.joints_angle + list(env.target_pos)) - MINS) / MAXS_MINS
+
+  quit_game = False
+  current_game_timestep = 0
+
+  while not quit_game:
+    for event in pygame.event.get():
+      if event.type == pygame.QUIT:
+        quit_game = True
+    
+    action, _ = model.select_action(state)
+    joints_angle, _, target_reached, _ = env.step(action)
+
+    current_game_timestep += 1
+    env.render(mode=render_mode)
+
+    state = (torch.FloatTensor(joints_angle + list(env.target_pos)) - MINS) / MAXS_MINS
+
+    if target_reached or current_game_timestep > max_game_timestep:
+      env.reset(to_reset='target')
+      current_game_timestep = 0
   
   env.close()
 
@@ -132,6 +166,7 @@ if __name__ == '__main__':
   argparser.add_argument('--game_view', default=False, type=ast.literal_eval)
   argparser.add_argument('--save_model', default=True, type=ast.literal_eval)
   argparser.add_argument('--load_model', default=True, type=ast.literal_eval)
+  argparser.add_argument('--save_name', default='models/toyModel.pt', type=str)
   args = argparser.parse_args()
 
   logging.basicConfig(filename=args.log_file, filemode='a', level=logging.INFO,
@@ -139,4 +174,9 @@ if __name__ == '__main__':
   
   rep = input('Start training? (y or n): ')
   if rep == 'y':
-    train(game_view=args.game_view, use_visdom=args.use_visdom, load_model=args.load_model, save_model=args.save_model)
+    train(game_view=args.game_view, use_visdom=args.use_visdom, load_model=args.load_model, save_model=args.save_model,
+          save_name=args.save_name)
+  
+  rep = input('Run saved model? (y or n): ')
+  if rep == 'y':
+    run_model(save_name=args.save_name)
