@@ -81,7 +81,7 @@ def train(game_view=False, lr=1e-3, max_game_timestep=200, n_game_scoring_averag
   current_game_timestep = 0
   time_to_target_memory = []
 
-  while not quit_game:
+  while not quit_game:  #TODO add stopping criteria if performance stop improving
     # If game window is open, catch closing event
     if game_view:
       for event in pygame.event.get():
@@ -106,10 +106,13 @@ def train(game_view=False, lr=1e-3, max_game_timestep=200, n_game_scoring_averag
 
         time_to_target_memory.append(current_game_timestep / dist_eff_target)
 
-        if use_visdom and len(time_to_target_memory) == n_game_scoring_average:
+        if len(time_to_target_memory) == n_game_scoring_average:
           average_ttt = np.mean(time_to_target_memory)
-          vp.line_plot('Time to Target', 'Train', 'Policy Performance', plot_iter, average_ttt)
-          logging.info(f'Episode {plot_iter}(x100) | Average time-to-target={average_ttt:.3f}')
+
+          if use_visdom:
+            vp.line_plot('Time to Target', 'Train', 'Policy Performance', plot_iter, average_ttt)
+
+          logging.info(f'Episode {plot_iter+1}(x{n_game_scoring_average}) | Average time-to-target={average_ttt:.3f}')
           time_to_target_memory.clear()
           plot_iter += 1
 
@@ -167,6 +170,7 @@ if __name__ == '__main__':
   argparser.add_argument('--save_model', default=True, type=ast.literal_eval)
   argparser.add_argument('--load_model', default=True, type=ast.literal_eval)
   argparser.add_argument('--save_name', default='models/toyModel.pt', type=str)
+  argparser.add_argument('--seed', default=42, type=int)
   args = argparser.parse_args()
 
   logging.basicConfig(filename=args.log_file, filemode='a', level=logging.INFO,
@@ -174,6 +178,8 @@ if __name__ == '__main__':
   
   rep = input('Start training? (y or n): ')
   if rep == 'y':
+    torch.manual_seed(args.seed)  # seeding for reproducibility
+    u.dump_argparser_parameters(args)
     train(game_view=args.game_view, use_visdom=args.use_visdom, load_model=args.load_model, save_model=args.save_model,
           save_name=args.save_name)
   
