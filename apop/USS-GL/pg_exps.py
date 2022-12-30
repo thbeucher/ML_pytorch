@@ -4,6 +4,7 @@ import gym
 import sys
 import torch
 import pygame
+import random
 import logging
 import argparse
 import numpy as np
@@ -39,7 +40,6 @@ def get_game_env(game_view=False):
 
 class TOYModel(object):
   def __init__(self):
-    super().__init__()
     self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     self.model = torch.nn.Sequential(torch.nn.Linear(4, 200),
                                      torch.nn.ReLU(inplace=True),
@@ -47,14 +47,55 @@ class TOYModel(object):
                                      torch.nn.Softmax(-1)).to(self.device)
   
   def select_action(self, state):
-    probs = self.model(state)
-    distri = torch.distributions.Categorical(probs)
+    action_probs = self.model(state)
+    distri = torch.distributions.Categorical(action_probs)
     action = distri.sample()
-    return action.item(), distri.log_prob(action)
+    action_logprob = distri.log_prob(action)
+    return action.item(), action_logprob, distri.entropy()
 
 
-def train(game_view=False, lr=1e-3, max_game_timestep=200, n_game_scoring_average=100, use_visdom=False,
-          load_model=True, save_model=True, save_name='models/toyModel.pt'):
+class TOYActorCritic(torch.nn.Module):
+  def __init__(self):
+    super().__init__()
+    self.shared = torch.nn.Linear(4, 200)
+    self.actor = torch.nn.Linear(200, 5)
+    self.critic = torch.nn.Linear(200, 1)
+  
+  def forward(self, state, critic=False):
+    out = self.shared(state)
+    action_probs = self.actor(out)
+    state_values = self.critic(out) if critic else None
+    return action_probs, state_values
+
+
+class TOYACModel(object):
+  def __init__(self):
+    self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    self.model = TOYActorCritic().to(self.device)
+  
+  def act(self, state):
+    action_probs = self.model(state)
+    distri = torch.distributions.Categorical(action_probs)
+    action = distri.sample()
+    action_logprob = distri.log_prob(action)
+    return action.item(), action_logprob.detach()
+
+  def evaluate(self, state, action):
+    action_probs, state_values = self.model(state, critic=True)
+    distri = torch.distributions.Categorical(action_probs)
+    action_logprob = distri.log_prob(action)
+    return action_logprob, state_values, distri.entropy()
+  
+  def select_action(self, state):
+    action_probs, state_values = self.model(state, critic=True)
+    distri = torch.distributions.Categorical(action_probs)
+    action = distri.sample()
+    action_logprob = distri.log_prob(action)
+    return action.item(), action_logprob, state_values, distri.entropy()
+
+
+def train_reinforce(game_view=False, lr=1e-3, max_game_timestep=200, n_game_scoring_average=100, use_visdom=False,
+                    load_model=True, save_model=True, save_name='models/toyModel.pt', AC=False, coef_entropy=0.01):
   if use_visdom:
     vp = u.VisdomPlotter()
     plot_iter = 0
@@ -62,11 +103,11 @@ def train(game_view=False, lr=1e-3, max_game_timestep=200, n_game_scoring_averag
   env, render_mode = get_game_env(game_view=game_view)
 
   # Instanciate model and optimizer
-  model = TOYModel()
-  optimizer = torch.optim.AdamW(model.model.parameters(), lr=lr)
+  policy = TOYACModel() if AC else TOYModel()
+  optimizer = torch.optim.AdamW(policy.model.parameters(), lr=lr)
 
   if load_model:
-    u.load_model(model.model, save_name)
+    u.load_model(policy.model, save_name.replace('toy', 'toyAC') if AC else save_name)
 
   # Starting variables
   dist_eff_target = env.current_dist
@@ -75,6 +116,8 @@ def train(game_view=False, lr=1e-3, max_game_timestep=200, n_game_scoring_averag
   # Storage variables
   rewards = []
   log_probs = []
+  if AC:
+    state_values = []
 
   # Control variables
   quit_game = False
@@ -89,7 +132,11 @@ def train(game_view=False, lr=1e-3, max_game_timestep=200, n_game_scoring_averag
           quit_game = True
     
     # Get action from model then perform it
-    action, log_prob = model.select_action(state)
+    if AC:
+      action, log_prob, state_value, distri_entropy = policy.select_action(state)
+    else:
+      action, log_prob, distri_entropy = policy.select_action(state)
+
     joints_angle, reward, target_reached, _ = env.step(action)
 
     current_game_timestep += 1
@@ -98,11 +145,14 @@ def train(game_view=False, lr=1e-3, max_game_timestep=200, n_game_scoring_averag
     # Store data and update state
     rewards.append(reward)
     log_probs.append(log_prob)
+    if AC:
+      state_values.append(state_value)
     state = (torch.FloatTensor(joints_angle + list(env.target_pos)) - MINS) / MAXS_MINS
 
     if target_reached or current_game_timestep > max_game_timestep:
       if target_reached:  # update policy only if the target is reached as there is no reward before that
-        pgu.reinforce_update(rewards, log_probs, optimizer, clear_data=False)
+        pgu.reinforce_update(rewards, log_probs, distri_entropy, optimizer, clear_data=False, coef_entropy=coef_entropy,
+                             state_values=state_values if AC else None)
 
         time_to_target_memory.append(current_game_timestep / dist_eff_target)
 
@@ -117,7 +167,7 @@ def train(game_view=False, lr=1e-3, max_game_timestep=200, n_game_scoring_averag
           plot_iter += 1
 
           if save_model:
-            u.save_checkpoint(model.model, None, save_name)
+            u.save_checkpoint(policy.model, None, save_name.replace('toy', 'toyAC') if AC else save_name)
 
       # Reset game and related variables
       env.reset(to_reset='target')
@@ -130,11 +180,11 @@ def train(game_view=False, lr=1e-3, max_game_timestep=200, n_game_scoring_averag
 
 
 @torch.no_grad()
-def run_model(save_name='models/toyModel.pt', max_game_timestep=200):
+def run_model(save_name='models/toyModel.pt', max_game_timestep=200, AC=False):
   env, render_mode = get_game_env(game_view=True)
 
-  model = TOYModel()
-  u.load_model(model.model, save_name)
+  policy = TOYACModel() if AC else TOYModel()
+  u.load_model(policy.model, save_name.replace('toy', 'toyAC') if AC else save_name)
 
   state = (torch.FloatTensor(env.joints_angle + list(env.target_pos)) - MINS) / MAXS_MINS
 
@@ -146,7 +196,7 @@ def run_model(save_name='models/toyModel.pt', max_game_timestep=200):
       if event.type == pygame.QUIT:
         quit_game = True
     
-    action, _ = model.select_action(state)
+    action, *_ = policy.select_action(state)
     joints_angle, _, target_reached, _ = env.step(action)
 
     current_game_timestep += 1
@@ -161,7 +211,12 @@ def run_model(save_name='models/toyModel.pt', max_game_timestep=200):
   env.close()
 
 
+def train_ppo():
+  pass
+
+
 if __name__ == '__main__':
+  # When adding gradient accumulation, it smooth the performance curve but slow down the learning
   argparser = argparse.ArgumentParser(prog='pg_exps.py',
                                       description='Experiments on 2-DOF robot arm that learn to reach a target point')
   argparser.add_argument('--log_file', default='_tmp_pg_exps_logs.txt', type=str)
@@ -169,7 +224,9 @@ if __name__ == '__main__':
   argparser.add_argument('--game_view', default=False, type=ast.literal_eval)
   argparser.add_argument('--save_model', default=True, type=ast.literal_eval)
   argparser.add_argument('--load_model', default=True, type=ast.literal_eval)
+  argparser.add_argument('--actor_critic', default=False, type=ast.literal_eval)
   argparser.add_argument('--save_name', default='models/toyModel.pt', type=str)
+  argparser.add_argument('--coef_entropy', default=0.01, type=float)
   argparser.add_argument('--seed', default=42, type=int)
   args = argparser.parse_args()
 
@@ -178,10 +235,13 @@ if __name__ == '__main__':
   
   rep = input('Start training? (y or n): ')
   if rep == 'y':
-    torch.manual_seed(args.seed)  # seeding for reproducibility
+    # seeding for reproducibility
+    random.seed(args.seed * args.seed)
+    torch.manual_seed(args.seed)
+
     u.dump_argparser_parameters(args)
-    train(game_view=args.game_view, use_visdom=args.use_visdom, load_model=args.load_model, save_model=args.save_model,
-          save_name=args.save_name)
+    train_reinforce(game_view=args.game_view, use_visdom=args.use_visdom, load_model=args.load_model, save_model=args.save_model,
+                    save_name=args.save_name, coef_entropy=args.coef_entropy, AC=args.actor_critic)
   
   rep = input('Run saved model? (y or n): ')
   if rep == 'y':
