@@ -62,8 +62,8 @@ class TOYActorCritic(torch.nn.Module):
     self.critic = torch.nn.Linear(200, 1)
   
   def forward(self, state, critic=False):
-    out = self.shared(state)
-    action_probs = self.actor(out)
+    out = torch.nn.functional.relu(self.shared(state))
+    action_probs = torch.nn.functional.softmax(self.actor(out), dim=-1)
     state_values = self.critic(out) if critic else None
     return action_probs, state_values
 
@@ -175,6 +175,8 @@ def train_reinforce(game_view=False, lr=1e-3, max_game_timestep=200, n_game_scor
       current_game_timestep = 0
       rewards.clear()
       log_probs.clear()
+      if AC:
+        state_values.clear()
   
   env.close()
 

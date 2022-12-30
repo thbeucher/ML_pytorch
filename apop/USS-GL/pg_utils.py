@@ -36,7 +36,7 @@ def reinforce_update(rewards, log_probs, distri_entropy, optimizer, state_values
   returns = get_returns(rewards, normalize_returns=normalize_returns, discount_factor=discount_factor, eps=eps)
 
   if state_values is not None:
-    state_values = torch.stack(state_values)
+    state_values = torch.stack(state_values).squeeze(dim=1)
     advantages = returns - state_values.detach()
 
     critic_loss = coef_mse_critic * torch.nn.functional.mse_loss(state_values, returns)
