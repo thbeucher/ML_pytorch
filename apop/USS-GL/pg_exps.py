@@ -52,6 +52,19 @@ class TOYModel(object):
     action = distri.sample()
     action_logprob = distri.log_prob(action)
     return action.item(), action_logprob, distri.entropy()
+  
+  def act(self, state):
+    action_probs = self.model(state)
+    distri = torch.distributions.Categorical(action_probs)
+    action = distri.sample()
+    action_logprob = distri.log_prob(action)
+    return action.detach(), action_logprob.detach()
+
+  def evaluate(self, state, action):
+    action_probs = self.model(state)
+    distri = torch.distributions.Categorical(action_probs)
+    action_logprob = distri.log_prob(action)
+    return action_logprob, distri.entropy()
 
 
 class TOYActorCritic(torch.nn.Module):
@@ -74,11 +87,11 @@ class TOYACModel(object):
     self.model = TOYActorCritic().to(self.device)
   
   def act(self, state):
-    action_probs = self.model(state)
+    action_probs, _ = self.model(state)
     distri = torch.distributions.Categorical(action_probs)
     action = distri.sample()
     action_logprob = distri.log_prob(action)
-    return action.item(), action_logprob.detach()
+    return action.detach(), action_logprob.detach()
 
   def evaluate(self, state, action):
     action_probs, state_values = self.model(state, critic=True)
@@ -213,8 +226,91 @@ def run_model(save_name='models/toyModel.pt', max_game_timestep=200, AC=False):
   env.close()
 
 
-def train_ppo():
-  pass
+def train_ppo(game_view=False, lr=1e-3, max_game_timestep=200, n_game_scoring_average=100, use_visdom=False,
+              load_model=True, save_model=True, save_name='models/toyModel.pt', AC=False, coef_entropy=0.01):
+  if use_visdom:
+    vp = u.VisdomPlotter()
+    plot_iter = 0
+
+  env, render_mode = get_game_env(game_view=game_view)
+
+  # Instanciate model and optimizer
+  policy = TOYACModel() if AC else TOYModel()
+  optimizer = torch.optim.AdamW(policy.model.parameters(), lr=lr)
+
+  if load_model:
+    u.load_model(policy.model, save_name.replace('toy', 'toyAC') if AC else save_name)
+  
+  old_policy = TOYACModel() if AC else TOYModel()
+  old_policy.model.load_state_dict(policy.model.state_dict())
+
+  # Starting variables
+  dist_eff_target = env.current_dist
+  state = (torch.FloatTensor(env.joints_angle + list(env.target_pos)) - MINS) / MAXS_MINS
+
+  # Storage variables
+  rewards = []
+  log_probs = []
+  actions = []
+  states = []
+
+  # Control variables
+  quit_game = False
+  current_game_timestep = 0
+  time_to_target_memory = []
+
+  while not quit_game:  #TODO add stopping criteria if performance stop improving
+    # If game window is open, catch closing event
+    if game_view:
+      for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+          quit_game = True
+    
+    # Get action from model then perform it
+    action, log_prob = old_policy.act(state)
+
+    joints_angle, reward, target_reached, _ = env.step(action.item())
+
+    current_game_timestep += 1
+    env.render(mode=render_mode)
+
+    # Store data and update state
+    rewards.append(reward)
+    log_probs.append(log_prob)
+    actions.append(action)
+    states.append(state)
+
+    state = (torch.FloatTensor(joints_angle + list(env.target_pos)) - MINS) / MAXS_MINS
+
+    if target_reached or current_game_timestep > max_game_timestep:
+      if target_reached:  # update policy only if the target is reached as there is no reward before that
+        pgu.ppo_update(states, actions, log_probs, rewards, old_policy, policy, optimizer, AC=AC, coef_entropy=coef_entropy)
+
+        time_to_target_memory.append(current_game_timestep / dist_eff_target)
+
+        if len(time_to_target_memory) == n_game_scoring_average:
+          average_ttt = np.mean(time_to_target_memory)
+
+          if use_visdom:
+            vp.line_plot('Time to Target', 'Train', 'Policy Performance', plot_iter, average_ttt)
+
+          logging.info(f'Episode {plot_iter+1}(x{n_game_scoring_average}) | Average time-to-target={average_ttt:.3f}')
+          time_to_target_memory.clear()
+          plot_iter += 1
+
+          if save_model:
+            u.save_checkpoint(policy.model, None, save_name.replace('toy', 'toyAC') if AC else save_name)
+
+      # Reset game and related variables
+      env.reset(to_reset='target')
+      dist_eff_target = env.current_dist
+      current_game_timestep = 0
+      rewards.clear()
+      log_probs.clear()
+      actions.clear()
+      states.clear()
+  
+  env.close()
 
 
 if __name__ == '__main__':
@@ -230,10 +326,13 @@ if __name__ == '__main__':
   argparser.add_argument('--save_name', default='models/toyModel.pt', type=str)
   argparser.add_argument('--coef_entropy', default=0.01, type=float)
   argparser.add_argument('--seed', default=42, type=int)
+  argparser.add_argument('--algo', default='reinforce', type=str, choices=['reinforce', 'ppo'])
   args = argparser.parse_args()
 
   logging.basicConfig(filename=args.log_file, filemode='a', level=logging.INFO,
                       format='%(asctime)s - %(levelname)s - %(message)s')
+  
+  trainers = {'reinforce': train_reinforce, 'ppo': train_ppo}
   
   rep = input('Start training? (y or n): ')
   if rep == 'y':
@@ -242,8 +341,8 @@ if __name__ == '__main__':
     torch.manual_seed(args.seed)
 
     u.dump_argparser_parameters(args)
-    train_reinforce(game_view=args.game_view, use_visdom=args.use_visdom, load_model=args.load_model, save_model=args.save_model,
-                    save_name=args.save_name, coef_entropy=args.coef_entropy, AC=args.actor_critic)
+    trainers[args.algo](game_view=args.game_view, use_visdom=args.use_visdom, load_model=args.load_model, save_model=args.save_model,
+                        save_name=args.save_name, coef_entropy=args.coef_entropy, AC=args.actor_critic)
   
   rep = input('Run saved model? (y or n): ')
   if rep == 'y':
