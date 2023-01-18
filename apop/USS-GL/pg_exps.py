@@ -2,12 +2,17 @@ import os
 import ast
 import gym
 import sys
+import time
 import torch
 import pygame
 import random
 import logging
 import argparse
 import numpy as np
+
+from collections import deque
+from datetime import timedelta
+from scipy.stats import linregress
 
 ## VARIABLES for 2-DOF robot arm experiment #########################################################
 sys.path.append('../../../robot/')
@@ -227,7 +232,8 @@ def run_model(save_name='models/toyModel.pt', max_game_timestep=200, AC=False):
 
 
 def train_ppo(game_view=False, lr=1e-3, max_game_timestep=200, n_game_scoring_average=100, use_visdom=False,
-              load_model=True, save_model=True, save_name='models/toyModel.pt', AC=False, coef_entropy=0.01):
+              load_model=True, save_model=True, save_name='models/toyModel.pt', AC=False, coef_entropy=0.01,
+              early_stopping_n_step_watcher=20, early_stopping_min_slope=0.001):
   if use_visdom:
     vp = u.VisdomPlotter()
     plot_iter = 0
@@ -256,10 +262,13 @@ def train_ppo(game_view=False, lr=1e-3, max_game_timestep=200, n_game_scoring_av
 
   # Control variables
   quit_game = False
-  current_game_timestep = 0
+  current_game_timestep, n_total_game_timestep = 0, 0
   time_to_target_memory = []
+  average_ttt_mem = deque(maxlen=early_stopping_n_step_watcher)
+  x_linregress = list(range(early_stopping_n_step_watcher))
+  start_time = time.time()
 
-  while not quit_game:  #TODO add stopping criteria if performance stop improving
+  while not quit_game:
     # If game window is open, catch closing event
     if game_view:
       for event in pygame.event.get():
@@ -290,6 +299,7 @@ def train_ppo(game_view=False, lr=1e-3, max_game_timestep=200, n_game_scoring_av
 
         if len(time_to_target_memory) == n_game_scoring_average:
           average_ttt = np.mean(time_to_target_memory)
+          average_ttt_mem.append(average_ttt)
 
           if use_visdom:
             vp.line_plot('Time to Target', 'Train', 'Policy Performance', plot_iter, average_ttt)
@@ -300,21 +310,33 @@ def train_ppo(game_view=False, lr=1e-3, max_game_timestep=200, n_game_scoring_av
 
           if save_model:
             u.save_checkpoint(policy.model, None, save_name.replace('toy', 'toyAC') if AC else save_name)
+        
+          # Early Stopping checks
+          if len(average_ttt_mem) == early_stopping_n_step_watcher:
+            slope, *_ = linregress(x_linregress, average_ttt_mem)
+            logging.info(f'Time-to-Target slope = {slope:.4f}')
+            if abs(slope) <= early_stopping_min_slope:
+              quit_game = True
 
       # Reset game and related variables
       env.reset(to_reset='target')
       dist_eff_target = env.current_dist
+      n_total_game_timestep += current_game_timestep
       current_game_timestep = 0
       rewards.clear()
       log_probs.clear()
       actions.clear()
       states.clear()
   
+  logging.info(f'Performance achieved with {n_total_game_timestep:,} interaction with the environment')
+  logging.info(f'Run done in {timedelta(seconds=int(time.time() - start_time))}')
   env.close()
 
 
 if __name__ == '__main__':
   # When adding gradient accumulation, it smooth the performance curve but slow down the learning
+  # Convergence can be complicated to obtain and depend of the initialization
+  # e.g. with seed=42 it seems hard to get convergence with PPO wo AC but easily obtained with seed=38
   argparser = argparse.ArgumentParser(prog='pg_exps.py',
                                       description='Experiments on 2-DOF robot arm that learn to reach a target point')
   argparser.add_argument('--log_file', default='_tmp_pg_exps_logs.txt', type=str)
