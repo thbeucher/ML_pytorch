@@ -112,8 +112,59 @@ class TOYACModel(object):
     return action.item(), action_logprob, state_values, distri.entropy()
 
 
+def pretrain_CE(dataset_folder='goal_reaching_dataset/', lr=1e-3, label_smoothing=0.1,
+                coef_mse_critic=0.5, coef_CE_actor=1.0, n_epochs=50, batch_size=32):
+  # filename = ep_X_len_Y.pt
+  # content -> [states, body_infos, actions, rewards]
+  # states/body_infos = list of FloatTensor | actions/rewards = list of int/float
+  print('Start pretraining TOYActorCritic model using cross-entropy loss...')
+  device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+  model = TOYActorCritic().to(device)
+  actor_criterion = torch.nn.CrossEntropyLoss(label_smoothing=label_smoothing)
+  critic_criterion = torch.nn.MSELoss()
+  optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+
+  # Preparing data
+  all_states, all_actions, all_returns = [], [], []
+  for fname in os.listdir(dataset_folder):
+    states, _, actions, rewards = torch.load(os.path.join(dataset_folder, fname))
+    returns = pgu.get_returns(rewards)
+
+    all_states += states
+    all_actions += actions
+    all_returns += returns
+  
+  # Training
+  for epoch in range(n_epochs):
+    tmp = list(zip(all_states, all_actions, all_returns))
+    random.shuffle(tmp)
+    all_states, all_actions, all_returns = zip(*tmp)
+
+    batch_number = 0
+    for i in range(0, len(all_actions)+1, batch_size):
+      out = torch.nn.functional.relu(model.shared(torch.stack(all_states[i:i+batch_size])))
+      action_logits = model.actor(out)
+      state_values = model.critic(out)
+
+      actor_loss = coef_CE_actor * actor_criterion(action_logits, torch.LongTensor(all_actions[i:i+batch_size]))
+      critic_loss = coef_mse_critic * critic_criterion(state_values, torch.stack(all_returns[i:i+batch_size]).unsqueeze(-1))
+      loss = actor_loss + critic_loss
+
+      optimizer.zero_grad()
+      loss.backward()
+      optimizer.step()
+
+      print(f'Epoch {epoch} | batch {batch_number} | loss={loss.item():.4f}', end='\r')
+      batch_number += 1
+  
+  print(f'\nPretraining done.')
+  return model.state_dict()
+
+
 def train_reinforce(game_view=False, lr=1e-3, max_game_timestep=200, n_game_scoring_average=100, use_visdom=False,
-                    load_model=True, save_model=True, save_name='models/toyModel.pt', AC=False, coef_entropy=0.01):
+                    load_model=True, save_model=True, save_name='models/toyModel.pt', AC=False, coef_entropy=0.01,
+                    pretraining=False):
   if use_visdom:
     vp = u.VisdomPlotter()
     plot_iter = 0
@@ -233,7 +284,7 @@ def run_model(save_name='models/toyModel.pt', max_game_timestep=200, AC=False):
 
 def train_ppo(game_view=False, lr=1e-3, max_game_timestep=200, n_game_scoring_average=100, use_visdom=False,
               load_model=True, save_model=True, save_name='models/toyModel.pt', AC=False, coef_entropy=0.01,
-              early_stopping_n_step_watcher=20, early_stopping_min_slope=0.001):
+              early_stopping_n_step_watcher=20, early_stopping_min_slope=0.001, pretraining=False):
   if use_visdom:
     vp = u.VisdomPlotter()
     plot_iter = 0
@@ -243,6 +294,10 @@ def train_ppo(game_view=False, lr=1e-3, max_game_timestep=200, n_game_scoring_av
   # Instanciate model and optimizer
   policy = TOYACModel() if AC else TOYModel()
   optimizer = torch.optim.AdamW(policy.model.parameters(), lr=lr)
+
+  if pretraining:
+    model_state_dict = pretrain_CE()
+    policy.model.load_state_dict(model_state_dict)
 
   if load_model:
     u.load_model(policy.model, save_name.replace('toy', 'toyAC') if AC else save_name)
@@ -349,6 +404,7 @@ if __name__ == '__main__':
   argparser.add_argument('--coef_entropy', default=0.01, type=float)
   argparser.add_argument('--seed', default=42, type=int)
   argparser.add_argument('--algo', default='reinforce', type=str, choices=['reinforce', 'ppo'])
+  argparser.add_argument('--pretraining', default=False, type=ast.literal_eval)
   args = argparser.parse_args()
 
   logging.basicConfig(filename=args.log_file, filemode='a', level=logging.INFO,
@@ -364,8 +420,8 @@ if __name__ == '__main__':
 
     u.dump_argparser_parameters(args)
     trainers[args.algo](game_view=args.game_view, use_visdom=args.use_visdom, load_model=args.load_model, save_model=args.save_model,
-                        save_name=args.save_name, coef_entropy=args.coef_entropy, AC=args.actor_critic)
+                        save_name=args.save_name, coef_entropy=args.coef_entropy, AC=args.actor_critic, pretraining=args.pretraining)
   
   rep = input('Run saved model? (y or n): ')
   if rep == 'y':
-    run_model(save_name=args.save_name)
+    run_model(save_name=args.save_name, AC=args.actor_critic)
