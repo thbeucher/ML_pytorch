@@ -1,8 +1,23 @@
 import argparse
+import pandas as pd
 import matplotlib.pyplot as plt
 
 from datetime import datetime
 from collections import defaultdict
+
+
+def runs_to_df(logfile):
+  # sns.lineplot(data=df, x='episode', y='time_to_target')
+  runs = parse_pg_exps_log_file(filename=logfile)
+
+  df_dict = defaultdict(list)
+  for run_n, run_data in runs.items():
+    df_dict['episode'] += run_data['episodes']
+    df_dict['time_to_target'] += run_data['time_to_target']
+    df_dict['run_number'] += [run_n] * len(run_data['episodes'])
+  
+  df = pd.DataFrame.from_dict(df_dict)
+  return df
 
 
 def parse_pg_exps_log_file(filename='_tmp_pg_exps_logs.txt'):

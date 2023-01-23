@@ -73,35 +73,38 @@ class TOYModel(object):
 
 
 class TOYActorCritic(torch.nn.Module):
-  def __init__(self):
+  BASE_CONFIG = {'state_size': 4, 'n_actions': 5, 'hidden_size': 200}
+  def __init__(self, configuration={}):
     super().__init__()
-    self.shared = torch.nn.Linear(4, 200)
-    self.actor = torch.nn.Linear(200, 5)
-    self.critic = torch.nn.Linear(200, 1)
+    self.config = {**TOYActorCritic.BASE_CONFIG, **configuration}
+    self.shared = torch.nn.Linear(self.config['state_size'], self.config['hidden_size'])
+    self.actor = torch.nn.Linear(self.config['hidden_size'], self.config['n_actions'])
+    self.critic = torch.nn.Linear(self.config['hidden_size'], 1)
   
-  def forward(self, state, critic=False):
+  def forward(self, state, critic=False, keep_action_logits=False):
     out = torch.nn.functional.relu(self.shared(state))
-    action_probs = torch.nn.functional.softmax(self.actor(out), dim=-1)
+    action_logits = self.actor(out)
+    action_probs = action_logits if keep_action_logits else torch.nn.functional.softmax(action_logits, dim=-1)
     state_values = self.critic(out) if critic else None
     return action_probs, state_values
 
 
 class TOYACModel(object):
-  def __init__(self):
+  def __init__(self, model=TOYActorCritic, model_conf={}):
     self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    self.model = TOYActorCritic().to(self.device)
+    self.model = model(model_conf).to(self.device)
   
-  def act(self, state):
-    action_probs, _ = self.model(state)
+  def act(self, state):  # [state_size]
+    action_probs, _ = self.model(state)  # [n_actions]
     distri = torch.distributions.Categorical(action_probs)
     action = distri.sample()
     action_logprob = distri.log_prob(action)
-    return action.detach(), action_logprob.detach()
+    return action.detach(), action_logprob.detach()  # [], []
 
-  def evaluate(self, state, action):
-    action_probs, state_values = self.model(state, critic=True)
+  def evaluate(self, state, action):  # [ep_len, state_size], [ep_len]
+    action_probs, state_values = self.model(state, critic=True)  # [ep_len, n_actions], [ep_len, 1]
     distri = torch.distributions.Categorical(action_probs)
-    action_logprob = distri.log_prob(action)
+    action_logprob = distri.log_prob(action)  # [ep_len]
     return action_logprob, state_values, distri.entropy()
   
   def select_action(self, state):
@@ -112,15 +115,15 @@ class TOYACModel(object):
     return action.item(), action_logprob, state_values, distri.entropy()
 
 
-def pretrain_CE(dataset_folder='goal_reaching_dataset/', lr=1e-3, label_smoothing=0.1,
-                coef_mse_critic=0.5, coef_CE_actor=1.0, n_epochs=50, batch_size=32):
+def pretrain_CE(dataset_folder='goal_reaching_dataset/', lr=1e-3, label_smoothing=0.1, episode_batch=False,
+                coef_mse_critic=0.5, coef_CE_actor=1.0, n_epochs=50, batch_size=32, model=TOYActorCritic, model_conf={}):
   # filename = ep_X_len_Y.pt
   # content -> [states, body_infos, actions, rewards]
   # states/body_infos = list of FloatTensor | actions/rewards = list of int/float
-  print('Start pretraining TOYActorCritic model using cross-entropy loss...')
+  print(f'Start pretraining {model.__name__} model using cross-entropy loss...')
   device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-  model = TOYActorCritic().to(device)
+  model = model(model_conf).to(device)
   actor_criterion = torch.nn.CrossEntropyLoss(label_smoothing=label_smoothing)
   critic_criterion = torch.nn.MSELoss()
   optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
@@ -131,9 +134,14 @@ def pretrain_CE(dataset_folder='goal_reaching_dataset/', lr=1e-3, label_smoothin
     states, _, actions, rewards = torch.load(os.path.join(dataset_folder, fname))
     returns = pgu.get_returns(rewards)
 
-    all_states += states
-    all_actions += actions
-    all_returns += returns
+    if episode_batch:
+      all_states.append(states)
+      all_actions.append(actions)
+      all_returns.append(returns)
+    else:
+      all_states += states
+      all_actions += actions
+      all_returns += returns
   
   # Training
   for epoch in range(n_epochs):
@@ -142,13 +150,21 @@ def pretrain_CE(dataset_folder='goal_reaching_dataset/', lr=1e-3, label_smoothin
     all_states, all_actions, all_returns = zip(*tmp)
 
     batch_number = 0
-    for i in range(0, len(all_actions)+1, batch_size):
-      out = torch.nn.functional.relu(model.shared(torch.stack(all_states[i:i+batch_size])))
-      action_logits = model.actor(out)
-      state_values = model.critic(out)
+    batch_size = 1 if episode_batch else batch_size
+    for i in range(0, len(all_actions), batch_size):
+      if episode_batch:
+        batch_states = all_states[i]
+        batch_actions = all_actions[i]
+        batch_returns = all_returns[i]
+      else:
+        batch_states = all_states[i:i+batch_size]
+        batch_actions = all_actions[i:i+batch_size]
+        batch_returns = torch.stack(all_returns[i:i+batch_size])
 
-      actor_loss = coef_CE_actor * actor_criterion(action_logits, torch.LongTensor(all_actions[i:i+batch_size]))
-      critic_loss = coef_mse_critic * critic_criterion(state_values, torch.stack(all_returns[i:i+batch_size]).unsqueeze(-1))
+      action_logits, state_values = model(torch.stack(batch_states), critic=True, keep_action_logits=True)
+
+      actor_loss = coef_CE_actor * actor_criterion(action_logits, torch.LongTensor(batch_actions))
+      critic_loss = coef_mse_critic * critic_criterion(state_values, batch_returns.unsqueeze(-1))
       loss = actor_loss + critic_loss
 
       optimizer.zero_grad()
@@ -164,15 +180,14 @@ def pretrain_CE(dataset_folder='goal_reaching_dataset/', lr=1e-3, label_smoothin
 
 def train_reinforce(game_view=False, lr=1e-3, max_game_timestep=200, n_game_scoring_average=100, use_visdom=False,
                     load_model=True, save_model=True, save_name='models/toyModel.pt', AC=False, coef_entropy=0.01,
-                    pretraining=False):
+                    model=TOYActorCritic, model_conf={}, pretraining=False, episode_batch=False):
   if use_visdom:
     vp = u.VisdomPlotter()
-    plot_iter = 0
 
   env, render_mode = get_game_env(game_view=game_view)
 
   # Instanciate model and optimizer
-  policy = TOYACModel() if AC else TOYModel()
+  policy = TOYACModel(model=model, model_conf=model_conf) if AC else TOYModel()
   optimizer = torch.optim.AdamW(policy.model.parameters(), lr=lr)
 
   if load_model:
@@ -190,6 +205,7 @@ def train_reinforce(game_view=False, lr=1e-3, max_game_timestep=200, n_game_scor
 
   # Control variables
   quit_game = False
+  plot_iter = 0
   current_game_timestep = 0
   time_to_target_memory = []
 
@@ -284,25 +300,26 @@ def run_model(save_name='models/toyModel.pt', max_game_timestep=200, AC=False):
 
 def train_ppo(game_view=False, lr=1e-3, max_game_timestep=200, n_game_scoring_average=100, use_visdom=False,
               load_model=True, save_model=True, save_name='models/toyModel.pt', AC=False, coef_entropy=0.01,
-              early_stopping_n_step_watcher=20, early_stopping_min_slope=0.001, pretraining=False):
+              early_stopping_n_step_watcher=20, early_stopping_min_slope=0.001, pretraining=False, model=TOYActorCritic,
+              model_conf={}, episode_batch=False):
+  print(f'Start PPO training...')
   if use_visdom:
     vp = u.VisdomPlotter()
-    plot_iter = 0
 
   env, render_mode = get_game_env(game_view=game_view)
 
   # Instanciate model and optimizer
-  policy = TOYACModel() if AC else TOYModel()
+  policy = TOYACModel(model=model, model_conf=model_conf) if AC else TOYModel()
   optimizer = torch.optim.AdamW(policy.model.parameters(), lr=lr)
 
   if pretraining:
-    model_state_dict = pretrain_CE()
+    model_state_dict = pretrain_CE(model=model, model_conf=model_conf, episode_batch=episode_batch)
     policy.model.load_state_dict(model_state_dict)
 
   if load_model:
     u.load_model(policy.model, save_name.replace('toy', 'toyAC') if AC else save_name)
   
-  old_policy = TOYACModel() if AC else TOYModel()
+  old_policy = TOYACModel(model=model, model_conf=model_conf) if AC else TOYModel()
   old_policy.model.load_state_dict(policy.model.state_dict())
 
   # Starting variables
@@ -317,6 +334,7 @@ def train_ppo(game_view=False, lr=1e-3, max_game_timestep=200, n_game_scoring_av
 
   # Control variables
   quit_game = False
+  plot_iter = 0
   current_game_timestep, n_total_game_timestep = 0, 0
   time_to_target_memory = []
   average_ttt_mem = deque(maxlen=early_stopping_n_step_watcher)
@@ -386,6 +404,7 @@ def train_ppo(game_view=False, lr=1e-3, max_game_timestep=200, n_game_scoring_av
   logging.info(f'Performance achieved with {n_total_game_timestep:,} interaction with the environment')
   logging.info(f'Run done in {timedelta(seconds=int(time.time() - start_time))}')
   env.close()
+  print('PPO training done.')
 
 
 if __name__ == '__main__':
@@ -405,6 +424,7 @@ if __name__ == '__main__':
   argparser.add_argument('--seed', default=42, type=int)
   argparser.add_argument('--algo', default='reinforce', type=str, choices=['reinforce', 'ppo'])
   argparser.add_argument('--pretraining', default=False, type=ast.literal_eval)
+  argparser.add_argument('--force_training', default=False, type=ast.literal_eval)
   args = argparser.parse_args()
 
   logging.basicConfig(filename=args.log_file, filemode='a', level=logging.INFO,
@@ -412,7 +432,7 @@ if __name__ == '__main__':
   
   trainers = {'reinforce': train_reinforce, 'ppo': train_ppo}
   
-  rep = input('Start training? (y or n): ')
+  rep = input('Start training? (y or n): ') if not args.force_training else 'y'
   if rep == 'y':
     # seeding for reproducibility
     random.seed(args.seed * args.seed)
@@ -422,6 +442,6 @@ if __name__ == '__main__':
     trainers[args.algo](game_view=args.game_view, use_visdom=args.use_visdom, load_model=args.load_model, save_model=args.save_model,
                         save_name=args.save_name, coef_entropy=args.coef_entropy, AC=args.actor_critic, pretraining=args.pretraining)
   
-  rep = input('Run saved model? (y or n): ')
+  rep = input('Run saved model? (y or n): ') if not args.force_training else 'n'
   if rep == 'y':
     run_model(save_name=args.save_name, AC=args.actor_critic)
