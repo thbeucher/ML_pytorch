@@ -47,6 +47,20 @@ def get_state(my_env):
   return screen_resized
 
 
+def random_apply_transform(batch, p=0.5):  # [B, C, H, W]
+  mask = torch.rand(batch.size(0))
+  mask1 = (mask > p) & (mask <= 0.75)
+  mask2 = mask > 0.75
+
+  if mask1.sum() > 0:
+    batch[mask1] = u.add_noise(batch[mask1])
+
+  if mask2.sum() > 0:
+    batch[mask2] = tvt.functional.gaussian_blur(batch[mask2], kernel_size=(5, 9), sigma=(0.1, 5))
+  
+  return batch, mask
+
+
 def collect_states(n_states, max_ep_len=50):
   env, render_mode = get_game_env(game_view=False)
 
@@ -127,7 +141,7 @@ def visdom_plotting(vp, epoch, epoch_loss, loss_type, batch, rec_batch, gdn_act)
 
 
 def train_model2(model, optimizer, criterion, states, batch_size=32, n_epochs=5, start_epoch=0, vp=None,
-                 gdn_act=False, device=None):
+                 gdn_act=False, device=None, add_augmentation=False):
   if device is None:
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -138,10 +152,13 @@ def train_model2(model, optimizer, criterion, states, batch_size=32, n_epochs=5,
     for i in tqdm(range(0, len(states), batch_size), leave=False):
       batch = torch.stack(list(itertools.islice(states, i, i+batch_size))).to(device)
 
+      if add_augmentation:
+        batch_augmented, _ = random_apply_transform(batch.clone())
+
       if batch.size(0) <= 1:
         continue
 
-      rec_batch = model(batch)
+      rec_batch = model(batch_augmented if add_augmentation else batch)
 
       optimizer.zero_grad()
       loss = criterion(rec_batch, batch)
@@ -158,7 +175,7 @@ def train_model2(model, optimizer, criterion, states, batch_size=32, n_epochs=5,
 
 
 def reconstruction_experiment2(use_visdom=True, batch_size=32, gdn_act=False, lr=1e-3, loss_type='ms_ssim',
-                               n_epochs=5, memory_size=1024, max_ep_len=200):
+                               n_epochs=5, memory_size=1024, max_ep_len=200, add_augmentation=False):
   device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
   vp = u.VisdomPlotter() if use_visdom else None
   
@@ -183,7 +200,7 @@ def reconstruction_experiment2(use_visdom=True, batch_size=32, gdn_act=False, lr
 
     if target_reached or current_ep_len % max_ep_len == 0:
       train_model2(model, optimizer, criterion, states, batch_size=batch_size, n_epochs=n_epochs, start_epoch=start_epoch,
-                   vp=vp, gdn_act=gdn_act, device=device)
+                   vp=vp, gdn_act=gdn_act, device=device, add_augmentation=add_augmentation)
 
       start_epoch += n_epochs
       current_ep_len = 0
@@ -216,6 +233,7 @@ if __name__ == '__main__':
   argparser.add_argument('--save_model', default=True, type=ast.literal_eval)
   argparser.add_argument('--load_model', default=True, type=ast.literal_eval)
   argparser.add_argument('--gdn_act', default=False, type=ast.literal_eval)
+  argparser.add_argument('--add_augmentation', default=False, type=ast.literal_eval)
   argparser.add_argument('--seed', default=42, type=int)
   argparser.add_argument('--n_epochs', default=5, type=int)
   argparser.add_argument('--batch_size', default=32, type=int)
@@ -240,4 +258,4 @@ if __name__ == '__main__':
     #                           lr=args.lr, loss_type=args.loss_type, n_epochs=args.n_epochs, memory_size=args.memory_size)
     reconstruction_experiment2(use_visdom=args.use_visdom, batch_size=args.batch_size, gdn_act=args.gdn_act, lr=args.lr,
                                loss_type=args.loss_type, n_epochs=args.n_epochs, memory_size=args.memory_size,
-                               max_ep_len=args.max_ep_len)
+                               max_ep_len=args.max_ep_len, add_augmentation=args.add_augmentation)

@@ -1077,3 +1077,20 @@ def sigmoid_energy(mytensor, dim=-1):
 
 def compute_out_conv(size_in, kernel=3, stride=1, padding=0, dilation=1):
   return (size_in + 2 * padding - dilation * (kernel - 1) -1) // stride + 1
+
+
+class AddGaussianNoise(object):
+  def __init__(self, mean=0., std=1.):
+    self.std = std
+    self.mean = mean
+      
+  def __call__(self, tensor, percent=0.005):
+    return tensor + (torch.randn(tensor.size()) * self.std + self.mean)*percent
+  
+  def __repr__(self):
+    return self.__class__.__name__ + '(mean={0}, std={1})'.format(self.mean, self.std)
+
+
+def add_noise(inputs, percent=0.005):
+     noise = torch.randn_like(inputs)*percent
+     return inputs + noise
