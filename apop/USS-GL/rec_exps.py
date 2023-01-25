@@ -116,12 +116,53 @@ def reconstruction_experiment(use_visdom=True, batch_size=32, gdn_act=False, lr=
     start_epoch += n_epochs
 
 
+def visdom_plotting(vp, epoch, epoch_loss, loss_type, batch, rec_batch, gdn_act):
+  vp.line_plot('Loss', 'Train', f'Training Loss={loss_type}', epoch, epoch_loss, x_label='Epoch')
+
+  tmp = torch.empty(6, 3, 180, 180)
+  tmp[:3] = batch[:3]
+  tmp[3:] = rec_batch[:3]
+  vp.image_plot('img', make_grid(tmp, nrow=3), opts={'title': 'Image_n_reconstruction'})
+  save_image(make_grid(tmp, nrow=3), f'rec_img_exps_loss_{loss_type}_gdn_{gdn_act}.png')
+
+
+def train_model2(model, optimizer, criterion, states, batch_size=32, n_epochs=5, start_epoch=0, vp=None,
+                 gdn_act=False, device=None):
+  if device is None:
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+  random.shuffle(states)
+
+  for epoch in tqdm(range(start_epoch, n_epochs + start_epoch)):
+    losses = []
+    for i in tqdm(range(0, len(states), batch_size), leave=False):
+      batch = torch.stack(list(itertools.islice(states, i, i+batch_size))).to(device)
+
+      if batch.size(0) <= 1:
+        continue
+
+      rec_batch = model(batch)
+
+      optimizer.zero_grad()
+      loss = criterion(rec_batch, batch)
+      loss.backward()
+      optimizer.step()
+
+      losses.append(loss.item())
+
+    epoch_loss = np.mean(losses)
+    logging.info(f'Epoch {epoch} | loss={epoch_loss:.5f}')
+
+    if vp is not None:
+      visdom_plotting(vp, epoch, epoch_loss, type(criterion).__name__, batch.cpu(), rec_batch.cpu(), gdn_act)
+
+
 def reconstruction_experiment2(use_visdom=True, batch_size=32, gdn_act=False, lr=1e-3, loss_type='ms_ssim',
                                n_epochs=5, memory_size=1024, max_ep_len=200):
-  if use_visdom:
-    vp = u.VisdomPlotter()
+  device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+  vp = u.VisdomPlotter() if use_visdom else None
   
-  model = AutoEncoder(gdn_act=gdn_act)
+  model = AutoEncoder(gdn_act=gdn_act).to(device)
   optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
   criterion = be.MS_SSIM_Loss(data_range=1.0, size_average=True, channel=3) if loss_type == 'ms_ssim' else torch.nn.MSELoss()
   
@@ -131,46 +172,18 @@ def reconstruction_experiment2(use_visdom=True, batch_size=32, gdn_act=False, lr
   current_ep_len = 1
   target_reached = False
 
-  batch_states = deque([get_state(env)], maxlen=memory_size)
+  states = deque([get_state(env)], maxlen=memory_size)
   while True:
     action = random.randint(0, 4)
     joints_angle, reward, target_reached, _ = env.step(action)
 
     env.render(mode=render_mode)
 
-    batch_states.append(get_state(env))
+    states.append(get_state(env))
 
     if target_reached or current_ep_len % max_ep_len == 0:
-      random.shuffle(batch_states)
-
-      for epoch in tqdm(range(start_epoch, n_epochs + start_epoch)):
-        losses = []
-        for i in tqdm(range(0, len(batch_states), batch_size), leave=False):
-          batch = torch.stack(list(itertools.islice(batch_states, i, i+batch_size)))
-
-          if batch.size(0) <= 1:
-            continue
-
-          rec_batch = model(batch)
-
-          optimizer.zero_grad()
-          loss = criterion(rec_batch, batch)
-          loss.backward()
-          optimizer.step()
-
-          losses.append(loss.item())
-
-        epoch_loss = np.mean(losses)
-        logging.info(f'Epoch {epoch} | loss={epoch_loss:.5f}')
-
-        if use_visdom:
-          vp.line_plot('Loss', 'Train', f'Training Loss={loss_type}', epoch, epoch_loss, x_label='Epoch')
-
-          tmp = torch.empty(6, 3, 180, 180)
-          tmp[:3] = batch[:3]
-          tmp[3:] = rec_batch[:3]
-          vp.image_plot('img', make_grid(tmp, nrow=3), opts={'title': 'Image_n_reconstruction'})
-          save_image(make_grid(tmp, nrow=3), f'rec_img_exps_loss_{loss_type}_gdn_{gdn_act}.png')
+      train_model2(model, optimizer, criterion, states, batch_size=batch_size, n_epochs=n_epochs, start_epoch=start_epoch,
+                   vp=vp, gdn_act=gdn_act, device=device)
 
       start_epoch += n_epochs
       current_ep_len = 0

@@ -292,7 +292,7 @@ def server_is_running(port, hostname):
 
 
 class VisdomPlotter(object):
-  def __init__(self, env_name='main', port=80, hostname='localhost'):
+  def __init__(self, env_name='main', port=8097, hostname='localhost'):
     '''
     Params:
       * env_name : str
