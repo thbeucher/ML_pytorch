@@ -31,6 +31,55 @@ def get_state(my_env):
   return screen_resized
 
 
+def save_img_state(folder='simulation_img_examples/'):
+  if not os.path.isdir(folder):
+    os.makedirs(folder)
+  
+  env = gym.make('gym_robot_arm:robot-arm-v1')
+  env.reset()
+  env.render()
+
+  target_pos = env.target_pos  # [int, int]
+  body_info = env.joints_angle  # [float, float]
+  state = get_state(env)  # torch.Tensor [3, 180, 180]
+
+  tpx, tpy = target_pos
+  ja1, ja2 = round(body_info[0], 2), round(body_info[1], 2)
+  torch.save(state, os.path.join(folder, f'target_pos_{tpx}_{tpy}_joints_angle_{ja1}_{ja2}.pt'))
+
+  done = False
+  act = False
+  action = 0
+  while not done:
+    for event in pygame.event.get():
+      if event.type == pygame.QUIT:
+        done = True
+      elif event.type == pygame.KEYDOWN:
+        if event.key == pygame.K_a:
+          action = 1
+          body_info, *_ = env.step(action)  # INC_J1
+          act = True
+        elif event.key == pygame.K_z:
+          action = 2
+          body_info, *_ = env.step(action)  # DEC_J1
+          act = True
+        elif event.key == pygame.K_o:
+          action = 3
+          body_info, *_ = env.step(action)  # INC_J2
+          act = True
+        elif event.key == pygame.K_p:
+          action = 4
+          body_info, *_ = env.step(action)  # DEC_J2
+          act = True
+    
+    env.render()
+
+    if act:
+      state = get_state(env)
+      ja1, ja2 = round(body_info[0], 2), round(body_info[1], 2)
+      torch.save(state, os.path.join(folder, f'target_pos_{tpx}_{tpy}_joints_angle_{ja1}_{ja2}.pt'))
+
+
 def goal_reaching(save_folder='goal_reaching_dataset/', to_reset='arm', screen_state=False):
   if not os.path.isdir(save_folder):
     os.makedirs(save_folder)
@@ -118,3 +167,7 @@ if __name__ == '__main__':
   rep = input(f'Create data for goal reaching experiment? (y or n): ')
   if rep == 'y':
     goal_reaching(save_folder=args.folder, to_reset=args.to_reset, screen_state=args.screen_state)
+  
+  rep = input(f'Save image state at each of your move? (saved in {args.folder}) (y or n): ')
+  if rep == 'y':
+    save_img_state(args.folder)

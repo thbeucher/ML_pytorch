@@ -1,23 +1,39 @@
 import argparse
 import pandas as pd
+import seaborn as sns
 import matplotlib.pyplot as plt
 
 from datetime import datetime
 from collections import defaultdict
 
 
-def runs_to_df(logfile):
+def runs_to_df(logfile, df_dict=None, name=None):
   # sns.lineplot(data=df, x='episode', y='time_to_target')
   runs = parse_pg_exps_log_file(filename=logfile)
 
-  df_dict = defaultdict(list)
+  if df_dict is None:
+    df_dict = defaultdict(list)
+
   for run_n, run_data in runs.items():
     df_dict['episode'] += run_data['episodes']
     df_dict['time_to_target'] += run_data['time_to_target']
     df_dict['run_number'] += [run_n] * len(run_data['episodes'])
+
+    if name is not None:
+      df_dict['name'] += [name] * len(run_data['episodes'])
+
+  df = pd.DataFrame.from_dict(df_dict)
+  return df, df_dict
+
+
+def plot_seed_exps(logfiles=[], names=[]):
+  df_dict = defaultdict(list)
+  for logfile, name in zip(logfiles, names):
+    _, df_dict = runs_to_df(logfile, df_dict=df_dict, name=name)
   
   df = pd.DataFrame.from_dict(df_dict)
-  return df
+  sns.lineplot(data=df, x='episode', y='time_to_target', hue='name')
+  plt.show()
 
 
 def parse_pg_exps_log_file(filename='_tmp_pg_exps_logs.txt'):
