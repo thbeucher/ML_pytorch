@@ -22,13 +22,16 @@ import brain_exps as be
 
 
 class AutoEncoder(torch.nn.Module):
-  def __init__(self, gdn_act=False):
+  def __init__(self, gdn_act=False, add_body_infos=False):
     super().__init__()
     self.encoder = be.ImageEmbedder(gdn_act=gdn_act)
-    self.decoder = be.ImageReconstructor(gdn_act=gdn_act)
+    self.decoder = be.ImageReconstructor(gdn_act=gdn_act, n_input_features=258 if add_body_infos else 256)
   
-  def forward(self, x):
-    return self.decoder(self.encoder(x))
+  def forward(self, x, body_infos=None):  # [B, C, H, W], [B, 2]
+    code = self.encoder(x)  # -> [B, 256]
+    if body_infos is not None:
+      code = torch.cat([code, body_infos], dim=1)  # [B, 258]
+    return self.decoder(code)
 
 
 def get_game_env(game_view=False):
@@ -59,6 +62,16 @@ def random_apply_transform(batch, p=0.5):  # [B, C, H, W]
     batch[mask2] = tvt.functional.gaussian_blur(batch[mask2], kernel_size=(5, 9), sigma=(0.1, 5))
   
   return batch, mask
+
+
+def get_min_maxmin_joints():
+  MIN_ANGLE0, MAX_ANGLE0 = 0, 90  # joint1
+  MIN_ANGLE1, MAX_ANGLE1 = 0, 180  # joint2
+  MAX_MIN_ANGLE0 = MAX_ANGLE0 - MIN_ANGLE0
+  MAX_MIN_ANGLE1 = MAX_ANGLE1 - MIN_ANGLE1
+  MINS = torch.FloatTensor([MIN_ANGLE0, MIN_ANGLE1])
+  MAXS_MINS = torch.FloatTensor([MAX_MIN_ANGLE0, MAX_MIN_ANGLE1])
+  return MINS, MAXS_MINS
 
 
 def collect_states(n_states, max_ep_len=50):
@@ -141,27 +154,36 @@ def visdom_plotting(vp, epoch, epoch_loss, loss_type, batch, rec_batch, gdn_act)
 
 
 def train_model2(model, optimizer, criterion, states, batch_size=32, n_epochs=5, start_epoch=0, vp=None,
-                 gdn_act=False, device=None, add_augmentation=False):
+                 gdn_act=False, device=None, add_augmentation=False, body_infos=None):
   if device is None:
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-  random.shuffle(states)
+  states = list(states)
+  if body_infos is not None:
+    body_infos = list(body_infos)
+    tmp = list(zip(states, body_infos))
+    random.shuffle(tmp)
+    states, body_infos = zip(*tmp)
+  else:
+    random.shuffle(states)
 
   for epoch in tqdm(range(start_epoch, n_epochs + start_epoch)):
     losses = []
     for i in tqdm(range(0, len(states), batch_size), leave=False):
-      batch = torch.stack(list(itertools.islice(states, i, i+batch_size))).to(device)
+      # batch_states = torch.stack(list(itertools.islice(states, i, i+batch_size))).to(device)
+      batch_states = torch.stack(states[i:i+batch_size]).to(device)
+      batch_body_infos = torch.stack(body_infos[i:i+batch_size]).to(device) if body_infos is not None else None
 
-      if add_augmentation:
-        batch_augmented, _ = random_apply_transform(batch.clone())
-
-      if batch.size(0) <= 1:
+      if batch_states.size(0) <= 1:
         continue
 
-      rec_batch = model(batch_augmented if add_augmentation else batch)
+      if add_augmentation:
+        batch_augmented, _ = random_apply_transform(batch_states.clone())
+
+      rec_batch = model(batch_augmented if add_augmentation else batch_states, body_infos=batch_body_infos)
 
       optimizer.zero_grad()
-      loss = criterion(rec_batch, batch)
+      loss = criterion(rec_batch, batch_states)
       loss.backward()
       optimizer.step()
 
@@ -171,15 +193,15 @@ def train_model2(model, optimizer, criterion, states, batch_size=32, n_epochs=5,
     logging.info(f'Epoch {epoch} | loss={epoch_loss:.5f}')
 
     if vp is not None:
-      visdom_plotting(vp, epoch, epoch_loss, type(criterion).__name__, batch.cpu(), rec_batch.cpu(), gdn_act)
+      visdom_plotting(vp, epoch, epoch_loss, type(criterion).__name__, batch_states.cpu(), rec_batch.cpu(), gdn_act)
 
 
 def reconstruction_experiment2(use_visdom=True, batch_size=32, gdn_act=False, lr=1e-3, loss_type='ms_ssim',
-                               n_epochs=5, memory_size=1024, max_ep_len=200, add_augmentation=False):
+                               n_epochs=5, memory_size=1024, max_ep_len=200, add_augmentation=False, add_body_infos=False):
   device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
   vp = u.VisdomPlotter() if use_visdom else None
   
-  model = AutoEncoder(gdn_act=gdn_act).to(device)
+  model = AutoEncoder(gdn_act=gdn_act, add_body_infos=add_body_infos).to(device)
   optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
   criterion = be.MS_SSIM_Loss(data_range=1.0, size_average=True, channel=3) if loss_type == 'ms_ssim' else torch.nn.MSELoss()
   
@@ -188,8 +210,10 @@ def reconstruction_experiment2(use_visdom=True, batch_size=32, gdn_act=False, lr
   start_epoch = 0
   current_ep_len = 1
   target_reached = False
+  MINS, MAXS_MINS = get_min_maxmin_joints()
 
   states = deque([get_state(env)], maxlen=memory_size)
+  body_infos = deque([(torch.FloatTensor(env.joints_angle) - MINS) / MAXS_MINS], maxlen=memory_size)
   while True:
     action = random.randint(0, 4)
     joints_angle, reward, target_reached, _ = env.step(action)
@@ -197,10 +221,12 @@ def reconstruction_experiment2(use_visdom=True, batch_size=32, gdn_act=False, lr
     env.render(mode=render_mode)
 
     states.append(get_state(env))
+    body_infos.append((torch.FloatTensor(joints_angle) - MINS) / MAXS_MINS)
 
     if target_reached or current_ep_len % max_ep_len == 0:
       train_model2(model, optimizer, criterion, states, batch_size=batch_size, n_epochs=n_epochs, start_epoch=start_epoch,
-                   vp=vp, gdn_act=gdn_act, device=device, add_augmentation=add_augmentation)
+                   vp=vp, gdn_act=gdn_act, device=device, add_augmentation=add_augmentation,
+                   body_infos=body_infos if add_body_infos else None)
 
       start_epoch += n_epochs
       current_ep_len = 0
@@ -222,6 +248,7 @@ if __name__ == '__main__':
   #    small overfitting to start learning is beneficial?
   # -> reducing n_epochs on reconstruction_experiment2 seems to allow a faster convergence,
   #    it may be because it avoid temporary small overfitting?
+  #    But leaving n_epochs higher allow the network to more easily reconstruct the red target
   # -> reconstruction_experiment2 converge in ~20 epochs achieved in ~6min
   # -> reconstruction_experiment struggle to reconstruct the red target and is not able to do it
   #    even after 20 epochs achieved in ~10min
@@ -234,6 +261,7 @@ if __name__ == '__main__':
   argparser.add_argument('--load_model', default=True, type=ast.literal_eval)
   argparser.add_argument('--gdn_act', default=False, type=ast.literal_eval)
   argparser.add_argument('--add_augmentation', default=False, type=ast.literal_eval)
+  argparser.add_argument('--add_body_infos', default=False, type=ast.literal_eval)
   argparser.add_argument('--seed', default=42, type=int)
   argparser.add_argument('--n_epochs', default=5, type=int)
   argparser.add_argument('--batch_size', default=32, type=int)
@@ -258,4 +286,5 @@ if __name__ == '__main__':
     #                           lr=args.lr, loss_type=args.loss_type, n_epochs=args.n_epochs, memory_size=args.memory_size)
     reconstruction_experiment2(use_visdom=args.use_visdom, batch_size=args.batch_size, gdn_act=args.gdn_act, lr=args.lr,
                                loss_type=args.loss_type, n_epochs=args.n_epochs, memory_size=args.memory_size,
-                               max_ep_len=args.max_ep_len, add_augmentation=args.add_augmentation)
+                               max_ep_len=args.max_ep_len, add_augmentation=args.add_augmentation,
+                               add_body_infos=args.add_body_infos)
