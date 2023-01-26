@@ -1092,5 +1092,11 @@ class AddGaussianNoise(object):
 
 
 def add_noise(inputs, percent=0.005):
-     noise = torch.randn_like(inputs)*percent
-     return inputs + noise
+  noise = torch.randn_like(inputs)*percent
+  return inputs + noise
+
+
+def shuffle_lists(*args):
+  zipped_lists = list(zip(*args))
+  random.shuffle(zipped_lists)
+  return [list(x) for x in zip(*zipped_lists)]

@@ -74,6 +74,17 @@ def get_min_maxmin_joints():
   return MINS, MAXS_MINS
 
 
+def compute_separate_loss(states, rec_states, criterion, white_coef=0.9):
+  white_mask = states.sum(1, keepdim=True).repeat(1, 3, 1, 1) == 3
+  white_loss = criterion(rec_states[white_mask], states[white_mask])
+
+  other_mask = ~white_mask
+  other_loss = criterion(rec_states[other_mask], states[other_mask])
+
+  loss = (1 - white_coef) * other_loss + white_coef * white_loss
+  return loss
+
+
 def collect_states(n_states, max_ep_len=50):
   env, render_mode = get_game_env(game_view=False)
 
@@ -154,23 +165,19 @@ def visdom_plotting(vp, epoch, epoch_loss, loss_type, batch, rec_batch, gdn_act)
 
 
 def train_model2(model, optimizer, criterion, states, batch_size=32, n_epochs=5, start_epoch=0, vp=None,
-                 gdn_act=False, device=None, add_augmentation=False, body_infos=None):
+                 gdn_act=False, device=None, add_augmentation=False, body_infos=None, use_separate_loss=True):
   if device is None:
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-  states = list(states)
-  if body_infos is not None:
-    body_infos = list(body_infos)
-    tmp = list(zip(states, body_infos))
-    random.shuffle(tmp)
-    states, body_infos = zip(*tmp)
-  else:
+  if body_infos is None:
     random.shuffle(states)
+    states = list(states)
+  else:
+    states, body_infos = u.shuffle_lists(list(states), list(body_infos))
 
   for epoch in tqdm(range(start_epoch, n_epochs + start_epoch)):
     losses = []
     for i in tqdm(range(0, len(states), batch_size), leave=False):
-      # batch_states = torch.stack(list(itertools.islice(states, i, i+batch_size))).to(device)
       batch_states = torch.stack(states[i:i+batch_size]).to(device)
       batch_body_infos = torch.stack(body_infos[i:i+batch_size]).to(device) if body_infos is not None else None
 
@@ -183,7 +190,7 @@ def train_model2(model, optimizer, criterion, states, batch_size=32, n_epochs=5,
       rec_batch = model(batch_augmented if add_augmentation else batch_states, body_infos=batch_body_infos)
 
       optimizer.zero_grad()
-      loss = criterion(rec_batch, batch_states)
+      loss = compute_separate_loss(batch_states, rec_batch, criterion) if use_separate_loss else criterion(rec_batch, batch_states)
       loss.backward()
       optimizer.step()
 
@@ -197,7 +204,8 @@ def train_model2(model, optimizer, criterion, states, batch_size=32, n_epochs=5,
 
 
 def reconstruction_experiment2(use_visdom=True, batch_size=32, gdn_act=False, lr=1e-3, loss_type='ms_ssim',
-                               n_epochs=5, memory_size=1024, max_ep_len=200, add_augmentation=False, add_body_infos=False):
+                               n_epochs=5, memory_size=1024, max_ep_len=200, add_augmentation=False, add_body_infos=False,
+                               use_separate_loss=True):
   device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
   vp = u.VisdomPlotter() if use_visdom else None
   
@@ -226,7 +234,7 @@ def reconstruction_experiment2(use_visdom=True, batch_size=32, gdn_act=False, lr
     if target_reached or current_ep_len % max_ep_len == 0:
       train_model2(model, optimizer, criterion, states, batch_size=batch_size, n_epochs=n_epochs, start_epoch=start_epoch,
                    vp=vp, gdn_act=gdn_act, device=device, add_augmentation=add_augmentation,
-                   body_infos=body_infos if add_body_infos else None)
+                   body_infos=body_infos if add_body_infos else None, use_separate_loss=use_separate_loss)
 
       start_epoch += n_epochs
       current_ep_len = 0
@@ -254,6 +262,9 @@ if __name__ == '__main__':
   #    even after 20 epochs achieved in ~10min
   # -> ms_ssim loss is slower and struggle to reconstruct the red target
   # -> gde activation with same hyperparameter seems to make convergence slower and is computationnally heavier
+  # -> between 2 runs, the reconstruction of the red point vary a lot and often it struggles to reconstruct it
+  # -> By using a separate loss for white pixels and other pixels and keeping a ratio giving more importance
+  #    to the white loss (as there is way more white pixels) allow a fast convergence to a good reconstruction
   argparser = argparse.ArgumentParser(prog='rec_exps.py', description='')
   argparser.add_argument('--log_file', default='_tmp_rec_exps_logs.txt', type=str)
   argparser.add_argument('--use_visdom', default=True, type=ast.literal_eval)
@@ -262,6 +273,7 @@ if __name__ == '__main__':
   argparser.add_argument('--gdn_act', default=False, type=ast.literal_eval)
   argparser.add_argument('--add_augmentation', default=False, type=ast.literal_eval)
   argparser.add_argument('--add_body_infos', default=False, type=ast.literal_eval)
+  argparser.add_argument('--use_separate_loss', default=True, type=ast.literal_eval)
   argparser.add_argument('--seed', default=42, type=int)
   argparser.add_argument('--n_epochs', default=5, type=int)
   argparser.add_argument('--batch_size', default=32, type=int)
@@ -287,4 +299,12 @@ if __name__ == '__main__':
     reconstruction_experiment2(use_visdom=args.use_visdom, batch_size=args.batch_size, gdn_act=args.gdn_act, lr=args.lr,
                                loss_type=args.loss_type, n_epochs=args.n_epochs, memory_size=args.memory_size,
                                max_ep_len=args.max_ep_len, add_augmentation=args.add_augmentation,
-                               add_body_infos=args.add_body_infos)
+                               add_body_infos=args.add_body_infos, use_separate_loss=args.use_separate_loss)
+  
+
+  # Example to update lr if threshold
+  # if loss < 0.005:
+  #   for param_group in optimizer.param_groups:
+  #     if param_group['lr'] == 1e-3:
+  #       param_group['lr'] = 1e-4
+  #       print('!LR UPDATED!!!!!!!!!!!!!!!!')
