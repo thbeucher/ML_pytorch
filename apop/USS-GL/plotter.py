@@ -7,8 +7,7 @@ from datetime import datetime
 from collections import defaultdict
 
 
-def runs_to_df(logfile, df_dict=None, name=None):
-  # sns.lineplot(data=df, x='episode', y='time_to_target')
+def runs_to_df_pg_exps(logfile, df_dict=None, name=None):
   runs = parse_pg_exps_log_file(filename=logfile)
 
   if df_dict is None:
@@ -26,14 +25,65 @@ def runs_to_df(logfile, df_dict=None, name=None):
   return df, df_dict
 
 
-def plot_seed_exps(logfiles=[], names=[]):
+def runs_to_df_rec_exps(logfile, df_dict=None, name=None):
+  runs = parse_rec_exps_log_file(filename=logfile)
+
+  if df_dict is None:
+    df_dict = defaultdict(list)
+
+  for run_n, run_data in runs.items():
+    df_dict['epoch'] += run_data['epoch']
+    df_dict['loss'] += run_data['loss']
+    df_dict['run_number'] += [run_n] * len(run_data['epoch'])
+
+    if name is not None:
+      df_dict['name'] += [name] * len(run_data['epoch'])
+
+  df = pd.DataFrame.from_dict(df_dict)
+  return df, df_dict
+
+
+def plot_pg_seed_exps(logfiles=[], names=[]):
   df_dict = defaultdict(list)
   for logfile, name in zip(logfiles, names):
-    _, df_dict = runs_to_df(logfile, df_dict=df_dict, name=name)
+    _, df_dict = runs_to_df_pg_exps(logfile, df_dict=df_dict, name=name)
   
   df = pd.DataFrame.from_dict(df_dict)
   sns.lineplot(data=df, x='episode', y='time_to_target', hue='name')
   plt.show()
+
+
+def plot_rec_seed_exps(logfiles=[], names=[]):
+  df_dict = defaultdict(list)
+  for logfile, name in zip(logfiles, names):
+    _, df_dict = runs_to_df_rec_exps(logfile, df_dict=df_dict, name=name)
+  
+  df = pd.DataFrame.from_dict(df_dict)
+  sns.lineplot(data=df, x='epoch', y='loss', hue='name')
+  plt.show()
+
+
+def parse_rec_exps_log_file(filename='_tmp_rec_exps_logs.txt'):
+  # 2023-01-25 09:08:52,805 - INFO - Epoch 0 | loss=0.09731
+  with open(filename, 'r') as f:
+    data = f.read().splitlines()
+  
+  data = [l for l in data if 'Epoch' in l]
+
+  runs, run_number = {}, 0
+  for l in data:
+    l = l.split(' | ')
+    epoch = int(l[-2].split('Epoch ')[-1])
+    loss = float(l[-1].split('=')[-1])
+
+    if epoch == 0:
+      run_number += 1
+      runs[run_number] = defaultdict(list)
+    
+    runs[run_number]['epoch'].append(epoch)
+    runs[run_number]['loss'].append(loss)
+  
+  return runs
 
 
 def parse_pg_exps_log_file(filename='_tmp_pg_exps_logs.txt'):

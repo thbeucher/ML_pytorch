@@ -22,15 +22,21 @@ import brain_exps as be
 
 
 class AutoEncoder(torch.nn.Module):
-  def __init__(self, gdn_act=False, add_body_infos=False):
+  def __init__(self, gdn_act=False, add_body_infos=False, normalize_emb=False):
     super().__init__()
+    self.normalize_emb = normalize_emb
     self.encoder = be.ImageEmbedder(gdn_act=gdn_act)
     self.decoder = be.ImageReconstructor(gdn_act=gdn_act, n_input_features=258 if add_body_infos else 256)
   
   def forward(self, x, body_infos=None):  # [B, C, H, W], [B, 2]
     code = self.encoder(x)  # -> [B, 256]
+
+    if self.normalize_emb:
+      code = torch.nn.functional.normalize(code, p=2, dim=1)
+
     if body_infos is not None:
       code = torch.cat([code, body_infos], dim=1)  # [B, 258]
+
     return self.decoder(code)
 
 
@@ -205,11 +211,11 @@ def train_model2(model, optimizer, criterion, states, batch_size=32, n_epochs=5,
 
 def reconstruction_experiment2(use_visdom=True, batch_size=32, gdn_act=False, lr=1e-3, loss_type='ms_ssim',
                                n_epochs=5, memory_size=1024, max_ep_len=200, add_augmentation=False, add_body_infos=False,
-                               use_separate_loss=True):
+                               use_separate_loss=True, normalize_emb=False, max_n_epochs=100):
   device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
   vp = u.VisdomPlotter() if use_visdom else None
   
-  model = AutoEncoder(gdn_act=gdn_act, add_body_infos=add_body_infos).to(device)
+  model = AutoEncoder(gdn_act=gdn_act, add_body_infos=add_body_infos, normalize_emb=normalize_emb).to(device)
   optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
   criterion = be.MS_SSIM_Loss(data_range=1.0, size_average=True, channel=3) if loss_type == 'ms_ssim' else torch.nn.MSELoss()
   
@@ -239,6 +245,9 @@ def reconstruction_experiment2(use_visdom=True, batch_size=32, gdn_act=False, lr
       start_epoch += n_epochs
       current_ep_len = 0
 
+      if start_epoch >= max_n_epochs:
+        break
+
       env.reset(to_reset='target')
     
     current_ep_len += 1
@@ -267,26 +276,29 @@ if __name__ == '__main__':
   #    to the white loss (as there is way more white pixels) allow a fast convergence to a good reconstruction
   argparser = argparse.ArgumentParser(prog='rec_exps.py', description='')
   argparser.add_argument('--log_file', default='_tmp_rec_exps_logs.txt', type=str)
+  argparser.add_argument('--gdn_act', default=False, type=ast.literal_eval)
   argparser.add_argument('--use_visdom', default=True, type=ast.literal_eval)
   argparser.add_argument('--save_model', default=True, type=ast.literal_eval)
   argparser.add_argument('--load_model', default=True, type=ast.literal_eval)
-  argparser.add_argument('--gdn_act', default=False, type=ast.literal_eval)
-  argparser.add_argument('--add_augmentation', default=False, type=ast.literal_eval)
+  argparser.add_argument('--normalize_emb', default=False, type=ast.literal_eval)
   argparser.add_argument('--add_body_infos', default=False, type=ast.literal_eval)
+  argparser.add_argument('--add_augmentation', default=False, type=ast.literal_eval)
   argparser.add_argument('--use_separate_loss', default=True, type=ast.literal_eval)
   argparser.add_argument('--seed', default=42, type=int)
   argparser.add_argument('--n_epochs', default=5, type=int)
   argparser.add_argument('--batch_size', default=32, type=int)
   argparser.add_argument('--max_ep_len', default=200, type=int)
   argparser.add_argument('--memory_size', default=1024, type=int)
+  argparser.add_argument('--max_n_epochs', default=100, type=int)
   argparser.add_argument('--lr', default=1e-3, type=float)
   argparser.add_argument('--loss_type', default='mse', type=str, choices=['mse', 'ms_ssim'])
+  argparser.add_argument('--force_training', default=False, type=ast.literal_eval)
   args = argparser.parse_args()
 
   logging.basicConfig(filename=args.log_file, filemode='a', level=logging.INFO,
                       format='%(asctime)s - %(levelname)s - %(message)s')
   
-  rep = input('Start training? (y or n): ')
+  rep = input('Start training? (y or n): ') if not args.force_training else 'y'
   if rep == 'y':
     # seeding for reproducibility
     random.seed(args.seed * args.seed)
@@ -299,7 +311,8 @@ if __name__ == '__main__':
     reconstruction_experiment2(use_visdom=args.use_visdom, batch_size=args.batch_size, gdn_act=args.gdn_act, lr=args.lr,
                                loss_type=args.loss_type, n_epochs=args.n_epochs, memory_size=args.memory_size,
                                max_ep_len=args.max_ep_len, add_augmentation=args.add_augmentation,
-                               add_body_infos=args.add_body_infos, use_separate_loss=args.use_separate_loss)
+                               add_body_infos=args.add_body_infos, use_separate_loss=args.use_separate_loss,
+                               normalize_emb=args.normalize_emb, max_n_epochs=args.max_n_epochs)
   
 
   # Example to update lr if threshold
