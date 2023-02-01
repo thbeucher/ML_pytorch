@@ -24,13 +24,11 @@ class AutoEncoder(torch.nn.Module):
   def __init__(self, gdn_act=False, add_body_infos=False, normalize_emb=False, dropout=0.2):
     super().__init__()
     self.normalize_emb = normalize_emb
-    self.encoder = be.ImageEmbedder(gdn_act=gdn_act)
-    self.dropout = torch.nn.Dropout(p=dropout)
+    self.encoder = be.ImageEmbedder(gdn_act=gdn_act, dropout=dropout)
     self.decoder = be.ImageReconstructor(gdn_act=gdn_act, n_input_features=258 if add_body_infos else 256)
   
   def forward(self, x, body_infos=None):  # [B, C, H, W], [B, 2]
     code = self.encoder(x)  # -> [B, 256]
-    code = self.dropout(code)
 
     if self.normalize_emb:
       code = torch.nn.functional.normalize(code, p=2, dim=1)

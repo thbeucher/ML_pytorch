@@ -17,7 +17,7 @@ class MS_SSIM_Loss(MS_SSIM):
 
 
 class ImageEmbedder(nn.Module):
-  def __init__(self, n_input_features=3, output_emb_size=256, gdn_act=False):
+  def __init__(self, n_input_features=3, output_emb_size=256, gdn_act=False, dropout=0.2):
     super().__init__()
     # # in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1
     self.embedder = nn.Sequential(
@@ -30,6 +30,7 @@ class ImageEmbedder(nn.Module):
       nn.Conv2d(64, 128, 5, stride=2, padding=1),  # [64, 22, 22] -> [128, 10, 10]
       GDN(128) if gdn_act else nn.ReLU(),
       nn.Conv2d(128, output_emb_size, 10),  # [128, 10, 10] -> [256, 1, 1]
+      nn.Dropout(dropout)
     )
   
   def forward(self, img):  # [bs, 3, 180, 180]
