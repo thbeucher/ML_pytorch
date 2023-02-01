@@ -123,7 +123,7 @@ def collect_states(n_states, max_ep_len=50):
   return states
 
 
-def train_model(model, optimizer, criterion, n_epochs=10, batch_size=32, memory_size=1024, vp=None, start_epoch=0):
+def train_autoencoder(model, optimizer, criterion, n_epochs=10, batch_size=32, memory_size=1024, vp=None, start_epoch=0):
   states = collect_states(memory_size)
   random.shuffle(states)
 
@@ -166,7 +166,7 @@ def reconstruction_experiment(use_visdom=True, batch_size=32, gdn_act=False, lr=
 
   start_epoch = 0
   while True:
-    train_model(model, optimizer, criterion, n_epochs=n_epochs, batch_size=batch_size, memory_size=memory_size, vp=vp,
+    train_autoencoder(model, optimizer, criterion, n_epochs=n_epochs, batch_size=batch_size, memory_size=memory_size, vp=vp,
                 start_epoch=start_epoch)
     start_epoch += n_epochs
 
@@ -181,9 +181,9 @@ def visdom_plotting(vp, epoch, epoch_loss, loss_type, batch, rec_batch, gdn_act)
   save_image(make_grid(tmp, nrow=3), f'rec_img_exps_loss_{loss_type}_gdn_{gdn_act}.png')
 
 
-def train_model2(model, optimizer, criterion, states, batch_size=32, n_epochs=5, start_epoch=0, vp=None,
-                 gdn_act=False, device=None, add_augmentation=False, body_infos=None, use_separate_loss=True,
-                 add_obfuscation=False):
+def train_autoencoder_incr(model, optimizer, criterion, states, batch_size=32, n_epochs=5, start_epoch=0, vp=None,
+                           gdn_act=False, device=None, add_augmentation=False, body_infos=None, use_separate_loss=True,
+                           add_obfuscation=False):
   if device is None:
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -225,9 +225,9 @@ def train_model2(model, optimizer, criterion, states, batch_size=32, n_epochs=5,
       visdom_plotting(vp, epoch, epoch_loss, type(criterion).__name__, batch_states.cpu(), rec_batch.cpu(), gdn_act)
 
 
-def reconstruction_experiment2(use_visdom=True, batch_size=32, gdn_act=False, lr=1e-3, loss_type='ms_ssim',
-                               n_epochs=5, memory_size=1024, max_ep_len=200, add_augmentation=False, add_body_infos=False,
-                               use_separate_loss=True, normalize_emb=False, max_n_epochs=100, dropout=0.2, add_obfuscation=False):
+def reconstruction_experiment_incr(use_visdom=True, batch_size=32, gdn_act=False, lr=1e-3, loss_type='ms_ssim', dropout=0.2,
+                                   n_epochs=5, memory_size=1024, max_ep_len=200, add_augmentation=False, add_body_infos=False,
+                                   use_separate_loss=True, normalize_emb=False, max_n_epochs=100, add_obfuscation=False):
   device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
   vp = u.VisdomPlotter() if use_visdom else None
   
@@ -254,9 +254,10 @@ def reconstruction_experiment2(use_visdom=True, batch_size=32, gdn_act=False, lr
     body_infos.append((torch.FloatTensor(joints_angle) - MINS) / MAXS_MINS)
 
     if target_reached or current_ep_len % max_ep_len == 0:
-      train_model2(model, optimizer, criterion, states, batch_size=batch_size, n_epochs=n_epochs, start_epoch=start_epoch,
-                   vp=vp, gdn_act=gdn_act, device=device, add_augmentation=add_augmentation, add_obfuscation=add_obfuscation,
-                   body_infos=body_infos if add_body_infos else None, use_separate_loss=use_separate_loss)
+      train_autoencoder_incr(model, optimizer, criterion, states, batch_size=batch_size, n_epochs=n_epochs,
+                             vp=vp, gdn_act=gdn_act, device=device, add_augmentation=add_augmentation,
+                             add_obfuscation=add_obfuscation, start_epoch=start_epoch,
+                             body_infos=body_infos if add_body_infos else None, use_separate_loss=use_separate_loss)
 
       start_epoch += n_epochs
       current_ep_len = 0
@@ -275,14 +276,14 @@ if __name__ == '__main__':
   # Observations :
   # -> if the learning batch is composed of followed step it will not be able to learn as
   #    the sgd assumption on iid is more than not respected
-  # -> same in reconstruction_experiment2, if we not use random.shuffle, it also struggle to converge
+  # -> same in reconstruction_experiment_incr, if we not use random.shuffle, it also struggle to converge
   # -> perform training on small subset of same element before gradually increase dataset size
-  #    seems to allow a fast convergence (reconstruction_experiment2 >> reconstruction_experiment)
+  #    seems to allow a fast convergence (reconstruction_experiment_incr >> reconstruction_experiment)
   #    small overfitting to start learning is beneficial?
-  # -> reducing n_epochs on reconstruction_experiment2 seems to allow a faster convergence,
+  # -> reducing n_epochs on reconstruction_experiment_incr seems to allow a faster convergence,
   #    it may be because it avoid temporary small overfitting?
   #    But leaving n_epochs higher allow the network to more easily reconstruct the red target
-  # -> reconstruction_experiment2 converge in ~20 epochs achieved in ~6min
+  # -> reconstruction_experiment_incr converge in ~20 epochs achieved in ~6min
   # -> reconstruction_experiment struggle to reconstruct the red target and is not able to do it
   #    even after 20 epochs achieved in ~10min
   # -> ms_ssim loss is slower and struggle to reconstruct the red target
@@ -326,12 +327,12 @@ if __name__ == '__main__':
 
     # reconstruction_experiment(use_visdom=args.use_visdom, batch_size=args.batch_size, gdn_act=args.gdn_act,
     #                           lr=args.lr, loss_type=args.loss_type, n_epochs=args.n_epochs, memory_size=args.memory_size)
-    reconstruction_experiment2(use_visdom=args.use_visdom, batch_size=args.batch_size, gdn_act=args.gdn_act, lr=args.lr,
-                               loss_type=args.loss_type, n_epochs=args.n_epochs, memory_size=args.memory_size,
-                               max_ep_len=args.max_ep_len, add_augmentation=args.add_augmentation,
-                               add_body_infos=args.add_body_infos, use_separate_loss=args.use_separate_loss,
-                               normalize_emb=args.normalize_emb, max_n_epochs=args.max_n_epochs, dropout=args.dropout,
-                               add_obfuscation=args.add_obfuscation)
+    reconstruction_experiment_incr(use_visdom=args.use_visdom, batch_size=args.batch_size, gdn_act=args.gdn_act, lr=args.lr,
+                                   loss_type=args.loss_type, n_epochs=args.n_epochs, memory_size=args.memory_size,
+                                   max_ep_len=args.max_ep_len, add_augmentation=args.add_augmentation,
+                                   add_body_infos=args.add_body_infos, use_separate_loss=args.use_separate_loss,
+                                   normalize_emb=args.normalize_emb, max_n_epochs=args.max_n_epochs, dropout=args.dropout,
+                                   add_obfuscation=args.add_obfuscation)
   
 
   # Example to update lr if threshold

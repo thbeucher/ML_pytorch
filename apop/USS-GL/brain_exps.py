@@ -30,11 +30,12 @@ class ImageEmbedder(nn.Module):
       nn.Conv2d(64, 128, 5, stride=2, padding=1),  # [64, 22, 22] -> [128, 10, 10]
       GDN(128) if gdn_act else nn.ReLU(),
       nn.Conv2d(128, output_emb_size, 10),  # [128, 10, 10] -> [256, 1, 1]
+      nn.Flatten(),  # [256, 1, 1] -> [256]
       nn.Dropout(dropout)
     )
   
   def forward(self, img):  # [bs, 3, 180, 180]
-    return self.embedder(img).squeeze()
+    return self.embedder(img)
 
 
 class ImageReconstructor(nn.Module):
