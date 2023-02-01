@@ -22,14 +22,16 @@ import brain_exps as be
 
 
 class AutoEncoder(torch.nn.Module):
-  def __init__(self, gdn_act=False, add_body_infos=False, normalize_emb=False):
+  def __init__(self, gdn_act=False, add_body_infos=False, normalize_emb=False, dropout=0.2):
     super().__init__()
     self.normalize_emb = normalize_emb
     self.encoder = be.ImageEmbedder(gdn_act=gdn_act)
+    self.dropout = torch.nn.Dropout(p=dropout)
     self.decoder = be.ImageReconstructor(gdn_act=gdn_act, n_input_features=258 if add_body_infos else 256)
   
   def forward(self, x, body_infos=None):  # [B, C, H, W], [B, 2]
     code = self.encoder(x)  # -> [B, 256]
+    code = self.dropout(code)
 
     if self.normalize_emb:
       code = torch.nn.functional.normalize(code, p=2, dim=1)
@@ -211,11 +213,11 @@ def train_model2(model, optimizer, criterion, states, batch_size=32, n_epochs=5,
 
 def reconstruction_experiment2(use_visdom=True, batch_size=32, gdn_act=False, lr=1e-3, loss_type='ms_ssim',
                                n_epochs=5, memory_size=1024, max_ep_len=200, add_augmentation=False, add_body_infos=False,
-                               use_separate_loss=True, normalize_emb=False, max_n_epochs=100):
+                               use_separate_loss=True, normalize_emb=False, max_n_epochs=100, dropout=0.2):
   device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
   vp = u.VisdomPlotter() if use_visdom else None
   
-  model = AutoEncoder(gdn_act=gdn_act, add_body_infos=add_body_infos, normalize_emb=normalize_emb).to(device)
+  model = AutoEncoder(gdn_act=gdn_act, add_body_infos=add_body_infos, normalize_emb=normalize_emb, dropout=dropout).to(device)
   optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
   criterion = be.MS_SSIM_Loss(data_range=1.0, size_average=True, channel=3) if loss_type == 'ms_ssim' else torch.nn.MSELoss()
   
@@ -291,6 +293,7 @@ if __name__ == '__main__':
   argparser.add_argument('--memory_size', default=1024, type=int)
   argparser.add_argument('--max_n_epochs', default=100, type=int)
   argparser.add_argument('--lr', default=1e-3, type=float)
+  argparser.add_argument('--dropout', default=0.2, type=float)
   argparser.add_argument('--loss_type', default='mse', type=str, choices=['mse', 'ms_ssim'])
   argparser.add_argument('--force_training', default=False, type=ast.literal_eval)
   args = argparser.parse_args()
@@ -312,7 +315,7 @@ if __name__ == '__main__':
                                loss_type=args.loss_type, n_epochs=args.n_epochs, memory_size=args.memory_size,
                                max_ep_len=args.max_ep_len, add_augmentation=args.add_augmentation,
                                add_body_infos=args.add_body_infos, use_separate_loss=args.use_separate_loss,
-                               normalize_emb=args.normalize_emb, max_n_epochs=args.max_n_epochs)
+                               normalize_emb=args.normalize_emb, max_n_epochs=args.max_n_epochs, dropout=args.dropout)
   
 
   # Example to update lr if threshold
