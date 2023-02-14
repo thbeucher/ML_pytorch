@@ -37,6 +37,13 @@ class AutoEncoder(torch.nn.Module):
       code = torch.cat([code, body_infos], dim=1)  # [B, 258]
 
     return self.decoder(code)
+  
+  @staticmethod
+  def separate_saved_autoencoder(save_name='models/auto_encoder_state.pt'):
+    autoencoder = AutoEncoder()
+    u.load_model(autoencoder, save_name)
+    u.save_checkpoint(autoencoder.encoder, None, 'models/autoencoder_state_encoder.pt')
+    u.save_checkpoint(autoencoder.decoder, None, 'models/autoencoder_state_decoder.pt')
 
 
 def get_game_env(game_view=False):
@@ -227,7 +234,8 @@ def train_autoencoder_incr(model, optimizer, criterion, states, batch_size=32, n
 
 def reconstruction_experiment_incr(use_visdom=True, batch_size=32, gdn_act=False, lr=1e-3, loss_type='ms_ssim', dropout=0.2,
                                    n_epochs=5, memory_size=1024, max_ep_len=200, add_augmentation=False, add_body_infos=False,
-                                   use_separate_loss=True, normalize_emb=False, max_n_epochs=100, add_obfuscation=False):
+                                   use_separate_loss=True, normalize_emb=False, max_n_epochs=100, add_obfuscation=False,
+                                   save_model=False, save_name='models/auto_encoder_state.pt'):
   device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
   vp = u.VisdomPlotter() if use_visdom else None
   
@@ -271,6 +279,197 @@ def reconstruction_experiment_incr(use_visdom=True, batch_size=32, gdn_act=False
   
   env.close()
 
+  if save_model:
+    u.save_checkpoint(model, None, save_name)
+
+
+def train_action_predictor(model, optimizer, criterion, training_data, batch_size=32, device=None, n_epochs=5,
+                           start_epoch=0, vp=None):
+  if device is None:
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+  stack_fn = lambda x: torch.stack(x).to(device)
+  
+  random.shuffle(training_data)
+  training_data = list(training_data)
+
+  for epoch in tqdm(range(start_epoch, n_epochs + start_epoch)):
+    n_good_preds = 0
+    for i in tqdm(range(0, len(training_data), batch_size), leave=False):
+      body_infos, next_body_infos, actions = map(list, zip(*training_data[i:i+batch_size]))
+      body_infos, next_body_infos = map(stack_fn, [body_infos, next_body_infos])  # [B, 2]
+      actions = torch.LongTensor(actions).to(device)  # [B]
+
+      actions_logits = model(body_infos, next_body_infos)
+
+      optimizer.zero_grad()
+      loss = criterion(actions_logits, actions)
+      loss.backward()
+      optimizer.step()
+
+      n_good_preds += (actions == actions_logits.argmax(-1)).sum().item()
+    
+    accuracy = n_good_preds/len(training_data)
+    logging.info(f'Epoch {epoch} | accuracy={accuracy:.3f}')
+
+    if accuracy > 0.98:
+      for param_group in optimizer.param_groups:
+        if param_group['lr'] == 1e-2:
+          param_group['lr'] = 1e-3
+          print('!LR UPDATED to 1e-3!!!!!!!!!!!!!!!!')
+
+    if vp is not None:
+      vp.line_plot('Accuracy', 'Train', 'Training accuracy', epoch, accuracy, x_label='Epoch')
+
+
+def float_tensor_to_binary(my_tensor):
+  int_to_bin = lambda x: torch.Tensor(list(map(int, f'{x:010b}')))
+  return torch.cat([int_to_bin(int(el*1000)) for el in my_tensor])
+
+
+def predict_action_experiment(use_visdom=True, lr=1e-2, memory_size=1024, max_ep_len=200, batch_size=32, n_epochs=5,
+                              max_n_epochs=100, save_model=False, save_name='models/action_predictor_BI.pt'):
+  device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+  vp = u.VisdomPlotter() if use_visdom else None
+
+  model = be.ActionPredictorWbodyinfos().to(device)
+  optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+  criterion = torch.nn.CrossEntropyLoss()
+
+  env, render_mode = get_game_env(game_view=False)
+  MINS, MAXS_MINS = get_min_maxmin_joints()
+
+  start_epoch = 0
+  current_ep_len = 1
+  target_reached = False
+  training_data = deque([], maxlen=memory_size)
+  body_infos = (torch.FloatTensor(env.joints_angle) - MINS) / MAXS_MINS
+  # body_infos = float_tensor_to_binary((torch.FloatTensor(env.joints_angle) - MINS) / MAXS_MINS)
+
+  while True:
+    action = random.randint(0, 4)
+    joints_angle, reward, target_reached, _ = env.step(action)
+
+    env.render(mode=render_mode)
+
+    next_body_infos = (torch.FloatTensor(joints_angle) - MINS) / MAXS_MINS
+    # next_body_infos = float_tensor_to_binary((torch.FloatTensor(joints_angle) - MINS) / MAXS_MINS)
+
+    if action != 0 and torch.equal(body_infos, next_body_infos):
+      action = 0  # action that doesn't change the state so cannot be predicted from body_infos
+
+    training_data.append([body_infos, next_body_infos, action])
+
+    if target_reached or current_ep_len % max_ep_len == 0:
+      train_action_predictor(model, optimizer, criterion, training_data, batch_size=batch_size, device=device, n_epochs=n_epochs,
+                             start_epoch=start_epoch, vp=vp)
+
+      current_ep_len = 0
+      start_epoch += n_epochs
+
+      if start_epoch >= max_n_epochs:
+        break
+
+      env.reset(to_reset='target')
+      env.render(mode=render_mode)
+      body_infos = (torch.FloatTensor(env.joints_angle) - MINS) / MAXS_MINS
+      # body_infos = float_tensor_to_binary((torch.FloatTensor(env.joints_angle) - MINS) / MAXS_MINS)
+    else:
+      body_infos = next_body_infos.clone()
+    
+    current_ep_len += 1
+  
+  env.close()
+
+  if save_model:
+    u.save_checkpoint(model, None, save_name)
+
+
+def train_next_body_infos_predictor(model, optimizer, criterion, training_data, batch_size=32, device=None, n_epochs=5,
+                                    start_epoch=0, vp=None):
+  if device is None:
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+  stack_fn = lambda x: torch.stack(x).to(device)
+  
+  random.shuffle(training_data)
+  training_data = list(training_data)
+
+  for epoch in tqdm(range(start_epoch, n_epochs + start_epoch)):
+    losses = []
+    for i in tqdm(range(0, len(training_data), batch_size), leave=False):
+      body_infos, next_body_infos, actions = map(list, zip(*training_data[i:i+batch_size]))
+      body_infos, next_body_infos = map(stack_fn, [body_infos, next_body_infos])  # [B, 2]
+      actions = torch.nn.functional.one_hot(torch.LongTensor(actions), num_classes=5).to(device)  # [B, 5]
+
+      next_body_infos_predicted = model(body_infos, actions)
+
+      optimizer.zero_grad()
+      loss = criterion(next_body_infos_predicted, next_body_infos)
+      loss.backward()
+      optimizer.step()
+
+      losses.append(loss.item())
+    
+    epoch_loss = np.mean(losses)
+    logging.info(f'Epoch {epoch} | loss={epoch_loss:.6f}')
+
+    if vp is not None:
+      vp.line_plot('Loss', 'Train', 'Training MSE loss', epoch, epoch_loss, x_label='Epoch')
+
+
+def predict_next_state_experiment(use_visdom=True, lr=1e-2, memory_size=1024, max_ep_len=200, batch_size=32, n_epochs=5,
+                                  max_n_epochs=50, save_model=False, save_name='models/next_state_predictor_BI.pt'):
+  device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+  vp = u.VisdomPlotter() if use_visdom else None
+
+  model = be.NextBodyInfosPredictor().to(device)
+  optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+  criterion = torch.nn.MSELoss()
+
+  env, render_mode = get_game_env(game_view=False)
+  MINS, MAXS_MINS = get_min_maxmin_joints()
+
+  start_epoch = 0
+  current_ep_len = 1
+  target_reached = False
+  training_data = deque([], maxlen=memory_size)
+  body_infos = (torch.FloatTensor(env.joints_angle) - MINS) / MAXS_MINS
+  # body_infos = float_tensor_to_binary((torch.FloatTensor(env.joints_angle) - MINS) / MAXS_MINS)
+
+  while True:
+    action = random.randint(0, 4)
+    joints_angle, reward, target_reached, _ = env.step(action)
+
+    env.render(mode=render_mode)
+
+    next_body_infos = (torch.FloatTensor(joints_angle) - MINS) / MAXS_MINS
+    # next_body_infos = float_tensor_to_binary((torch.FloatTensor(joints_angle) - MINS) / MAXS_MINS)
+
+    training_data.append([body_infos, next_body_infos, action])
+
+    if target_reached or current_ep_len % max_ep_len == 0:
+      train_next_body_infos_predictor(model, optimizer, criterion, training_data, batch_size=batch_size, device=device,
+                                      n_epochs=n_epochs, start_epoch=start_epoch, vp=vp)
+
+      current_ep_len = 0
+      start_epoch += n_epochs
+
+      if start_epoch >= max_n_epochs:
+        break
+
+      env.reset(to_reset='target')
+      env.render(mode=render_mode)
+      body_infos = (torch.FloatTensor(env.joints_angle) - MINS) / MAXS_MINS
+      # body_infos = float_tensor_to_binary((torch.FloatTensor(env.joints_angle) - MINS) / MAXS_MINS)
+    else:
+      body_infos = next_body_infos.clone()
+    
+    current_ep_len += 1
+  
+  env.close()
+
+  if save_model:
+    u.save_checkpoint(model, None, save_name)
+
 
 if __name__ == '__main__':
   # Observations :
@@ -298,6 +497,7 @@ if __name__ == '__main__':
   argparser.add_argument('--save_model', default=True, type=ast.literal_eval)
   argparser.add_argument('--load_model', default=True, type=ast.literal_eval)
   argparser.add_argument('--normalize_emb', default=False, type=ast.literal_eval)
+  argparser.add_argument('--train_embedder', default=False, type=ast.literal_eval)
   argparser.add_argument('--add_body_infos', default=False, type=ast.literal_eval)
   argparser.add_argument('--add_obfuscation', default=False, type=ast.literal_eval)
   argparser.add_argument('--add_augmentation', default=False, type=ast.literal_eval)
@@ -317,8 +517,9 @@ if __name__ == '__main__':
   logging.basicConfig(filename=args.log_file, filemode='a', level=logging.INFO,
                       format='%(asctime)s - %(levelname)s - %(message)s')
   
-  rep = input('Start training? (y or n): ') if not args.force_training else 'y'
+  rep = input('Start AutoEncoder training? (y or n): ') if not args.force_training else 'y'
   if rep == 'y':
+    logging.info('>AutoEncoder Training<')
     # seeding for reproducibility
     random.seed(args.seed * args.seed)
     torch.manual_seed(args.seed)
@@ -332,7 +533,33 @@ if __name__ == '__main__':
                                    max_ep_len=args.max_ep_len, add_augmentation=args.add_augmentation,
                                    add_body_infos=args.add_body_infos, use_separate_loss=args.use_separate_loss,
                                    normalize_emb=args.normalize_emb, max_n_epochs=args.max_n_epochs, dropout=args.dropout,
-                                   add_obfuscation=args.add_obfuscation)
+                                   add_obfuscation=args.add_obfuscation, save_model=args.save_model)
+  
+  rep = input('Start ActionPredictor training? (y or n): ')
+  if rep == 'y':
+    logging.info('>ActionPredictor Training<')  # LR = 1e-2
+    # seeding for reproducibility
+    random.seed(args.seed * args.seed)
+    torch.manual_seed(args.seed)
+
+    u.dump_argparser_parameters(args)
+
+    predict_action_experiment(use_visdom=args.use_visdom, batch_size=args.batch_size, lr=args.lr, n_epochs=args.n_epochs,
+                              memory_size=args.memory_size, max_ep_len=args.max_ep_len, max_n_epochs=args.max_n_epochs,
+                              save_model=args.save_model)
+  
+  rep = input('Start NextBodyInfosPredictor training? (y or n): ')
+  if rep == 'y':
+    logging.info('>NextBodyInfosPredictor Training<')
+    # seeding for reproducibility
+    random.seed(args.seed * args.seed)
+    torch.manual_seed(args.seed)
+
+    u.dump_argparser_parameters(args)
+
+    predict_next_state_experiment(use_visdom=args.use_visdom, batch_size=args.batch_size, lr=args.lr, n_epochs=args.n_epochs,
+                                  memory_size=args.memory_size, max_ep_len=args.max_ep_len, max_n_epochs=args.max_n_epochs,
+                                  save_model=args.save_model)
   
 
   # Example to update lr if threshold

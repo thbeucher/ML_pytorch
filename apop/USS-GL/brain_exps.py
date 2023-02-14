@@ -54,9 +54,63 @@ class ImageReconstructor(nn.Module):
       nn.ConvTranspose2d(16, n_output_features, 4, stride=2, padding=1, output_padding=0)  # -> [3, 180, 180]
     )
   
-  def forward(self, x):  # [bs, 256]
-    batch_size, emb_dim = x.shape
-    return torch.sigmoid(self.reconstructor(x.view(batch_size, emb_dim, 1, 1)))
+  def forward(self, embedding):  # [bs, 256]
+    batch_size, emb_dim = embedding.shape
+    return torch.sigmoid(self.reconstructor(embedding.view(batch_size, emb_dim, 1, 1)))
+
+
+class ActionPredictorWstate(nn.Module):
+  def __init__(self, n_actions=5, dropout=0.1):
+    super().__init__()
+    self.predictor = nn.Sequential(nn.Linear(512, 1024), nn.Dropout(dropout), nn.ReLU(),
+                                   nn.Linear(1024, 256), nn.Dropout(dropout), nn.ReLU(),
+                                   nn.Linear(256, n_actions))
+  
+  def forward(self, state_emb, next_state_emb):  # [B, 256], [B, 256]
+    return self.predictor(torch.cat([state_emb, next_state_emb], dim=-1))
+
+
+class ActionPredictorWbodyinfos(nn.Module):
+  def __init__(self, n_actions=5, dropout=0.0):
+    super().__init__()
+    self.predictor = nn.Sequential(nn.Linear(4, 16), nn.Dropout(dropout), nn.ReLU(),
+                                   nn.Linear(16, n_actions))
+  
+  def forward(self, body_infos, next_body_infos):
+    return self.predictor(torch.cat([body_infos, next_body_infos], dim=-1))
+
+
+class NextStatePredictor(nn.Module):
+  def __init__(self, state_emb_dim=256, dropout=0.1):
+    super().__init__()
+    self.predictor = nn.Sequential(nn.Linear(256+5, 1024), nn.Dropout(dropout), nn.ReLU(),
+                                   nn.Linear(1024, 512), nn.Dropout(dropout), nn.ReLU(),
+                                   nn.Linear(512, state_emb_dim))
+  
+  def forward(self, state_emb, action):  # [B, 256], [B, 5]
+    return self.predictor(torch.cat([state_emb, action], dim=-1))
+
+
+class NextBodyInfosPredictor(nn.Module):
+  def __init__(self, body_infos_size=2, n_actions=5, dropout=0.0):
+    super().__init__()
+    self.predictor = nn.Sequential(nn.Linear(body_infos_size + n_actions, 32), nn.Dropout(dropout), nn.ReLU(),
+                                   nn.Linear(32, 16), nn.Dropout(dropout), nn.ReLU(),
+                                   nn.Linear(16, body_infos_size))
+  
+  def forward(self, body_infos, action):  # [B, 2], [B, 5]
+    return self.predictor(torch.cat([body_infos, action], dim=-1))
+
+
+class GoalStatePredictor(nn.Module):
+  def __init__(self, state_emb_size=256, body_infos_size=2, dropout=0.0):
+    super().__init__()
+    self.predictor = nn.Sequential(nn.Linear(state_emb_size + body_infos_size, 512), nn.Dropout(dropout), nn.ReLU(),
+                                   nn.Linear(512, 256), nn.Dropout(dropout), nn.ReLU(),
+                                   nn.Linear(256, body_infos_size), nn.Sigmoid())
+  
+  def forward(self, state_emb, body_infos):
+    return self.predictor(torch.cat([state_emb, body_infos], dim=-1))  # [B, 256+2] -> [B, 2]
 
 
 if __name__ == '__main__':
