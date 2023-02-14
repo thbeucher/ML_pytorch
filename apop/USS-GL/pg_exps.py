@@ -303,6 +303,8 @@ def train_ppo(game_view=False, lr=1e-3, max_game_timestep=200, n_game_scoring_av
               early_stopping_n_step_watcher=20, early_stopping_min_slope=0.001, pretraining=False, model=TOYActorCritic,
               model_conf={}, episode_batch=False):
   print(f'Start PPO training...')
+  device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
   if use_visdom:
     vp = u.VisdomPlotter()
 
@@ -349,7 +351,7 @@ def train_ppo(game_view=False, lr=1e-3, max_game_timestep=200, n_game_scoring_av
           quit_game = True
     
     # Get action from model then perform it
-    action, log_prob = old_policy.act(state)
+    action, log_prob = old_policy.act(state.to(device))
 
     joints_angle, reward, target_reached, _ = env.step(action.item())
 

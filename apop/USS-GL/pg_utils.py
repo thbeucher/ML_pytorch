@@ -1,4 +1,5 @@
 import torch
+import random
 
 
 def compute_discounted_reward_MCE(rewards, discount_factor=0.99):
@@ -56,16 +57,27 @@ def reinforce_update(rewards, log_probs, distri_entropy, optimizer, state_values
 
 
 def ppo_update(states, actions, log_probs, rewards, old_policy, policy, optimizer, normalize_returns=True, discount_factor=0.99,
-               coef_mse_critic=0.5, coef_entropy=0.01, eps=1e-8, n_epochs=5, AC=False, eps_clip=0.2):
+               coef_mse_critic=0.5, coef_entropy=0.01, eps=1e-8, n_epochs=5, AC=False, eps_clip=0.2, shuffling=True):
   '''
   '''
-  returns = get_returns(rewards, normalize_returns=normalize_returns, discount_factor=discount_factor, eps=eps)
+  device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-  old_states = torch.stack(states)
-  old_actions = torch.stack(actions)
-  old_log_probs = torch.stack(log_probs)
+  returns = get_returns(rewards, normalize_returns=normalize_returns, discount_factor=discount_factor, eps=eps).to(device)
+
+  old_states = torch.stack(states).to(device)
+  old_actions = torch.stack(actions).to(device)
+  old_log_probs = torch.stack(log_probs).to(device)
+
+  idxs = list(range(len(old_states)))
 
   for _ in range(n_epochs):
+    if shuffling:
+      random.shuffle(idxs)
+      old_states = old_states[idxs]
+      old_actions = old_actions[idxs]
+      old_log_probs = old_log_probs[idxs]
+      returns = returns[idxs]
+
     # Evaluating old actions
     if AC:
       log_probs, state_values, entropy = policy.evaluate(old_states, old_actions)
