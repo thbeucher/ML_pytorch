@@ -180,7 +180,7 @@ def pretrain_CE(dataset_folder='goal_reaching_dataset/', lr=1e-3, label_smoothin
 
 def train_reinforce(game_view=False, lr=1e-3, max_game_timestep=200, n_game_scoring_average=100, use_visdom=False,
                     load_model=True, save_model=True, save_name='models/toyModel.pt', AC=False, coef_entropy=0.01,
-                    model=TOYActorCritic, model_conf={}, pretraining=False, episode_batch=False):
+                    model=TOYActorCritic, model_conf={}, pretraining=False, episode_batch=False, normalize_returns=True):
   if use_visdom:
     vp = u.VisdomPlotter()
 
@@ -237,7 +237,7 @@ def train_reinforce(game_view=False, lr=1e-3, max_game_timestep=200, n_game_scor
     if target_reached or current_game_timestep > max_game_timestep:
       if target_reached:  # update policy only if the target is reached as there is no reward before that
         pgu.reinforce_update(rewards, log_probs, distri_entropy, optimizer, clear_data=False, coef_entropy=coef_entropy,
-                             state_values=state_values if AC else None)
+                             state_values=state_values if AC else None, normalize_returns=normalize_returns)
 
         time_to_target_memory.append(current_game_timestep / dist_eff_target)
 
@@ -301,7 +301,7 @@ def run_model(save_name='models/toyModel.pt', max_game_timestep=200, AC=False):
 def train_ppo(game_view=False, lr=1e-3, max_game_timestep=200, n_game_scoring_average=100, use_visdom=False,
               load_model=True, save_model=True, save_name='models/toyModel.pt', AC=False, coef_entropy=0.01,
               early_stopping_n_step_watcher=20, early_stopping_min_slope=0.001, pretraining=False, model=TOYActorCritic,
-              model_conf={}, episode_batch=False):
+              model_conf={}, episode_batch=False, normalize_returns=True):
   print(f'Start PPO training...')
   device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -339,6 +339,7 @@ def train_ppo(game_view=False, lr=1e-3, max_game_timestep=200, n_game_scoring_av
   plot_iter = 0
   current_game_timestep, n_total_game_timestep = 0, 0
   time_to_target_memory = []
+  average_exploration_quantity = []
   average_ttt_mem = deque(maxlen=early_stopping_n_step_watcher)
   x_linregress = list(range(early_stopping_n_step_watcher))
   start_time = time.time()
@@ -368,7 +369,8 @@ def train_ppo(game_view=False, lr=1e-3, max_game_timestep=200, n_game_scoring_av
 
     if target_reached or current_game_timestep > max_game_timestep:
       if target_reached:  # update policy only if the target is reached as there is no reward before that
-        pgu.ppo_update(states, actions, log_probs, rewards, old_policy, policy, optimizer, AC=AC, coef_entropy=coef_entropy)
+        pgu.ppo_update(states, actions, log_probs, rewards, old_policy, policy, optimizer, AC=AC, coef_entropy=coef_entropy,
+                       normalize_returns=normalize_returns)
 
         time_to_target_memory.append(current_game_timestep / dist_eff_target)
 
@@ -392,6 +394,21 @@ def train_ppo(game_view=False, lr=1e-3, max_game_timestep=200, n_game_scoring_av
             logging.info(f'Time-to-Target slope = {slope:.4f}')
             if abs(slope) <= early_stopping_min_slope:
               quit_game = True
+      else:
+        # use no-reward episode to train to explore
+        # Compute and plot exploration quantity
+        body_infos = torch.stack(states)[:, :2]
+        exploration_quantity = ((body_infos.max(0)[0] - body_infos.min(0)[0]) / len(state)).sum().item()
+
+        rewards[-1] = exploration_quantity
+        pgu.ppo_update(states, actions, log_probs, rewards, old_policy, policy, optimizer, AC=AC, coef_entropy=coef_entropy,
+                       normalize_returns=False)
+
+        average_exploration_quantity.append(exploration_quantity)
+        if use_visdom and len(average_exploration_quantity) == 100:
+          vp.line_plot('Exploration-quantity', 'Train', 'Exploration reward', None, np.mean(average_exploration_quantity),
+                      'Episode (x100)')
+          average_exploration_quantity.clear()
 
       # Reset game and related variables
       env.reset(to_reset='target')
@@ -427,6 +444,7 @@ if __name__ == '__main__':
   argparser.add_argument('--algo', default='reinforce', type=str, choices=['reinforce', 'ppo'])
   argparser.add_argument('--pretraining', default=False, type=ast.literal_eval)
   argparser.add_argument('--force_training', default=False, type=ast.literal_eval)
+  argparser.add_argument('--normalize_returns', default=True, type=ast.literal_eval)
   args = argparser.parse_args()
 
   logging.basicConfig(filename=args.log_file, filemode='a', level=logging.INFO,
@@ -442,7 +460,8 @@ if __name__ == '__main__':
 
     u.dump_argparser_parameters(args)
     trainers[args.algo](game_view=args.game_view, use_visdom=args.use_visdom, load_model=args.load_model, save_model=args.save_model,
-                        save_name=args.save_name, coef_entropy=args.coef_entropy, AC=args.actor_critic, pretraining=args.pretraining)
+                        save_name=args.save_name, coef_entropy=args.coef_entropy, AC=args.actor_critic, pretraining=args.pretraining,
+                        normalize_returns=args.normalize_returns)
   
   rep = input('Run saved model? (y or n): ') if not args.force_training else 'n'
   if rep == 'y':

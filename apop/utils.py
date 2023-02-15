@@ -18,7 +18,7 @@ import matplotlib.pyplot as plt
 from visdom import Visdom
 from tabulate import tabulate
 from PIL import Image, ImageDraw, ImageFont
-from collections import Counter, OrderedDict
+from collections import Counter, OrderedDict, defaultdict
 
 
 class GELU(nn.Module):
@@ -303,6 +303,7 @@ class VisdomPlotter(object):
     self.viz = Visdom(port=port) if self.server_is_running else None
     self.env = env_name
     self.plots = {}
+    self.plots_ic = defaultdict(int)  # internal count for line_plot
 
   def line_plot(self, var_name, split_name, title_name, x, y, x_label='Epochs'):
     '''
@@ -310,11 +311,15 @@ class VisdomPlotter(object):
       * var_name : variable name (e.g. loss, acc)
       * split_name : split name (e.g. train, val)
       * title_name : titles of the graph (e.g. Classification Accuracy)
-      * x : x axis value (e.g. epoch number)
+      * x : x axis value (e.g. epoch number), if None is given an internal count will be used
       * y : y axis value (e.g. epoch loss)
     '''
     if not self.server_is_running:
       return
+    
+    if x is None:
+      x = self.plots_ic[var_name]
+      self.plots_ic[var_name] += 1
 
     if var_name not in self.plots:
       self.plots[var_name] = self.viz.line(X=np.array([x,x]), Y=np.array([y,y]), env=self.env, opts=dict(
