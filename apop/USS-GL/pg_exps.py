@@ -13,6 +13,7 @@ import numpy as np
 from collections import deque
 from datetime import timedelta
 from scipy.stats import linregress
+from itertools import combinations
 
 ## VARIABLES for 2-DOF robot arm experiment #########################################################
 sys.path.append('../../../robot/')
@@ -400,15 +401,20 @@ def train_ppo(game_view=False, lr=1e-3, max_game_timestep=200, n_game_scoring_av
         body_infos = torch.stack(states)[:, :2]
         exploration_quantity = ((body_infos.max(0)[0] - body_infos.min(0)[0]) / len(state)).sum().item()
 
+        # bi1, bi2 = body_infos[:, 0], body_infos[:, 1]
+        # good_move_quantity = [0] + [get_reward(bi1[i-1:i+2], bi2[i-1:i+2]) for i in range(1, len(states) - 1)] + [0]
+        # exploration_quantity = sum(good_move_quantity) / len(good_move_quantity)
+
         rewards[-1] = exploration_quantity
+        
         pgu.ppo_update(states, actions, log_probs, rewards, old_policy, policy, optimizer, AC=AC, coef_entropy=coef_entropy,
                        normalize_returns=False)
 
-        average_exploration_quantity.append(exploration_quantity)
-        if use_visdom and len(average_exploration_quantity) == 100:
-          vp.line_plot('Exploration-quantity', 'Train', 'Exploration reward', None, np.mean(average_exploration_quantity),
-                      'Episode (x100)')
-          average_exploration_quantity.clear()
+        # average_exploration_quantity.append(exploration_quantity)
+        # if use_visdom and len(average_exploration_quantity) == 100:
+        #   vp.line_plot('Exploration-quantity', 'Train', 'Exploration reward', None, np.mean(average_exploration_quantity),
+        #               'Episode (x100)')
+        #   average_exploration_quantity.clear()
 
       # Reset game and related variables
       env.reset(to_reset='target')
@@ -424,6 +430,21 @@ def train_ppo(game_view=False, lr=1e-3, max_game_timestep=200, n_game_scoring_av
   logging.info(f'Run done in {timedelta(seconds=int(time.time() - start_time))}')
   env.close()
   print('PPO training done.')
+
+
+def compare_window3(w):
+    vals = [i * (w1 != w2) for i, (w1, w2) in zip([1, 2, 1], combinations(w, 2))]
+    return sum(vals)
+
+
+def get_reward(a1, a2):
+    res = compare_window3(a1) + compare_window3(a2)
+    if res > 3:
+        return 1
+    elif res == 3:
+        return 0.5
+    else:
+        return -1
 
 
 if __name__ == '__main__':
@@ -466,3 +487,23 @@ if __name__ == '__main__':
   rep = input('Run saved model? (y or n): ') if not args.force_training else 'n'
   if rep == 'y':
     run_model(save_name=args.save_name, AC=args.actor_critic)
+  
+
+  # Experiment on using un-exploited episodes (that doesn't reach the target so gets so learning signal)
+  # PPO_base = using only episodes that reach the target
+  # PPO_expQ = use un-used episodes with an exploration quantity computed as (max(BI)-min(BI))/len(episode) | BI=body_infos
+  # PPO_GM = use un-used episodes with an good move quantity measure with a window size of 3
+  # PPO_expQGM = expQ + GM
+  # Data collected with 6 differents seed
+  # PPO_base:
+  # -> interactions = ['735,845', '571,808', '791,016', '706,068', '672,545', '686,512']
+  # -> time         = ['0:18:35', '0:15:34', '0:19:40', '0:17:20', '0:17:16', '0:18:04']
+  # PPO_expQ:
+  # -> interactions = ['752,550', '448,163', '625,388', '510,744', '514,540', '506,993']
+  # -> time         = ['0:17:03', '0:13:11', '0:17:48', '0:15:10', '0:15:10', '0:14:59']
+  # PPO_GM:
+  # -> interactions = ['650,229', '874,228', '657,465', '477,714', '509,996', '571,334']
+  # -> time         = ['0:18:06', '0:21:57', '0:17:56', '0:13:57', '0:14:29', '0:14:28']
+  # PPO_expQGM:
+  # -> interactions = ['534,154', '854,490', '820,076', '932,237', '607,271', '981,479']
+  # -> time         = ['0:16:10', '0:24:24', '0:23:55', '0:26:32', '0:17:44', '0:20:35']
