@@ -109,10 +109,14 @@ def compute_separate_loss(states, rec_states, criterion, white_coef=0.9):
   return loss
 
 
-def collect_states(n_states, max_ep_len=50):
-  env, render_mode = get_game_env(game_view=False)
+def collect_states(n_states, max_ep_len=50, env=None, render_mode=None, add_body_infos=False, MINS=None, MAXS_MINS=None):
+  env, render_mode = get_game_env(game_view=False) if env is None else env
+
+  if add_body_infos and (MINS == None or MAXS_MINS == None):
+    MINS, MAXS_MINS = get_min_maxmin_joints()
 
   states = [get_state(env)]
+  body_infos = []
 
   for i in range(n_states-1):
     action = random.randint(0, 4)
@@ -122,12 +126,15 @@ def collect_states(n_states, max_ep_len=50):
 
     states.append(get_state(env))
 
+    if add_body_infos:
+      body_infos.append((torch.FloatTensor(joints_angle) - MINS) / MAXS_MINS)
+
     if target_reached or i % max_ep_len == 0:
       env.reset(to_reset='target')
   
   env.close()
   
-  return states
+  return (states, body_infos) if add_body_infos else states
 
 
 def train_autoencoder(model, optimizer, criterion, n_epochs=10, batch_size=32, memory_size=1024, vp=None, start_epoch=0):
@@ -229,6 +236,10 @@ def train_autoencoder_incr(model, optimizer, criterion, states, batch_size=32, n
     logging.info(f'Epoch {epoch} | loss={epoch_loss:.5f}')
 
     if vp is not None:
+      with torch.no_grad():
+        model.eval()
+        rec_batch = model(batch_states_to_rec, body_infos=batch_body_infos)
+        model.train()
       visdom_plotting(vp, epoch, epoch_loss, type(criterion).__name__, batch_states.cpu(), rec_batch.cpu(), gdn_act)
 
 
