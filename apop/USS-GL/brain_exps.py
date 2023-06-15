@@ -1,7 +1,11 @@
+import os
 import sys
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+sys.path.append(os.path.abspath(__file__).replace('USS-GL/brain_exps.py', ''))
+import utils as u
 
 # from https://github.com/VainF/pytorch-msssim
 sys.path.append('../../../pytorch-msssim/')
@@ -22,12 +26,16 @@ class ImageEmbedder(nn.Module):
     # # in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1
     self.embedder = nn.Sequential(
       nn.Conv2d(n_input_features, 16, 4, stride=2, padding=1),  # [3, 180, 180] -> [16, 90, 90]
+      torch.nn.BatchNorm2d(16),
       GDN(16) if gdn_act else nn.ReLU(),
       nn.Conv2d(16, 32, 4, stride=2, padding=1),  # [16, 90, 90] -> [32, 45, 45]
+      torch.nn.BatchNorm2d(32),
       GDN(32) if gdn_act else nn.ReLU(),
       nn.Conv2d(32, 64, 4, stride=2, padding=1),  # [32, 45, 45] -> [64, 22, 22]
+      torch.nn.BatchNorm2d(64),
       GDN(64) if gdn_act else nn.ReLU(),
       nn.Conv2d(64, 128, 5, stride=2, padding=1),  # [64, 22, 22] -> [128, 10, 10]
+      torch.nn.BatchNorm2d(128),
       GDN(128) if gdn_act else nn.ReLU(),
       nn.Conv2d(128, output_emb_size, 10),  # [128, 10, 10] -> [256, 1, 1]
       nn.Flatten(),  # [256, 1, 1] -> [256]
@@ -44,12 +52,16 @@ class ImageReconstructor(nn.Module):
     # in_channels, out_channels, kernel_size, stride=1, padding=0, output_padding=0
     self.reconstructor = nn.Sequential(
       nn.ConvTranspose2d(n_input_features, 128, 10),  # [256, 1, 1] -> [128, 10, 10]
+      torch.nn.BatchNorm2d(128),
       GDN(128, inverse=True) if gdn_act else nn.ReLU(),
       nn.ConvTranspose2d(128, 64, 5, stride=2, padding=1, output_padding=1),  # [128, 10, 10] -> [64, 22, 22]
+      torch.nn.BatchNorm2d(64),
       GDN(64, inverse=True) if gdn_act else nn.ReLU(),
       nn.ConvTranspose2d(64, 32, 4, stride=2, padding=1, output_padding=1),  # [64, 22, 22] -> [32, 45, 45]
+      torch.nn.BatchNorm2d(32),
       GDN(32, inverse=True) if gdn_act else nn.ReLU(),
       nn.ConvTranspose2d(32, 16, 4, stride=2, padding=1, output_padding=0),  # [32, 45, 45] -> [16, 90, 90]
+      torch.nn.BatchNorm2d(16),
       GDN(16, inverse=True) if gdn_act else nn.ReLU(),
       nn.ConvTranspose2d(16, n_output_features, 4, stride=2, padding=1, output_padding=0)  # -> [3, 180, 180]
     )

@@ -197,7 +197,7 @@ def visdom_plotting(vp, epoch, epoch_loss, loss_type, batch, rec_batch, gdn_act)
 
 def train_autoencoder_incr(model, optimizer, criterion, states, batch_size=32, n_epochs=5, start_epoch=0, vp=None,
                            gdn_act=False, device=None, add_augmentation=False, body_infos=None, use_separate_loss=True,
-                           add_obfuscation=False):
+                           add_obfuscation=False, loss_type='mse'):  # loss_type = 'mse' or 'ce'
   if device is None:
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -226,7 +226,11 @@ def train_autoencoder_incr(model, optimizer, criterion, states, batch_size=32, n
       rec_batch = model(batch_states_to_rec, body_infos=batch_body_infos)
 
       optimizer.zero_grad()
-      loss = compute_separate_loss(batch_states, rec_batch, criterion) if use_separate_loss else criterion(rec_batch, batch_states)
+      if loss_type in ['mse', 'ms_ssim']:
+        loss = compute_separate_loss(batch_states, rec_batch, criterion) if use_separate_loss else criterion(rec_batch, batch_states)
+      else:
+        rec_distri = torch.distributions.Independent(torch.distributions.Normal(rec_batch, 1), 3)
+        loss = -torch.mean(rec_distri.log_prob(batch_states_to_rec))
       loss.backward()
       optimizer.step()
 
@@ -238,7 +242,7 @@ def train_autoencoder_incr(model, optimizer, criterion, states, batch_size=32, n
     if vp is not None:
       with torch.no_grad():
         model.eval()
-        rec_batch = model(batch_states_to_rec, body_infos=batch_body_infos)
+        rec_batch = model(batch_states, body_infos=batch_body_infos)
         model.train()
       visdom_plotting(vp, epoch, epoch_loss, type(criterion).__name__, batch_states.cpu(), rec_batch.cpu(), gdn_act)
 
@@ -275,7 +279,7 @@ def reconstruction_experiment_incr(use_visdom=True, batch_size=32, gdn_act=False
     if target_reached or current_ep_len % max_ep_len == 0:
       train_autoencoder_incr(model, optimizer, criterion, states, batch_size=batch_size, n_epochs=n_epochs,
                              vp=vp, gdn_act=gdn_act, device=device, add_augmentation=add_augmentation,
-                             add_obfuscation=add_obfuscation, start_epoch=start_epoch,
+                             add_obfuscation=add_obfuscation, start_epoch=start_epoch, loss_type=loss_type,
                              body_infos=body_infos if add_body_infos else None, use_separate_loss=use_separate_loss)
 
       start_epoch += n_epochs
@@ -501,6 +505,8 @@ if __name__ == '__main__':
   # -> between 2 runs, the reconstruction of the red point vary a lot and often it struggles to reconstruct it
   # -> By using a separate loss for white pixels and other pixels and keeping a ratio giving more importance
   #    to the white loss (as there is way more white pixels) allow a fast convergence to a good reconstruction
+  # -> Adding batch_norm in ImageEmbedder & ImageReconstructor slow down the color learning but stabilize the
+  #    shape learning
   argparser = argparse.ArgumentParser(prog='rec_exps.py', description='')
   argparser.add_argument('--log_file', default='_tmp_rec_exps_logs.txt', type=str)
   argparser.add_argument('--gdn_act', default=False, type=ast.literal_eval)
@@ -521,7 +527,7 @@ if __name__ == '__main__':
   argparser.add_argument('--max_n_epochs', default=100, type=int)
   argparser.add_argument('--lr', default=1e-3, type=float)
   argparser.add_argument('--dropout', default=0.2, type=float)
-  argparser.add_argument('--loss_type', default='mse', type=str, choices=['mse', 'ms_ssim'])
+  argparser.add_argument('--loss_type', default='mse', type=str, choices=['mse', 'ms_ssim', 'ce'])
   argparser.add_argument('--force_training', default=False, type=ast.literal_eval)
   args = argparser.parse_args()
 
