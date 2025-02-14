@@ -68,11 +68,12 @@ class Classifier(nn.Module):
     def __init__(self, recurrent=False):
         super(Classifier, self).__init__()
         self.recurrent = recurrent
-        print(f"Classifier mode = {'Recurrent' if self.recurrent else 'Linear'}")
+        print(f"Classifier mode: {'Recurrent' if self.recurrent else 'Linear'}")
         if recurrent:
             self.classifier = nn.LSTM(32, 32, num_layers=1, batch_first=True, proj_size=10)
         else:
-            self.classifier = nn.Linear(32, 10)
+            # self.classifier = nn.Linear(32, 10)
+            self.classifier = nn.Sequential(nn.Linear(32, 64), nn.ReLU(), nn.Linear(64, 10))
     
     def forward(self, x):
         if self.recurrent:
@@ -364,3 +365,15 @@ if __name__ == "__main__":
     #
     # PredictiveTrainer rnn-classifier = encode 3 views of the same image then provide them to a recurrent network
     # Accuracy = 95.45% | done in 1mn03s
+    #
+    # PredictiveTrainer with bigger linear classifier
+    # To test if the gain obtained with the RNN classifier is just because it's expressive power if bigger
+    # let's increase the simple classifier from Linear() to Sequential(Linear, ReLU, Linear)
+    # Accuracy = 93.07% | done in 47s
+    # PS: increasing the hidden size of the classifier doesn't help
+    #     e.g. from 64 to 128 give lower accuracy of 91.93% done in 59s
+    #
+    # PredictiveTrainer with bigger linear classifier and concatenated views
+    # The code is no longer here but an experiment was conduct with concatenated views instead of sum
+    # and a bigger classifier (Sequential(Linear(3*32, 32), ReLU, Linear))
+    # Accuracy = 92.50% | done in 59s
