@@ -1,3 +1,4 @@
+import os
 import click
 import torch
 import torch.nn as nn
@@ -18,6 +19,18 @@ def execution_time(func):
         print(f'Function "{func.__name__}" executed in: {time_taken}')
         return result
     return wrapper
+
+
+def rotate_batch_fixed_angle(images, angle=30):
+    theta = torch.zeros(images.size(0), 2, 3)
+    theta[:, 0, 0] = torch.cos(torch.deg2rad(torch.tensor(angle)))
+    theta[:, 0, 1] = -torch.sin(torch.deg2rad(torch.tensor(angle)))
+    theta[:, 1, 0] = torch.sin(torch.deg2rad(torch.tensor(angle)))
+    theta[:, 1, 1] = torch.cos(torch.deg2rad(torch.tensor(angle)))
+    
+    grid = torch.nn.functional.affine_grid(theta, images.size(), align_corners=False)
+    rotated_images = torch.nn.functional.grid_sample(images, grid, align_corners=False)
+    return rotated_images
 
 
 class Encoder(nn.Module):
@@ -52,16 +65,26 @@ class Decoder(nn.Module):
 
 
 class Classifier(nn.Module):
-    def __init__(self):
+    def __init__(self, recurrent=False):
         super(Classifier, self).__init__()
-        self.fc = nn.Sequential(nn.Linear(32, 10))
+        self.recurrent = recurrent
+        print(f"Classifier mode = {'Recurrent' if self.recurrent else 'Linear'}")
+        if recurrent:
+            self.classifier = nn.LSTM(32, 32, num_layers=1, batch_first=True, proj_size=10)
+        else:
+            self.classifier = nn.Linear(32, 10)
     
     def forward(self, x):
-        return self.fc(x)
+        if self.recurrent:
+            out, (hn, cn) = self.classifier(x)
+            out = out[:, -1, :]
+        else:
+            out = self.classifier(x)
+        return out
 
 
 class BaseTrainer():
-    def __init__(self):
+    def __init__(self, *args, **kwargs):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.set_dataloader()
         self.create_model()
@@ -83,9 +106,18 @@ class BaseTrainer():
         self.criterion = nn.CrossEntropyLoss()
         self.optimizer = optim.Adam(self.model.parameters(), lr=0.001)
 
+    def save(self):
+        if not os.path.isdir('models'):
+            os.makedirs("models")
+        torch.save(self.model.state_dict(), "./models/base_trainer_model.pt")
+    
+    def load(self):
+        self.model.load_state_dict(torch.load("./models/base_trainer_model.pt"))
+    
     @execution_time
     def train(self, epochs=10):
         for epoch in range(epochs):
+            total_loss = 0.0
             for data, labels in self.train_loader:
                 data, labels = data.to(self.device), labels.to(self.device)
                 outputs = self.model(data)
@@ -94,8 +126,11 @@ class BaseTrainer():
                 self.optimizer.zero_grad()
                 loss.backward()
                 self.optimizer.step()
+
+                total_loss += loss.item()
             
-            print(f'Epoch [{epoch+1}/{epochs}], Loss: {loss.item():.4f}')
+            avg_loss = total_loss / len(self.train_loader)
+            print(f'Epoch [{epoch+1}/{epochs}], Loss: {loss.item():.4f} | avg_loss: {avg_loss:.4f}')
 
     @torch.no_grad()
     def evaluate(self):
@@ -112,7 +147,7 @@ class BaseTrainer():
 
 
 class AutoEncoderTrainer(BaseTrainer):
-    def __init__(self):
+    def __init__(self, *args, **kwargs):
         super().__init__()
     
     def create_model(self):
@@ -174,7 +209,10 @@ class AutoEncoderTrainer(BaseTrainer):
 
 
 class PredictiveTrainer(BaseTrainer):
-    def __init__(self):
+    def __init__(self, *args, sum_views=False, recurrent=False, **kwargs):
+        self.sum_views = sum_views
+        print(f"Summing different views: {self.sum_views}")
+        self.recurrent = recurrent
         super().__init__()
     
     def create_model(self):
@@ -186,7 +224,7 @@ class PredictiveTrainer(BaseTrainer):
         self.rec_fc2 = nn.Sequential(nn.Linear(64, 128), nn.ReLU())
         self.rec_fc3 = nn.Sequential(nn.Linear(32, 64), nn.ReLU())
 
-        self.classifier = Classifier()
+        self.classifier = Classifier(recurrent=self.recurrent)
     
     def get_criterion_n_optimizer(self):
         self.predictive_criterion = nn.MSELoss()
@@ -198,9 +236,9 @@ class PredictiveTrainer(BaseTrainer):
 
         self.clf_trainer = optim.Adam(self.classifier.parameters())
     
-    def train(self):
+    @execution_time
+    def train(self, epochs = 7):
         print("Train first layer...")
-        epochs = 7
         for epoch in range(epochs):
           for data, _ in self.train_loader:
               data = data.to(self.device)
@@ -246,10 +284,21 @@ class PredictiveTrainer(BaseTrainer):
             for data, labels in self.train_loader:
                 data, labels = data.to(self.device), labels.to(self.device)
                 with torch.no_grad():
-                    out1 = self.fc1(data)
-                    out2 = self.fc2(out1)
-                    out3 = self.fc3(out2)
-                out = self.classifier(out3)
+                    if self.sum_views or self.recurrent:
+                        bs = data.size(0)
+                        embedding_ori = self.fc3(self.fc2(self.fc1(data)))
+                        data_left = rotate_batch_fixed_angle(data.view(bs, 1, 28, 28)).view(bs, -1)
+                        embedding_left = self.fc3(self.fc2(self.fc1(data_left)))
+                        data_right = rotate_batch_fixed_angle(data.view(bs, 1, 28, 28), angle=-30).view(bs, -1)
+                        embedding_right = self.fc3(self.fc2(self.fc1(data_right)))
+
+                        if self.sum_views:
+                            embedding = embedding_ori + embedding_left + embedding_right
+                        else:
+                            embedding = torch.stack([embedding_ori, embedding_left, embedding_right], dim=1)
+                    else:
+                        embedding = self.fc3(self.fc2(self.fc1(data)))
+                out = self.classifier(embedding)
                 loss = self.clf_criterion(out, labels)
                 self.clf_trainer.zero_grad()
                 loss.backward()
@@ -261,9 +310,20 @@ class PredictiveTrainer(BaseTrainer):
         correct, total = 0, 0
         for data, labels in self.test_loader:
             data, labels = data.to(self.device), labels.to(self.device)
-            out1 = self.fc1(data)
-            out2 = self.fc2(out1)
-            embedding = self.fc3(out2)
+            if self.sum_views or self.recurrent:
+                bs = data.size(0)
+                embedding_ori = self.fc3(self.fc2(self.fc1(data)))
+                data_left = rotate_batch_fixed_angle(data.view(bs, 1, 28, 28)).view(bs, -1)
+                embedding_left = self.fc3(self.fc2(self.fc1(data_left)))
+                data_right = rotate_batch_fixed_angle(data.view(bs, 1, 28, 28), angle=-30).view(bs, -1)
+                embedding_right = self.fc3(self.fc2(self.fc1(data_right)))
+
+                if self.sum_views:
+                    embedding = embedding_ori + embedding_left + embedding_right
+                else:
+                    embedding = torch.stack([embedding_ori, embedding_left, embedding_right], dim=1)
+            else:
+                embedding = self.fc3(self.fc2(self.fc1(data)))
             outputs = self.classifier(embedding)
             _, predicted = torch.max(outputs, 1)
             total += labels.size(0)
@@ -275,12 +335,32 @@ class PredictiveTrainer(BaseTrainer):
 
 @click.command()
 @click.option("--trainer", "-t", "trainer", type=str, default="base")
-def main(trainer):
+@click.option("--sum-views", "-s", "sum_views", is_flag=True)
+@click.option("--recurrent", "-r", is_flag=True)
+def main(trainer, sum_views, recurrent):
+    torch.manual_seed(42)
     trainers = {'base': BaseTrainer, 'autoencoder': AutoEncoderTrainer, 'predictive': PredictiveTrainer}
-    ctrainer = trainers[trainer]()
+    ctrainer = trainers[trainer](sum_views=sum_views, recurrent=recurrent)
     ctrainer.train()
     ctrainer.evaluate()
 
 
 if __name__ == "__main__":
     main()
+    # RESULTS: 
+    # No hyperparameters tuning done
+    #
+    # BaseTrainer = Fully-connected encoding + classification layer
+    # Accuracy = 97.15% | done in 20s
+    #
+    # AutoEncoderTrainer = Fully-connected Encoder-Decoder training then classification layer training
+    # Accuracy = 90.17% | done in 43s
+    #
+    # PredictiveTrainer base = Train each fully-connected layers independently using reconstruction loss
+    # Accuracy = 87.12% | done in 48s
+    #
+    # PredictiveTrainer sum-views = sum 3 views of the same image before trying to classified it
+    # Accuracy = 86.63% | done in 58s
+    #
+    # PredictiveTrainer rnn-classifier = encode 3 views of the same image then provide them to a recurrent network
+    # Accuracy = 95.45% | done in 1mn03s
