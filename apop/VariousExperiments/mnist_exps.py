@@ -86,7 +86,9 @@ class Classifier(nn.Module):
 
 class BaseTrainer():
     def __init__(self, *args, **kwargs):
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # self.device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
+        self.device = torch.device("cpu")
+        print(f"Current device use: {self.device}")
         self.set_dataloader()
         self.create_model()
         self.get_criterion_n_optimizer()
@@ -209,6 +211,41 @@ class AutoEncoderTrainer(BaseTrainer):
         print(f'Classifier Accuracy: {accuracy:.2f}%')
 
 
+class PredictiveLinearNet():
+    BASE_CONFIG = {'layers_conf': [(28*28, 128), (128, 64), (64, 32)], 'act_fn': nn.ReLU, 'first_act_fn': nn.Sigmoid,
+                   'optimizer': optim.Adam, 'criterion': nn.MSELoss}
+    def __init__(self, config={}):
+        self.config = {**PredictiveLinearNet.BASE_CONFIG, **config}
+
+        self.criterion = self.config['criterion']()
+        self.optimizers = []
+
+        layers, rec_layers = [], []
+        for i, (n_in, n_out) in enumerate(self.config['layers_conf']):
+            layers.append(nn.Sequential(nn.Linear(n_in, n_out), self.config['act_fn']()))
+            rec_layers.append(nn.Sequential(nn.Linear(n_out, n_in), self.config['first_act_fn']() if i == 0 else self.config['act_fn']()))
+
+            self.optimizers.append(self.config['optimizer'](list(layers[-1].parameters()) + list(rec_layers[-1].parameters())))
+
+        self.layers = nn.ModuleList(layers)
+        self.rec_layers = nn.ModuleList(rec_layers)
+    
+    def forward(self, x, layer_no=None):
+        if layer_no:
+            assert layer_no < len(self.layers)
+
+        with torch.no_grad():
+            for layer in self.layers[:layer_no]:  # if layer_no is None, it will go through all layers
+                x = layer(x)
+
+        if layer_no is not None:
+            out = self.layers[layer_no](x)
+            rec_x = self.rec_layers[layer_no](out)
+            return x, rec_x
+        else:  # inference time
+            return x
+
+
 class PredictiveTrainer(BaseTrainer):
     def __init__(self, *args, sum_views=False, recurrent=False, **kwargs):
         self.sum_views = sum_views
@@ -217,68 +254,30 @@ class PredictiveTrainer(BaseTrainer):
         super().__init__()
     
     def create_model(self):
-        self.fc1 = nn.Sequential(nn.Linear(28*28, 128), nn.ReLU())
-        self.fc2 = nn.Sequential(nn.Linear(128, 64), nn.ReLU())
-        self.fc3 = nn.Sequential(nn.Linear(64, 32), nn.ReLU())
-
-        self.rec_fc1 = nn.Sequential(nn.Linear(128, 28*28), nn.Sigmoid())
-        self.rec_fc2 = nn.Sequential(nn.Linear(64, 128), nn.ReLU())
-        self.rec_fc3 = nn.Sequential(nn.Linear(32, 64), nn.ReLU())
-
+        self.model = PredictiveLinearNet()
         self.classifier = Classifier(recurrent=self.recurrent)
     
     def get_criterion_n_optimizer(self):
-        self.predictive_criterion = nn.MSELoss()
         self.clf_criterion = nn.CrossEntropyLoss()
-
-        self.fc1_trainer = optim.Adam(list(self.fc1.parameters()) + list(self.rec_fc1.parameters()))
-        self.fc2_trainer = optim.Adam(list(self.fc2.parameters()) + list(self.rec_fc2.parameters()))
-        self.fc3_trainer = optim.Adam(list(self.fc3.parameters()) + list(self.rec_fc3.parameters()))
-
         self.clf_trainer = optim.Adam(self.classifier.parameters())
+    
+    def train_model_layer(self, data, layer_no):
+        out, rec = self.model.forward(data, layer_no=layer_no)
+        loss = self.model.criterion(rec, out)
+        self.model.optimizers[layer_no].zero_grad()
+        loss.backward()
+        self.model.optimizers[layer_no].step()
+        return loss
     
     @execution_time
     def train(self, epochs = 7):
-        print("Train first layer...")
-        for epoch in range(epochs):
-          for data, _ in self.train_loader:
-              data = data.to(self.device)
-              out = self.fc1(data)
-              rec = self.rec_fc1(out)
-              loss = self.predictive_criterion(rec, data)
-              self.fc1_trainer.zero_grad()
-              loss.backward()
-              self.fc1_trainer.step()
-          print(f'Epoch [{epoch+1}/{epochs}], Loss: {loss.item():.4f}')
-        
-        print("Train second layer...")
-        for epoch in range(epochs):
-            for data, _ in self.train_loader:
-                data = data.to(self.device)
-                with torch.no_grad():
-                    out1 = self.fc1(data)
-                out = self.fc2(out1)
-                rec = self.rec_fc2(out)
-                loss = self.predictive_criterion(rec, out1)
-                self.fc2_trainer.zero_grad()
-                loss.backward()
-                self.fc2_trainer.step()
-            print(f'Epoch [{epoch+1}/{epochs}], Loss: {loss.item():.4f}')
-        
-        print("Train third layer...")
-        for epoch in range(epochs):
-            for data, _ in self.train_loader:
-                data = data.to(self.device)
-                with torch.no_grad():
-                    out1 = self.fc1(data)
-                    out2 = self.fc2(out1)
-                out = self.fc3(out2)
-                rec = self.rec_fc3(out)
-                loss = self.predictive_criterion(rec, out2)
-                self.fc3_trainer.zero_grad()
-                loss.backward()
-                self.fc3_trainer.step()
-            print(f'Epoch [{epoch+1}/{epochs}], Loss: {loss.item():.4f}')
+        for i in range(len(self.model.layers)):
+            print(f"Train layer {i+1}...")
+            for epoch in range(epochs):
+                for data, _ in self.train_loader:
+                    data = data.to(self.device)
+                    loss = self.train_model_layer(data, i)
+                print(f'Epoch [{epoch+1}/{epochs}], Loss: {loss.item():.4f}')
         
         print("Train classifier...")
         for epoch in range(epochs):
@@ -287,11 +286,11 @@ class PredictiveTrainer(BaseTrainer):
                 with torch.no_grad():
                     if self.sum_views or self.recurrent:
                         bs = data.size(0)
-                        embedding_ori = self.fc3(self.fc2(self.fc1(data)))
+                        embedding_ori = self.model.forward(data)
                         data_left = rotate_batch_fixed_angle(data.view(bs, 1, 28, 28)).view(bs, -1)
-                        embedding_left = self.fc3(self.fc2(self.fc1(data_left)))
+                        embedding_left = self.model.forward(data_left)
                         data_right = rotate_batch_fixed_angle(data.view(bs, 1, 28, 28), angle=-30).view(bs, -1)
-                        embedding_right = self.fc3(self.fc2(self.fc1(data_right)))
+                        embedding_right = self.model.forward(data_right)
 
                         if self.sum_views:
                             embedding = embedding_ori + embedding_left + embedding_right
@@ -313,18 +312,18 @@ class PredictiveTrainer(BaseTrainer):
             data, labels = data.to(self.device), labels.to(self.device)
             if self.sum_views or self.recurrent:
                 bs = data.size(0)
-                embedding_ori = self.fc3(self.fc2(self.fc1(data)))
+                embedding_ori = self.model.forward(data)
                 data_left = rotate_batch_fixed_angle(data.view(bs, 1, 28, 28)).view(bs, -1)
-                embedding_left = self.fc3(self.fc2(self.fc1(data_left)))
+                embedding_left = self.model.forward(data_left)
                 data_right = rotate_batch_fixed_angle(data.view(bs, 1, 28, 28), angle=-30).view(bs, -1)
-                embedding_right = self.fc3(self.fc2(self.fc1(data_right)))
+                embedding_right = self.model.forward(data_right)
 
                 if self.sum_views:
                     embedding = embedding_ori + embedding_left + embedding_right
                 else:
                     embedding = torch.stack([embedding_ori, embedding_left, embedding_right], dim=1)
             else:
-                embedding = self.fc3(self.fc2(self.fc1(data)))
+                embedding = self.model.forward(data)
             outputs = self.classifier(embedding)
             _, predicted = torch.max(outputs, 1)
             total += labels.size(0)
@@ -340,9 +339,11 @@ class PredictiveTrainer(BaseTrainer):
 @click.option("--recurrent", "-r", is_flag=True)
 def main(trainer, sum_views, recurrent):
     torch.manual_seed(42)
+    # torch.set_float32_matmul_precision("high")
     trainers = {'base': BaseTrainer, 'autoencoder': AutoEncoderTrainer, 'predictive': PredictiveTrainer}
     ctrainer = trainers[trainer](sum_views=sum_views, recurrent=recurrent)
     ctrainer.train()
+    # import code; code.interact(local=locals())
     ctrainer.evaluate()
 
 
