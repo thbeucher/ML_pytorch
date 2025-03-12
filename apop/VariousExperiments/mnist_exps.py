@@ -1,12 +1,14 @@
 import os
 import click
 import torch
+import torchvision
+import pandas as pd
 import torch.nn as nn
 import torch.optim as optim
-import torchvision
 import torchvision.transforms as transforms
 
 from datetime import datetime
+from tabulate import tabulate
 from torch.utils.data import DataLoader
 
 
@@ -147,6 +149,7 @@ class BaseTrainer():
 
         accuracy = 100 * correct / total
         print(f'Classifier Accuracy: {accuracy:.2f}%')
+        return accuracy
 
 
 class AutoEncoderTrainer(BaseTrainer):
@@ -209,6 +212,7 @@ class AutoEncoderTrainer(BaseTrainer):
 
         accuracy = 100 * correct / total
         print(f'Classifier Accuracy: {accuracy:.2f}%')
+        return accuracy
 
 
 class PredictiveLinearNet():
@@ -238,12 +242,12 @@ class PredictiveLinearNet():
             for layer in self.layers[:layer_no]:  # if layer_no is None, it will go through all layers
                 x = layer(x)
 
-        if layer_no is not None:
-            out = self.layers[layer_no](x)
-            rec_x = self.rec_layers[layer_no](out)
-            return x, rec_x
-        else:  # inference time
+        if layer_no is None:  # inference
             return x
+        
+        out = self.layers[layer_no](x)
+        rec_x = self.rec_layers[layer_no](out)
+        return x, rec_x
 
 
 class PredictiveTrainer(BaseTrainer):
@@ -297,7 +301,7 @@ class PredictiveTrainer(BaseTrainer):
                         else:
                             embedding = torch.stack([embedding_ori, embedding_left, embedding_right], dim=1)
                     else:
-                        embedding = self.fc3(self.fc2(self.fc1(data)))
+                        embedding = self.model.forward(data)
                 out = self.classifier(embedding)
                 loss = self.clf_criterion(out, labels)
                 self.clf_trainer.zero_grad()
@@ -331,20 +335,40 @@ class PredictiveTrainer(BaseTrainer):
 
         accuracy = 100 * correct / total
         print(f'Classifier Accuracy: {accuracy:.2f}%')
+        return accuracy
 
 
 @click.command()
 @click.option("--trainer", "-t", "trainer", type=str, default="base")
 @click.option("--sum-views", "-s", "sum_views", is_flag=True)
 @click.option("--recurrent", "-r", is_flag=True)
-def main(trainer, sum_views, recurrent):
-    torch.manual_seed(42)
-    # torch.set_float32_matmul_precision("high")
+@click.option("--eval-all", "-e", 'eval_all', is_flag=True)
+def main(trainer, sum_views, recurrent, eval_all):
     trainers = {'base': BaseTrainer, 'autoencoder': AutoEncoderTrainer, 'predictive': PredictiveTrainer}
-    ctrainer = trainers[trainer](sum_views=sum_views, recurrent=recurrent)
-    ctrainer.train()
-    # import code; code.interact(local=locals())
-    ctrainer.evaluate()
+
+    if eval_all:
+        to_show = {'trainer': [], 'sum_views': [], 'recurrent': [], 'accuracy': []}
+        for k, v in trainers.items():
+            for sum_views in [False, True]:
+                for recurrent  in [False, True]:
+                    if (sum_views and recurrent) or ((sum_views or recurrent) and k != 'predictive'):
+                        continue
+                    torch.manual_seed(42)
+                    ctrainer = v(sum_views=sum_views, recurrent=recurrent)
+                    ctrainer.train()
+                    cacc = ctrainer.evaluate()
+                    to_show['trainer'].append(k)
+                    to_show['sum_views'].append(sum_views)
+                    to_show['recurrent'].append(recurrent)
+                    to_show['accuracy'].append(f"{cacc:.2f}")
+        print(tabulate(pd.DataFrame.from_dict(to_show), headers='keys', tablefmt='psql'))
+    else:
+        torch.manual_seed(42)
+        # torch.set_float32_matmul_precision("high")
+        ctrainer = trainers[trainer](sum_views=sum_views, recurrent=recurrent)
+        ctrainer.train()
+        # import code; code.interact(local=locals())
+        ctrainer.evaluate()
 
 
 if __name__ == "__main__":
