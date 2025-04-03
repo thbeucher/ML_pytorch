@@ -9,6 +9,7 @@ import random
 import logging
 import argparse
 import numpy as np
+# import gymnasium as gym
 
 from collections import deque
 from datetime import timedelta
@@ -18,6 +19,9 @@ from itertools import combinations
 ## VARIABLES for 2-DOF robot arm experiment #########################################################
 sys.path.append('../../../robot/')
 
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+# device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
+
 MIN_ANGLE0, MAX_ANGLE0 = 0, 90  # joint1
 MIN_ANGLE1, MAX_ANGLE1 = 0, 180  # joint2
 MIN_X_TARGET, MAX_X_TARGET = 125, 350
@@ -26,8 +30,8 @@ MAX_MIN_ANGLE0 = MAX_ANGLE0 - MIN_ANGLE0
 MAX_MIN_ANGLE1 = MAX_ANGLE1 - MIN_ANGLE1
 MAX_MIN_X_TARGET = MAX_X_TARGET - MIN_X_TARGET
 MAX_MIN_Y_TARGET = MAX_Y_TARGET - MIN_Y_TARGET
-MAXS_MINS = torch.FloatTensor([MAX_MIN_ANGLE0, MAX_MIN_ANGLE1, MAX_MIN_X_TARGET, MAX_MIN_Y_TARGET])
-MINS = torch.FloatTensor([MIN_ANGLE0, MIN_ANGLE1, MIN_X_TARGET, MIN_Y_TARGET])
+MAXS_MINS = torch.FloatTensor([MAX_MIN_ANGLE0, MAX_MIN_ANGLE1, MAX_MIN_X_TARGET, MAX_MIN_Y_TARGET]).to(device)
+MINS = torch.FloatTensor([MIN_ANGLE0, MIN_ANGLE1, MIN_X_TARGET, MIN_Y_TARGET]).to(device)
 #####################################################################################################
 
 sys.path.append(os.path.abspath(__file__).replace('USS-GL/pg_exps.py', ''))
@@ -78,9 +82,13 @@ class TOYActorCritic(torch.nn.Module):
   def __init__(self, configuration={}):
     super().__init__()
     self.config = {**TOYActorCritic.BASE_CONFIG, **configuration}
-    self.shared = torch.nn.Linear(self.config['state_size'], self.config['hidden_size'])
-    self.actor = torch.nn.Linear(self.config['hidden_size'], self.config['n_actions'])
-    self.critic = torch.nn.Linear(self.config['hidden_size'], 1)
+    # self.shared = torch.nn.Linear(self.config['state_size'], self.config['hidden_size'])
+    # self.actor = torch.nn.Linear(self.config['hidden_size'], self.config['n_actions'])
+    # self.critic = torch.nn.Linear(self.config['hidden_size'], 1)
+
+    self.shared = torch.nn.Sequential(torch.nn.Linear(4, 500), torch.nn.ReLU(), torch.nn.Linear(500, 200))
+    self.actor = torch.nn.Sequential(torch.nn.Linear(200, 100), torch.nn.ReLU(), torch.nn.Linear(100, 5))
+    self.critic = torch.nn.Sequential(torch.nn.Linear(200, 100), torch.nn.ReLU(), torch.nn.Linear(100, 1))
   
   def forward(self, state, critic=False, keep_action_logits=False):
     out = torch.nn.functional.relu(self.shared(state))
@@ -93,6 +101,7 @@ class TOYActorCritic(torch.nn.Module):
 class TOYACModel(object):
   def __init__(self, model=TOYActorCritic, model_conf={}):
     self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # self.device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
     self.model = model(model_conf).to(self.device)
   
   def act(self, state):  # [state_size]
@@ -305,6 +314,8 @@ def train_ppo(game_view=False, lr=1e-3, max_game_timestep=200, n_game_scoring_av
               model_conf={}, episode_batch=False, normalize_returns=True):
   print(f'Start PPO training...')
   device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+  # device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
+  print(f"Current device used : {device}")
 
   if use_visdom:
     vp = u.VisdomPlotter()
@@ -327,7 +338,7 @@ def train_ppo(game_view=False, lr=1e-3, max_game_timestep=200, n_game_scoring_av
 
   # Starting variables
   dist_eff_target = env.current_dist
-  state = (torch.FloatTensor(env.joints_angle + list(env.target_pos)) - MINS) / MAXS_MINS
+  state = (torch.FloatTensor(env.joints_angle + list(env.target_pos)).to(device) - MINS) / MAXS_MINS
 
   # Storage variables
   rewards = []
@@ -353,7 +364,7 @@ def train_ppo(game_view=False, lr=1e-3, max_game_timestep=200, n_game_scoring_av
           quit_game = True
     
     # Get action from model then perform it
-    action, log_prob = old_policy.act(state.to(device))
+    action, log_prob = old_policy.act(state)
 
     joints_angle, reward, target_reached, _ = env.step(action.item())
 
@@ -366,7 +377,7 @@ def train_ppo(game_view=False, lr=1e-3, max_game_timestep=200, n_game_scoring_av
     actions.append(action)
     states.append(state)
 
-    state = (torch.FloatTensor(joints_angle + list(env.target_pos)) - MINS) / MAXS_MINS
+    state = (torch.FloatTensor(joints_angle + list(env.target_pos)).to(device) - MINS) / MAXS_MINS
 
     if target_reached or current_game_timestep > max_game_timestep:
       if target_reached:  # update policy only if the target is reached as there is no reward before that

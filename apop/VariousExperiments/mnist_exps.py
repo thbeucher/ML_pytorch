@@ -2,6 +2,7 @@ import os
 import click
 import torch
 import torchvision
+import numpy as np
 import pandas as pd
 import torch.nn as nn
 import torch.optim as optim
@@ -9,7 +10,7 @@ import torchvision.transforms as transforms
 
 from datetime import datetime
 from tabulate import tabulate
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 
 
 def execution_time(func):
@@ -87,9 +88,10 @@ class Classifier(nn.Module):
 
 
 class BaseTrainer():
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, recurrent=False, **kwargs):
         # self.device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
         self.device = torch.device("cpu")
+        self.recurrent = recurrent
         print(f"Current device use: {self.device}")
         self.set_dataloader()
         self.create_model()
@@ -105,11 +107,18 @@ class BaseTrainer():
         self.test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False)
     
     def create_model(self):
-        self.model = nn.Sequential(Encoder(), Classifier()).to(self.device)
+        if self.recurrent:
+            self.encoder = Encoder().to(self.device)
+            self.classifier = Classifier(recurrent=self.recurrent).to(self.device)
+        else:
+            self.model = nn.Sequential(Encoder(), Classifier()).to(self.device)
     
     def get_criterion_n_optimizer(self):
         self.criterion = nn.CrossEntropyLoss()
-        self.optimizer = optim.Adam(self.model.parameters(), lr=0.001)
+        if self.recurrent:
+            self.optimizer = optim.Adam(list(self.encoder.parameters()) + list(self.classifier.parameters()), lr=0.001)
+        else:
+            self.optimizer = optim.Adam(self.model.parameters(), lr=0.001)
 
     def save(self):
         if not os.path.isdir('models'):
@@ -125,7 +134,18 @@ class BaseTrainer():
             total_loss = 0.0
             for data, labels in self.train_loader:
                 data, labels = data.to(self.device), labels.to(self.device)
-                outputs = self.model(data)
+                if self.recurrent:
+                    bs = data.size(0)
+                    embedding_ori = self.encoder.forward(data)
+                    data_left = rotate_batch_fixed_angle(data.view(bs, 1, 28, 28)).view(bs, -1)
+                    embedding_left = self.encoder.forward(data_left)
+                    data_right = rotate_batch_fixed_angle(data.view(bs, 1, 28, 28), angle=-30).view(bs, -1)
+                    embedding_right = self.encoder.forward(data_right)
+
+                    embedding = torch.stack([embedding_ori, embedding_left, embedding_right], dim=1)
+                    outputs = self.classifier(embedding)
+                else:
+                    outputs = self.model(data)
                 loss = self.criterion(outputs, labels)
                 
                 self.optimizer.zero_grad()
@@ -142,13 +162,24 @@ class BaseTrainer():
         correct, total = 0, 0
         for data, labels in self.test_loader:
             data, labels = data.to(self.device), labels.to(self.device)
-            outputs = self.model(data)
+            if self.recurrent:
+                bs = data.size(0)
+                embedding_ori = self.encoder.forward(data)
+                data_left = rotate_batch_fixed_angle(data.view(bs, 1, 28, 28)).view(bs, -1)
+                embedding_left = self.encoder.forward(data_left)
+                data_right = rotate_batch_fixed_angle(data.view(bs, 1, 28, 28), angle=-30).view(bs, -1)
+                embedding_right = self.encoder.forward(data_right)
+
+                embedding = torch.stack([embedding_ori, embedding_left, embedding_right], dim=1)
+                outputs = self.classifier(embedding)
+            else:
+                outputs = self.model(data)
             _, predicted = torch.max(outputs, 1)
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
 
         accuracy = 100 * correct / total
-        print(f'Classifier Accuracy: {accuracy:.2f}%')
+        print(f'Classifier Accuracy: {accuracy:.2f}% ({correct}/{total})')
         return accuracy
 
 
@@ -211,7 +242,7 @@ class AutoEncoderTrainer(BaseTrainer):
             correct += (predicted == labels).sum().item()
 
         accuracy = 100 * correct / total
-        print(f'Classifier Accuracy: {accuracy:.2f}%')
+        print(f'Classifier Accuracy: {accuracy:.2f}% ({correct}/{total})')
         return accuracy
 
 
@@ -334,7 +365,128 @@ class PredictiveTrainer(BaseTrainer):
             correct += (predicted == labels).sum().item()
 
         accuracy = 100 * correct / total
-        print(f'Classifier Accuracy: {accuracy:.2f}%')
+        print(f'Classifier Accuracy: {accuracy:.2f}% ({correct}/{total})')
+        return accuracy
+
+
+class TripletLoss(nn.Module):
+    def __init__(self, margin=1.0):
+        super().__init__()
+        self.margin = margin
+
+    def forward(self, anchor, positive, negative):
+        pos_dist = torch.sum((anchor - positive) ** 2, dim=1)
+        neg_dist = torch.sum((anchor - negative) ** 2, dim=1)
+        loss = torch.relu(pos_dist - neg_dist + self.margin)
+        return loss.mean()
+    
+
+class MNISTTripletDataset(Dataset):
+    def __init__(self, train=True):
+        transform = transforms.Compose([transforms.ToTensor()])
+        # transform = transforms.Compose([transforms.ToTensor(), transforms.Lambda(lambda x: x.view(-1))])
+        self.dataset = torchvision.datasets.MNIST(root='./data', train=train, transform=transform, download=True)
+        self.data_by_label = {i: [] for i in range(10)}
+        for idx, (image, label) in enumerate(self.dataset):
+            self.data_by_label[label].append(idx)
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, index):
+        anchor_img, anchor_label = self.dataset[index]
+        
+        # Select positive sample (same class)
+        pos_idx = np.random.choice(self.data_by_label[anchor_label])
+        positive_img, _ = self.dataset[pos_idx]
+        
+        # Select negative sample (different class)
+        negative_label = np.random.choice([l for l in range(10) if l != anchor_label])
+        neg_idx = np.random.choice(self.data_by_label[negative_label])
+        negative_img, _ = self.dataset[neg_idx]
+
+        return anchor_img.view(-1), positive_img.view(-1), negative_img.view(-1), anchor_label
+    
+
+class ContrastiveTrainer():
+    def __init__(self, *args, **kwargs):
+        # self.device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
+        self.device = torch.device("cpu")
+        print(f"Current device use: {self.device}")
+        self.set_dataloader()
+        self.create_model()
+        self.get_criterion_n_optimizer()
+
+    def set_dataloader(self):
+        train_dataset = MNISTTripletDataset(train=True)
+        self.train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=8)
+
+        test_dataset = MNISTTripletDataset(train=False)
+        self.test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False, num_workers=8)
+    
+    def create_model(self):
+        self.encoder = Encoder().to(self.device)
+        self.classifier = Classifier().to(self.device)
+
+    def get_criterion_n_optimizer(self):
+        self.encoder_optimizer = optim.Adam(self.encoder.parameters(), lr=0.001)
+        self.encoder_criterion = TripletLoss()
+
+        self.classifier_optimizer = optim.Adam(self.classifier.parameters(), lr=0.001)
+        self.classifier_criterion = nn.CrossEntropyLoss()
+    
+    @execution_time
+    def train(self, n_epochs=10):
+        print(f"Training Encoder...")
+        self.encoder.train()
+        for epoch in range(n_epochs):
+            total_loss = 0
+            for anchor, positive, negative, _ in self.train_loader:
+                anchor, positive, negative = anchor.to(self.device), positive.to(self.device), negative.to(self.device)
+                anchor_embed = self.encoder(anchor)
+                positive_embed = self.encoder(positive)
+                negative_embed = self.encoder(negative)
+
+                loss = self.encoder_criterion(anchor_embed, positive_embed, negative_embed)
+                self.encoder_optimizer.zero_grad()
+                loss.backward()
+                self.encoder_optimizer.step()
+
+                total_loss += loss.item()
+            
+            print(f"Epoch [{epoch+1}/{n_epochs}], Loss: {total_loss / len(self.train_loader):.4f}")
+        
+        print("Training Classifier...")
+        self.classifier.train()
+        for epoch in range(n_epochs):
+            total_loss = 0
+            for images, _, _, labels in self.train_loader:
+                images, labels = images.to(self.device), labels.to(self.device)
+                with torch.no_grad():
+                    embeddings = self.encoder(images)
+                outputs = self.classifier(embeddings)
+                loss = self.classifier_criterion(outputs, labels)
+                self.classifier_optimizer.zero_grad()
+                loss.backward()
+                self.classifier_optimizer.step()
+                total_loss += loss.item()
+            print(f"Epoch [{epoch+1}/{n_epochs}], Loss: {total_loss / len(self.train_loader):.4f}")
+
+    @torch.no_grad()
+    def evaluate(self):
+        self.encoder.eval()
+        self.classifier.eval()
+        correct, total = 0, 0
+        for images, _, _, labels in self.test_loader:
+            images, labels = images.to(self.device), labels.to(self.device)
+            embeddings = self.encoder(images)
+            outputs = self.classifier(embeddings)
+            _, predicted = torch.max(outputs, 1)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+
+        accuracy = 100 * correct / total
+        print(f'Classifier Accuracy: {accuracy:.2f}% ({correct}/{total})')
         return accuracy
 
 
@@ -344,7 +496,8 @@ class PredictiveTrainer(BaseTrainer):
 @click.option("--recurrent", "-r", is_flag=True)
 @click.option("--eval-all", "-e", 'eval_all', is_flag=True)
 def main(trainer, sum_views, recurrent, eval_all):
-    trainers = {'base': BaseTrainer, 'autoencoder': AutoEncoderTrainer, 'predictive': PredictiveTrainer}
+    trainers = {'base': BaseTrainer, 'autoencoder': AutoEncoderTrainer, 'predictive': PredictiveTrainer,
+                'contrastive': ContrastiveTrainer}
 
     if eval_all:
         to_show = {'trainer': [], 'sum_views': [], 'recurrent': [], 'accuracy': []}

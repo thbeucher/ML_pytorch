@@ -7,6 +7,18 @@ from datetime import datetime
 from collections import defaultdict
 
 
+def check_interaction_time(logfile):
+  with open(logfile, 'r') as f:
+    data = f.read().splitlines()
+  
+  interactions = [l for l in data if 'interaction with the environment' in l]
+  interactions = [l.split('achieved with ')[-1].split(' interaction')[0] for l in interactions]
+  print(f'interactions:\n{interactions}')
+
+  run_time = [l.split('Run done in ')[-1] for l in data if 'Run done in' in l]
+  print(f'run_time:\n{run_time}')
+
+
 def runs_to_df_pg_exps(logfile, df_dict=None, name=None):
   runs = parse_pg_exps_log_file(filename=logfile)
 

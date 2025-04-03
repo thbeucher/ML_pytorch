@@ -61,6 +61,7 @@ def ppo_update(states, actions, log_probs, rewards, old_policy, policy, optimize
   '''
   '''
   device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+  # device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
 
   returns = get_returns(rewards, normalize_returns=normalize_returns, discount_factor=discount_factor, eps=eps).to(device)
 
