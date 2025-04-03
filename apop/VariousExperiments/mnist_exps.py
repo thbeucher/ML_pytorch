@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
 import torchvision.transforms as transforms
 
 from datetime import datetime
@@ -39,32 +40,29 @@ def rotate_batch_fixed_angle(images, angle=30):
 class Encoder(nn.Module):
     def __init__(self):
         super().__init__()
-        self.encoder = nn.Sequential(
-            nn.Linear(28 * 28, 128),
-            nn.ReLU(),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, 32)
-        )
+        self.layer1 = nn.Linear(28 * 28, 128)
+        self.layer2 = nn.Linear(128, 64)
+        self.layer3 = nn.Linear(64, 32)
     
-    def forward(self, x):
-        return self.encoder(x)
+    def forward(self, x, return_all=False):
+        x1 = F.relu(self.layer1(x))  # 784 -> 128
+        x2 = F.relu(self.layer2(x1))  # 128 -> 64
+        x3 = self.layer3(x2)  # 64 -> 32
+        return (x1, x2, x3) if return_all else x3
 
 
 class Decoder(nn.Module):
     def __init__(self):
         super().__init__()
-        self.decoder = nn.Sequential(
-            nn.Linear(32, 64),
-            nn.ReLU(),
-            nn.Linear(64, 128),
-            nn.ReLU(),
-            nn.Linear(128, 28 * 28),
-            nn.Sigmoid()
-        )
+        self.layer1 = nn.Linear(32, 64)
+        self.layer2 = nn.Linear(64, 128)
+        self.layer3 = nn.Linear(128, 28 * 28)
     
-    def forward(self, x):
-        return self.decoder(x)
+    def forward(self, x, xe2=None, xe1=None):
+        x3 = F.relu(self.layer1(x))  # 32 -> 64
+        x2 = F.relu(self.layer2(x3 if xe2 is None else x3 + xe2))  # 64 -> 128
+        x1 = F.sigmoid(self.layer3(x2 if xe1 is None else x2 + xe1))  # 128 -> 784
+        return x1
 
 
 class Classifier(nn.Module):
@@ -95,7 +93,7 @@ class BaseTrainer():
         print(f"Current device use: {self.device}")
         self.set_dataloader()
         self.create_model()
-        self.get_criterion_n_optimizer()
+        self.set_criterion_n_optimizer()
     
     def set_dataloader(self):
         transform = transforms.Compose([transforms.ToTensor(), transforms.Lambda(lambda x: x.view(-1))])
@@ -113,7 +111,7 @@ class BaseTrainer():
         else:
             self.model = nn.Sequential(Encoder(), Classifier()).to(self.device)
     
-    def get_criterion_n_optimizer(self):
+    def set_criterion_n_optimizer(self):
         self.criterion = nn.CrossEntropyLoss()
         if self.recurrent:
             self.optimizer = optim.Adam(list(self.encoder.parameters()) + list(self.classifier.parameters()), lr=0.001)
@@ -184,7 +182,8 @@ class BaseTrainer():
 
 
 class AutoEncoderTrainer(BaseTrainer):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, residual=False, **kwargs):
+        self.residual = residual
         super().__init__()
     
     def create_model(self):
@@ -192,7 +191,7 @@ class AutoEncoderTrainer(BaseTrainer):
         self.decoder = Decoder().to(self.device)
         self.classifier = Classifier().to(self.device)
     
-    def get_criterion_n_optimizer(self):
+    def set_criterion_n_optimizer(self):
         self.autoencoder_criterion = nn.MSELoss()
         self.autoencoder_optimizer = optim.Adam(list(self.encoder.parameters()) + list(self.decoder.parameters()), lr=0.001)
 
@@ -205,8 +204,12 @@ class AutoEncoderTrainer(BaseTrainer):
         for epoch in range(epochs):
             for data, _ in self.train_loader:
                 data = data.to(self.device)
-                embedding = self.encoder(data)
-                output = self.decoder(embedding)
+                if self.residual:
+                    x1, x2, embedding = self.encoder(data, return_all=True)
+                    output = self.decoder(embedding, xe2=x2, xe1=x1)
+                else:
+                    embedding = self.encoder(data)
+                    output = self.decoder(embedding)
                 loss = self.autoencoder_criterion(output, data)
                 
                 self.autoencoder_optimizer.zero_grad()
@@ -292,7 +295,7 @@ class PredictiveTrainer(BaseTrainer):
         self.model = PredictiveLinearNet()
         self.classifier = Classifier(recurrent=self.recurrent)
     
-    def get_criterion_n_optimizer(self):
+    def set_criterion_n_optimizer(self):
         self.clf_criterion = nn.CrossEntropyLoss()
         self.clf_trainer = optim.Adam(self.classifier.parameters())
     
@@ -415,7 +418,7 @@ class ContrastiveTrainer():
         print(f"Current device use: {self.device}")
         self.set_dataloader()
         self.create_model()
-        self.get_criterion_n_optimizer()
+        self.set_criterion_n_optimizer()
 
     def set_dataloader(self):
         train_dataset = MNISTTripletDataset(train=True)
@@ -428,7 +431,7 @@ class ContrastiveTrainer():
         self.encoder = Encoder().to(self.device)
         self.classifier = Classifier().to(self.device)
 
-    def get_criterion_n_optimizer(self):
+    def set_criterion_n_optimizer(self):
         self.encoder_optimizer = optim.Adam(self.encoder.parameters(), lr=0.001)
         self.encoder_criterion = TripletLoss()
 
@@ -490,6 +493,83 @@ class ContrastiveTrainer():
         return accuracy
 
 
+class BasePCTrainer(BaseTrainer):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+    
+    def create_model(self):
+        self.enc_lay1 = nn.Linear(28*28, 128)
+        self.enc_lay2 = nn.Linear(128, 64)
+        self.enc_lay3 = nn.Linear(64, 32)
+
+        self.rec_lay1 = nn.Linear(128, 28*28)
+        self.rec_lay2 = nn.Linear(64, 128)
+        self.rec_lay3 = nn.Linear(32, 64)
+
+        self.classifier = Classifier()
+    
+    def set_criterion_n_optimizer(self):
+        self.rec_criterion = nn.MSELoss()
+        self.clf_criterion = nn.CrossEntropyLoss()
+
+        self.optimizer = optim.Adam(list(self.enc_lay1.parameters()) +\
+                                    list(self.enc_lay2.parameters()) +\
+                                    list(self.enc_lay3.parameters()) +\
+                                    list(self.rec_lay1.parameters()) +\
+                                    list(self.rec_lay2.parameters()) +\
+                                    list(self.rec_lay3.parameters()) +\
+                                    list(self.classifier.parameters()), lr=0.001)
+
+    @execution_time
+    def train(self, n_epochs=10):
+        for epoch in range(n_epochs):
+            total_loss = 0.0
+            for data, labels in self.train_loader:
+                data, labels = data.to(self.device), labels.to(self.device)
+                out1 = F.relu(self.enc_lay1(data))
+                out2 = F.relu(self.enc_lay2(out1))
+                out3 = self.enc_lay3(out2)
+
+                rec1 = F.sigmoid(self.rec_lay1(out1))
+                loss_rec1 = self.rec_criterion(rec1, data)
+
+                out2_tr = F.relu(self.enc_lay2(out1.detach()))
+                rec2 = F.relu(self.rec_lay2(out2_tr))
+                loss_rec2 = self.rec_criterion(rec2, out1)
+
+                out3_tr = self.enc_lay3(out2.detach())
+                rec3 = F.relu(self.rec_lay3(out3_tr))
+                loss_rec3 = self.rec_criterion(rec3, out2)
+
+                outputs = self.classifier(out3)
+                loss_clf = self.clf_criterion(outputs, labels)
+
+                loss = loss_clf + loss_rec1 + loss_rec2 + loss_rec3
+                
+                self.optimizer.zero_grad()
+                loss.backward()
+                self.optimizer.step()
+
+                total_loss += loss.item()
+            
+            avg_loss = total_loss / len(self.train_loader)
+            print(f'Epoch [{epoch+1}/{n_epochs}], Loss: {loss.item():.4f} | avg_loss: {avg_loss:.4f}')
+
+    @torch.no_grad()
+    def evaluate(self):
+        correct, total = 0, 0
+        for data, labels in self.test_loader:
+            data, labels = data.to(self.device), labels.to(self.device)
+            outputs = self.classifier(self.enc_lay3(F.relu(self.enc_lay2(F.relu(self.enc_lay1(data))))))
+            _, predicted = torch.max(outputs, 1)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+
+        accuracy = 100 * correct / total
+        print(f'Classifier Accuracy: {accuracy:.2f}% ({correct}/{total})')
+        return accuracy
+
+
 @click.command()
 @click.option("--trainer", "-t", "trainer", type=str, default="base")
 @click.option("--sum-views", "-s", "sum_views", is_flag=True)
@@ -497,7 +577,7 @@ class ContrastiveTrainer():
 @click.option("--eval-all", "-e", 'eval_all', is_flag=True)
 def main(trainer, sum_views, recurrent, eval_all):
     trainers = {'base': BaseTrainer, 'autoencoder': AutoEncoderTrainer, 'predictive': PredictiveTrainer,
-                'contrastive': ContrastiveTrainer}
+                'contrastive': ContrastiveTrainer, 'basePC': BasePCTrainer}
 
     if eval_all:
         to_show = {'trainer': [], 'sum_views': [], 'recurrent': [], 'accuracy': []}
