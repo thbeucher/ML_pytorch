@@ -82,13 +82,9 @@ class TOYActorCritic(torch.nn.Module):
   def __init__(self, configuration={}):
     super().__init__()
     self.config = {**TOYActorCritic.BASE_CONFIG, **configuration}
-    # self.shared = torch.nn.Linear(self.config['state_size'], self.config['hidden_size'])
-    # self.actor = torch.nn.Linear(self.config['hidden_size'], self.config['n_actions'])
-    # self.critic = torch.nn.Linear(self.config['hidden_size'], 1)
-
-    self.shared = torch.nn.Sequential(torch.nn.Linear(4, 500), torch.nn.ReLU(), torch.nn.Linear(500, 200))
-    self.actor = torch.nn.Sequential(torch.nn.Linear(200, 100), torch.nn.ReLU(), torch.nn.Linear(100, 5))
-    self.critic = torch.nn.Sequential(torch.nn.Linear(200, 100), torch.nn.ReLU(), torch.nn.Linear(100, 1))
+    self.shared = torch.nn.Linear(self.config['state_size'], self.config['hidden_size'])
+    self.actor = torch.nn.Linear(self.config['hidden_size'], self.config['n_actions'])
+    self.critic = torch.nn.Linear(self.config['hidden_size'], 1)
   
   def forward(self, state, critic=False, keep_action_logits=False):
     out = torch.nn.functional.relu(self.shared(state))
