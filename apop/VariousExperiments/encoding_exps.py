@@ -15,10 +15,35 @@ from torchvision import datasets, transforms, utils
 from masked_autoencoder import MaskedAutoencoderViT
 
 
+class NoiseLayer(nn.Module):
+  """
+  A layer that conditionally adds Gaussian noise to the input tensor.
+  """
+  def __init__(self, p=0.5, std=0.1):
+    super().__init__()
+    self.p = p
+    self.std = std
+
+  def forward(self, x, p=None, std=None):
+    p = self.p if p is None else p
+    std = self.std if std is None else std
+    if self.training and p > 0 and std > 0:
+      # Check if we should apply noise in this forward pass
+      if random.random() < p:
+        # Add Gaussian noise
+        noise = torch.randn_like(x) * std
+        # Add noise and clip the values to the valid [0, 1] range
+        noisy_x = torch.clamp(x + noise, 0., 1.)
+        return noisy_x
+    return x
+
+
 class CNNAE(nn.Module):
   CONFIG = {'skip_connection': True,
             'linear_bottleneck': False,
             'add_noise_bottleneck': False,
+            'add_noise_encoder': False,
+            'noise_prob': 0.5,
             'noise_std': 0.1,
             'latent_dim': 128}
   def __init__(self, config={}):
@@ -36,17 +61,24 @@ class CNNAE(nn.Module):
     self.up1 = nn.Sequential(nn.ConvTranspose2d(256, 128, 4, 2, 1), nn.BatchNorm2d(128), nn.ReLU(True))
     self.up2 = nn.Sequential(nn.ConvTranspose2d(128, 64, 4, 2, 1), nn.BatchNorm2d(64), nn.ReLU(True))
     self.up3 = nn.Sequential(nn.ConvTranspose2d(64, 3, 4, 2, 1), nn.Sigmoid())
+
+    if self.config['add_noise_encoder']:
+      self.noise_layer = NoiseLayer(p=self.config['noise_prob'], std=self.config['noise_std'])
   
   def forward(self, x):
     d1 = self.down1(x)   # [B, 3, 32, 32] -> [B, 64, 16, 16]
+    if self.config['add_noise_encoder']:
+      d1 = self.noise_layer(d1)
     d2 = self.down2(d1)  #                -> [B, 128, 8, 8]
+    if self.config['add_noise_encoder']:
+      d2 = self.noise_layer(d2)
     d3 = self.down3(d2)  #                -> [B, 256, 4, 4]
 
     if self.config['linear_bottleneck']:
       d3 = self.fc_dec(self.embedder(d3.flatten(1))).view(d3.shape)
     
     if self.config['add_noise_bottleneck']:
-      d3 = d3 + torch.randn_like(d3) * self.config['noise_std']
+      d3 = self.noise_layer(d3)
 
     u1 = self.up1(d3)   #                -> [B, 128, 8, 8]
     if self.config['skip_connection']:
@@ -77,7 +109,8 @@ class CNNAETrainer:
             'save_model_train':  True,
             'model_config': {'skip_connection': False,
                              'linear_bottleneck': True,
-                             'add_noise_bottleneck': False}}
+                             'add_noise_bottleneck': False,
+                             'add_noise_encoder': False}}
   def __init__(self, config={}, set_specific_exp_name=False):
     self.config = {**CNNAETrainer.CONFIG, **config}
 
@@ -87,7 +120,7 @@ class CNNAETrainer:
 
     if set_specific_exp_name:
       self.config['exp_name'] = self.config['exp_name'] +\
-        ''.join(s for s, cond in [(f'_{k}', v) for k, v in trainer.config['model_config'].items()] if cond)
+        ''.join(s for s, cond in [(f'_{k}', v) for k, v in self.config['model_config'].items()] if cond)
     save_dir_run = os.path.join(self.config['save_dir'], self.config['exp_name'], self.config['log_dir'])
     self.tf_logger = SummaryWriter(save_dir_run) if self.config['use_tf_logger'] else None
 
@@ -206,6 +239,21 @@ class MAETrainer(CNNAETrainer):
   def instanciate_model(self):
     self.auto_encoder = MaskedAutoencoderViT(**self.config['model_config']).to(self.device)
   
+  @torch.no_grad()
+  def get_rec_to_plot(self, fixed_img, mask_ratio=0.75):
+    loss, pred, mask = self.auto_encoder(fixed_img, mask_ratio=mask_ratio)
+    pred = self.auto_encoder.unpatchify(pred)
+    if torch.isnan(pred).any():
+      # if mask_ratio = 0. the loss will be nan
+      print(f'Prediction contains Nan values...')
+      pred = torch.nan_to_num(pred, nan=0.0)
+    mask = mask.detach()
+    mask = mask.unsqueeze(-1).repeat(1, 1, self.auto_encoder.patch_embed.patch_size[0]**2 *3)  # (N, H*W, p*p*3)
+    mask = self.auto_encoder.unpatchify(mask)  # 1 is removing, 0 is keeping
+    im_masked = fixed_img * (1 - mask)
+    ori_masked_rec = torch.cat([fixed_img, im_masked, pred], dim=0)
+    return ori_masked_rec
+  
   def train(self):
     self.auto_encoder.train()
     fixed_img = None
@@ -235,17 +283,7 @@ class MAETrainer(CNNAETrainer):
       if self.tf_logger is not None:
         self.tf_logger.add_scalar('masked_reconstruction_loss', running_rec_loss/len(pbar), epoch)
         if epoch % self.config['save_rec_every'] == 0 or epoch == (self.config['n_epochs'] - 1):
-          loss, pred, mask = self.auto_encoder(fixed_img, mask_ratio=mask_ratio)
-          pred = self.auto_encoder.unpatchify(pred)
-          if torch.isnan(pred).any():
-            # if mask_ratio = 0. the loss will be nan
-            print(f'Prediction contains Nan values...')
-            pred = torch.nan_to_num(pred, nan=0.0)
-          mask = mask.detach()
-          mask = mask.unsqueeze(-1).repeat(1, 1, self.auto_encoder.patch_embed.patch_size[0]**2 *3)  # (N, H*W, p*p*3)
-          mask = self.auto_encoder.unpatchify(mask)  # 1 is removing, 0 is keeping
-          im_masked = fixed_img * (1 - mask)
-          ori_masked_rec = torch.cat([fixed_img, im_masked, pred], dim=0)
+          ori_masked_rec = self.get_rec_to_plot(fixed_img, mask_ratio=mask_ratio)
           self.tf_logger.add_images(f'generated_epoch_{epoch+1}', ori_masked_rec)
       
       if self.config['save_model_train'] and (running_rec_loss/len(pbar)) < best_loss:
@@ -272,23 +310,17 @@ class MAETrainer(CNNAETrainer):
     return rec_loss
 
 
-def get_args():
-  parser = argparse.ArgumentParser(description='Image encoding experiment')
-  parser.add_argument('--trainer', '-t', type=str, default='cnn_ae')
-  parser.add_argument('--run_all_exps', '-rae', action='store_true')
-  parser.add_argument('--load_model', '-lm', action='store_true')
-  parser.add_argument('--train_model', '-tm', action='store_true')
-  parser.add_argument('--eval_model', '-em', action='store_true')
-  parser.add_argument('--save_model', '-sm', action='store_true')
-  return parser.parse_args()
-
-
 def run_all_experiments(trainers, args):
   results = {'exp_name': [], 'test_loss': []}
   for config in [{},
-                 {'model_config': {'skip_connection': False, 'linear_bottleneck': False, 'add_noise_bottleneck': False}},
-                 {'model_config': {'skip_connection': True, 'linear_bottleneck': False, 'add_noise_bottleneck': False}},
-                 {'model_config': {'skip_connection': True, 'linear_bottleneck': False, 'add_noise_bottleneck': True}}]:
+                 {'model_config': {'skip_connection': False, 'linear_bottleneck': False,
+                                   'add_noise_bottleneck': False, 'add_noise_encoder': False}},
+                 {'model_config': {'skip_connection': True, 'linear_bottleneck': False,
+                                   'add_noise_bottleneck': False, 'add_noise_encoder': False}},
+                 {'model_config': {'skip_connection': True, 'linear_bottleneck': False,
+                                   'add_noise_bottleneck': True, 'add_noise_encoder': False}},
+                 {'model_config': {'skip_connection': True, 'linear_bottleneck': False,
+                                   'add_noise_bottleneck': True, 'add_noise_encoder': True}}]:
     trainer = trainers[args.trainer](config, set_specific_exp_name=True)
     print(f'Start experiment {trainer.exp_name}')
     trainer.train()
@@ -297,6 +329,17 @@ def run_all_experiments(trainers, args):
     results['test_loss'].append(round(loss, 4))
   df = pd.DataFrame.from_dict(results)
   print(tabulate(df, headers='keys', tablefmt='psql'))
+
+
+def get_args():
+  parser = argparse.ArgumentParser(description='Image encoding experiments')
+  parser.add_argument('--trainer', '-t', type=str, default='cnn_ae')
+  parser.add_argument('--run_all_exps', '-rae', action='store_true')
+  parser.add_argument('--load_model', '-lm', action='store_true')
+  parser.add_argument('--train_model', '-tm', action='store_true')
+  parser.add_argument('--eval_model', '-em', action='store_true')
+  parser.add_argument('--save_model', '-sm', action='store_true')
+  return parser.parse_args()
 
 
 if __name__ == '__main__':
