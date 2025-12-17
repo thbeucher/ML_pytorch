@@ -8,6 +8,7 @@ import torch.nn as nn
 
 from tqdm import tqdm
 from tabulate import tabulate
+from torch.autograd import grad
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from torchvision import datasets, transforms, utils
@@ -38,6 +39,21 @@ class NoiseLayer(nn.Module):
     return x
 
 
+class Critic(nn.Module):
+  def __init__(self):
+    super().__init__()
+    self.net = nn.Sequential(
+      nn.Conv2d(3, 64, 4, 2, 1), nn.LeakyReLU(0.2, inplace=True),
+      nn.Conv2d(64, 128, 4, 2, 1), nn.LeakyReLU(0.2, inplace=True),
+      nn.Conv2d(128, 256, 4, 2, 1), nn.LeakyReLU(0.2, inplace=True),
+      nn.Flatten(),
+      nn.Linear(256*4*4, 1),
+    )
+
+  def forward(self, x):
+    return self.net(x).view(-1)
+
+
 class CNNAE(nn.Module):
   CONFIG = {'skip_connection': True,
             'linear_bottleneck': False,
@@ -62,10 +78,10 @@ class CNNAE(nn.Module):
     self.up2 = nn.Sequential(nn.ConvTranspose2d(128, 64, 4, 2, 1), nn.BatchNorm2d(64), nn.ReLU(True))
     self.up3 = nn.Sequential(nn.ConvTranspose2d(64, 3, 4, 2, 1), nn.Sigmoid())
 
-    if self.config['add_noise_encoder']:
+    if self.config['add_noise_encoder'] or self.config['add_noise_bottleneck']:
       self.noise_layer = NoiseLayer(p=self.config['noise_prob'], std=self.config['noise_std'])
   
-  def forward(self, x):
+  def forward(self, x, return_enc=False):
     d1 = self.down1(x)   # [B, 3, 32, 32] -> [B, 64, 16, 16]
     if self.config['add_noise_encoder']:
       d1 = self.noise_layer(d1)
@@ -90,6 +106,8 @@ class CNNAE(nn.Module):
 
     up3 = self.up3(u2)  #                -> [B, 3, 32, 32]
 
+    if return_enc:
+      up3, d3
     return up3
 
 
@@ -155,16 +173,16 @@ class CNNAETrainer:
                                       num_workers=6, pin_memory=True if torch.cuda.is_available() else False)
 
   def set_optimizers_n_criterions(self):
-    self.opt_critic = torch.optim.AdamW(self.auto_encoder.parameters(), lr=self.config['lr'], betas=(0.9, 0.95))
+    self.ae_optim = torch.optim.AdamW(self.auto_encoder.parameters(), lr=self.config['lr'], betas=(0.9, 0.95))
     self.recon_criterion = nn.MSELoss()
 
   def save_model(self):
     os.makedirs(self.config['save_dir'], exist_ok=True)
     torch.save({'auto_encoder': self.auto_encoder.state_dict()},
-               os.path.join(self.config['save_dir'], f"{self.config['exp_name']}.pt"))
+               os.path.join(self.config['save_dir'], self.config['exp_name'], f"{self.config['exp_name']}.pt"))
 
   def load_model(self):
-    path = os.path.join(self.config['save_dir'], f"{self.config['exp_name']}.pt")
+    path = os.path.join(self.config['save_dir'], self.config['exp_name'], f"{self.config['exp_name']}.pt")
     if os.path.isfile(path):
       model = torch.load(path)
       self.auto_encoder.load_state_dict(model['auto_encoder'])
@@ -183,23 +201,155 @@ class CNNAETrainer:
         img = img.to(self.device)
 
         if fixed_img is None:
-          fixed_img = img[:16]
-          self.tf_logger.add_images('Training Fixed Image', fixed_img)
+          fixed_img = img[:8]
 
         rec = self.auto_encoder(img)
         loss = self.recon_criterion(rec, img)
 
-        self.opt_critic.zero_grad()
+        self.ae_optim.zero_grad()
         loss.backward()
-        self.opt_critic.step()
+        self.ae_optim.step()
 
         running_rec_loss += loss.item()
 
       if self.tf_logger is not None:
         self.tf_logger.add_scalar('reconstruction_loss', running_rec_loss/len(pbar), epoch)
         if epoch % self.config['save_rec_every'] == 0 or epoch == (self.config['n_epochs'] - 1):
-          rec = self.auto_encoder(fixed_img)
-          self.tf_logger.add_images(f'generated_epoch_{epoch+1}', rec)
+          with torch.no_grad():
+            rec = self.auto_encoder(fixed_img)
+          ori_rec = torch.cat([fixed_img, rec], dim=0)
+          self.tf_logger.add_images(f'generated_epoch_{epoch+1}', ori_rec)
+      
+      if self.config['save_model_train'] and (running_rec_loss/len(pbar)) < best_loss:
+        best_loss = running_rec_loss/len(pbar)
+        self.save_model()
+
+      pbar.set_postfix(loss=f'{running_rec_loss/len(pbar):.4f}')
+
+  @torch.no_grad()
+  def evaluate(self):
+    self.auto_encoder.eval()
+    running_loss = 0.
+    for img, _ in tqdm(self.test_dataloader):
+      img = img.to(self.device)
+      rec = self.auto_encoder(img)
+      loss = self.recon_criterion(rec, img)
+      running_loss += loss.item()
+    rec_loss = running_loss/len(self.test_dataloader)
+    print(f'Reconstruction loss on test data: {rec_loss:.4f}')
+    return rec_loss
+
+
+class WGANGPTrainer(CNNAETrainer):
+  CONFIG = {'exp_name': 'wgan_gp',
+            'n_critic_train_steps_per_epoch': 5,
+            'gradient_penalty_lambda': 10.0,
+            'rec_loss_lambda': 10.0,
+            'model_config': {'skip_connection': True,
+                             'linear_bottleneck': False,
+                             'add_noise_bottleneck': True,
+                             'add_noise_encoder': False,
+                             'noise_prob': 1.0}}
+  def __init__(self, config={}, *args, **kwargs):
+    super().__init__(WGANGPTrainer.CONFIG)
+    self.config = {**self.config, **config}
+  
+  @staticmethod
+  def gradient_penalty(critic, real, fake, device, gp_lambda=10.0):
+    batch_size = real.size(0)
+    # Random weight for interpolation between real and fake
+    alpha = torch.rand(batch_size, 1, 1, 1, device=device)
+    interpolates = (alpha * real + (1 - alpha) * fake).requires_grad_(True)
+
+    critic_interpolates = critic(interpolates)
+    # For autograd.grad to work we need a scalar for each sample — use ones
+    ones = torch.ones_like(critic_interpolates, device=device)
+
+    gradients = grad(
+        outputs=critic_interpolates,
+        inputs=interpolates,
+        grad_outputs=ones,
+        create_graph=True,
+        retain_graph=True,
+        only_inputs=True,
+    )[0]
+
+    gradients = gradients.view(batch_size, -1)
+    grad_norm = gradients.norm(2, dim=1)
+    gp = gp_lambda * ((grad_norm - 1) ** 2).mean()
+    return gp
+  
+  def instanciate_model(self):
+    self.auto_encoder = CNNAE(self.config['model_config']).to(self.device)
+    self.critic = Critic().to(self.device)
+
+  def set_optimizers_n_criterions(self):
+    self.ae_optim = torch.optim.AdamW(self.auto_encoder.parameters(), lr=self.config['lr'], betas=(0.9, 0.95))
+    self.critic_optim = torch.optim.AdamW(self.critic.parameters(), lr=self.config['lr'], betas=(0.9, 0.95))
+    self.recon_criterion = nn.MSELoss()
+  
+  def train(self):
+    self.auto_encoder.train()
+    self.critic.train()
+
+    fixed_img = None
+    best_loss = torch.inf
+
+    pbar = tqdm(range(self.config['n_epochs']))
+    for epoch in pbar:
+      running_gp = 0.0
+      running_critic_loss = 0.0
+      running_gen_loss = 0.0
+      running_rec_loss = 0.0
+      for real_imgs, _ in self.train_dataloader:
+        real_imgs = real_imgs.to(self.device)
+
+        if fixed_img is None:
+          fixed_img = real_imgs[:8]
+        
+        # -----------------------------
+        # Train Critic (multiple steps)
+        # -----------------------------
+        fake_imgs = self.auto_encoder(real_imgs).detach()
+        for _ in range(self.config['n_critic_train_steps_per_epoch']):
+          real_scores = self.critic(real_imgs)
+          fake_scores = self.critic(fake_imgs)
+
+          # WGAN-GP critic loss: E[fake] - E[real] + GP
+          gp = WGANGPTrainer.gradient_penalty(self.critic, real_imgs, fake_imgs, self.device,
+                                              gp_lambda=self.config['gradient_penalty_lambda'])
+          loss_critic = fake_scores.mean() - real_scores.mean() + gp
+
+          self.critic_optim.zero_grad()
+          loss_critic.backward()
+          self.critic_optim.step()
+
+          running_gp += gp.item()
+          running_critic_loss += loss_critic.item()
+        
+        # -----------------------------------
+        # Train Generator (Encoder + Decoder)
+        # -----------------------------------
+        fake_imgs = self.auto_encoder(real_imgs)
+        # Generator tries to minimize -E[critic(fake)] (i.e. maximize critic score)
+        gen_adv = -self.critic(fake_imgs).mean()
+        rec_loss = self.recon_criterion(fake_imgs, real_imgs)
+        gen_loss = gen_adv + self.config['rec_loss_lambda'] * rec_loss
+
+        self.ae_optim.zero_grad()
+        gen_loss.backward()
+        self.ae_optim.step()
+
+        running_gen_loss += gen_adv.item()
+        running_rec_loss += rec_loss.item()
+
+      if self.tf_logger is not None:
+        self.tf_logger.add_scalar('reconstruction_loss', running_rec_loss/len(pbar), epoch)
+        if epoch % self.config['save_rec_every'] == 0 or epoch == (self.config['n_epochs'] - 1):
+          with torch.no_grad():
+            rec = self.auto_encoder(fixed_img)
+          ori_rec = torch.cat([fixed_img, rec], dim=0)
+          self.tf_logger.add_images(f'generated_epoch_{epoch+1}', ori_rec)
       
       if self.config['save_model_train'] and (running_rec_loss/len(pbar)) < best_loss:
         best_loss = running_rec_loss/len(pbar)
@@ -228,11 +378,13 @@ class MAETrainer(CNNAETrainer):
             'exp_name':       'mae_base',
             'warmup_epochs':  2,
             'max_mask_ratio': 0.75,
+            'n_repeat_step': 50,
+            'repeating_decay_step': 10,
             'model_config': {'img_size':32, 'patch_size':8, 'in_chans':3,
                              'embed_dim':128, 'depth':6, 'num_heads':8,
                              'decoder_embed_dim':64, 'decoder_depth':2, 'decoder_num_heads':8,
                              'mlp_ratio':4.}}
-  def __init__(self, config={}):
+  def __init__(self, config={}, *args, **kwargs):
     super().__init__(MAETrainer.CONFIG)
     self.config = {**self.config, **config}
   
@@ -274,9 +426,9 @@ class MAETrainer(CNNAETrainer):
           pred = self.auto_encoder.unpatchify(pred)
           loss = loss + self.recon_criterion(pred, img)
 
-        self.opt_critic.zero_grad()
+        self.ae_optim.zero_grad()
         loss.backward()
-        self.opt_critic.step()
+        self.ae_optim.step()
 
         running_rec_loss += loss.item()
 
@@ -312,20 +464,26 @@ class MAETrainer(CNNAETrainer):
 
 def run_all_experiments(trainers, args):
   results = {'exp_name': [], 'test_loss': []}
-  for config in [{},
-                 {'model_config': {'skip_connection': False, 'linear_bottleneck': False,
-                                   'add_noise_bottleneck': False, 'add_noise_encoder': False}},
-                 {'model_config': {'skip_connection': True, 'linear_bottleneck': False,
-                                   'add_noise_bottleneck': False, 'add_noise_encoder': False}},
-                 {'model_config': {'skip_connection': True, 'linear_bottleneck': False,
-                                   'add_noise_bottleneck': True, 'add_noise_encoder': False}},
-                 {'model_config': {'skip_connection': True, 'linear_bottleneck': False,
-                                   'add_noise_bottleneck': True, 'add_noise_encoder': True}}]:
-    trainer = trainers[args.trainer](config, set_specific_exp_name=True)
-    print(f'Start experiment {trainer.exp_name}')
+  for config in [{'trainer': 'cnn_ae', 'config': {}},
+                 {'trainer': 'cnn_ae',
+                  'config': {'model_config': {'skip_connection': False, 'linear_bottleneck': False,
+                                              'add_noise_bottleneck': False, 'add_noise_encoder': False}}},
+                 {'trainer': 'cnn_ae',
+                  'config': {'model_config': {'skip_connection': True, 'linear_bottleneck': False,
+                                              'add_noise_bottleneck': False, 'add_noise_encoder': False}}},
+                 {'trainer': 'cnn_ae',
+                  'config': {'model_config': {'skip_connection': True, 'linear_bottleneck': False,
+                                              'add_noise_bottleneck': True, 'add_noise_encoder': False}}},
+                 {'trainer': 'cnn_ae',
+                  'config': {'model_config': {'skip_connection': True, 'linear_bottleneck': False,
+                                              'add_noise_bottleneck': True, 'add_noise_encoder': True}}},
+                 {'trainer': 'wgan_gp', 'config': {}}]:
+    trainer = trainers[config['trainer']](config['config'],
+                                          set_specific_exp_name=True if config['trainer'] == 'cnn_ae' else False)
+    print(f'Start experiment {trainer.config['exp_name']}')
     trainer.train()
     loss = trainer.evaluate()
-    results['exp_name'].append(trainer.exp_name)
+    results['exp_name'].append(trainer.config['exp_name'])
     results['test_loss'].append(round(loss, 4))
   df = pd.DataFrame.from_dict(results)
   print(tabulate(df, headers='keys', tablefmt='psql'))
@@ -343,7 +501,7 @@ def get_args():
 
 
 if __name__ == '__main__':
-  trainers = {'cnn_ae': CNNAETrainer, 'mae': MAETrainer}
+  trainers = {'cnn_ae': CNNAETrainer, 'mae': MAETrainer, 'wgan_gp': WGANGPTrainer}
   args = get_args()
 
   if args.run_all_exps:
