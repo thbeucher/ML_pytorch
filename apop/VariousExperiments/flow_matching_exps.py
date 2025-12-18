@@ -43,20 +43,36 @@ class TimeEmbedding(nn.Module):
     return emb
 
 
-class DoubleConv(nn.Module):
-  def __init__(self, in_channels, out_channels):
-    super().__init__()
-    self.double_conv = nn.Sequential(
-      nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
-      nn.BatchNorm2d(out_channels),
-      nn.ReLU(inplace=True),
-      nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
-      nn.BatchNorm2d(out_channels),
-      nn.ReLU(inplace=True)
-    )
+class ResBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, time_dim, pooling=False, upscale=False):
+        super().__init__()
+        self.pooling = pooling
+        self.upscale = upscale
 
-  def forward(self, x):
-    return self.double_conv(x)
+        if pooling:
+          self.conv_pool = nn.Conv2d(in_channels, in_channels, 4, 2, 1)
+
+        if upscale:
+          self.conv_upscale = nn.ConvTranspose2d(in_channels, in_channels, 4, 2, 1)
+
+        self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
+
+        self.time_proj = nn.Linear(time_dim, out_channels)
+        self.act = nn.SiLU()
+
+        self.skip = nn.Conv2d(in_channels, out_channels, 1) if in_channels != out_channels else nn.Identity()
+
+    def forward(self, x, t):
+        """
+        x: (B, C, H, W)
+        t: (B, time_dim)
+        """
+        xp = self.conv_pool(x) if self.pooling else self.conv_upscale(x) if self.upscale else x
+        h = self.act(self.conv1(xp))
+        h = h + self.time_proj(t)[:, :, None, None]
+        h = self.act(self.conv2(h))
+        return h + self.skip(xp)
 
 
 class Unet(nn.Module):
@@ -65,34 +81,35 @@ class Unet(nn.Module):
     super().__init__()
     self.config = {**Unet.CONFIG, **config}
     self.time_embed = TimeEmbedding(self.config['time_dim'])
+
+    self.inp = ResBlock(3, 16, self.config['time_dim'])
+
+    self.down1 = ResBlock(16, 32, self.config['time_dim'], pooling=True)
+    self.down2 = ResBlock(32, 64, self.config['time_dim'], pooling=True)
+    self.down3 = ResBlock(64, 128, self.config['time_dim'], pooling=True)
+
+    self.up1 = ResBlock(128, 64, self.config['time_dim'], upscale=True)
+    self.up2 = ResBlock(64, 32, self.config['time_dim'], upscale=True)
+    self.up3 = ResBlock(32, 16, self.config['time_dim'], upscale=True)
+
     self.time_proj = nn.Linear(self.config['time_dim'], 16)
-
-    self.inp = DoubleConv(3, 16)                                                 # [B, 3, 32, 32] -> [B, 16, 32, 32]
-    self.down1 = nn.Sequential(nn.Conv2d(16, 16, 4, 2, 1), DoubleConv(16, 32))   # -> [B, 16, 16, 16] -> [B, 32, 16, 16]
-    self.down2 = nn.Sequential(nn.Conv2d(32, 32, 4, 2, 1), DoubleConv(32, 64))   # -> [B, 32, 8, 8]   -> [B, 64, 8, 8]
-    self.down3 = nn.Sequential(nn.Conv2d(64, 64, 4, 2, 1), DoubleConv(64, 128))  # -> [B, 64, 4, 4]   -> [B, 128, 4, 4]
-
-    self.up1 = nn.Sequential(nn.ConvTranspose2d(128, 128, 4, 2, 1), DoubleConv(128, 64))
-    self.up2 = nn.Sequential(nn.ConvTranspose2d(64, 64, 4, 2, 1), DoubleConv(64, 32))
-    self.up3 = nn.Sequential(nn.ConvTranspose2d(32, 32, 4, 2, 1), DoubleConv(32, 16))
-    self.out = DoubleConv(16, 3)
-    self.out = nn.Sequential(DoubleConv(16, 3), nn.Sigmoid())
+    self.out = nn.Sequential(nn.Conv2d(16, 3, kernel_size=3, padding=1), nn.Sigmoid())
   
   def forward(self, x, t):
-    t = self.time_embed(t)                 # -> [B, 128]
-    t = self.time_proj(t)                  # -> [B, 16]
+    t = self.time_embed(t)                          # -> [B, 128]
     
-    x = self.inp(x) + t[:, :, None, None]  # -> [B, 16, 32, 32]
+    x = self.inp(x, t)                              # -> [B, 16, 32, 32]
     
-    d1 = self.down1(x)                     # -> [B, 32, 16, 16]
-    d2 = self.down2(d1)                    # -> [B, 64, 8, 8]
-    d3 = self.down3(d2)                    # -> [B, 128, 4, 4]
+    d1 = self.down1(x, t)                           # -> [B, 32, 16, 16]
+    d2 = self.down2(d1, t)                          # -> [B, 64, 8, 8]
+    d3 = self.down3(d2, t)                          # -> [B, 128, 4, 4]
 
-    u1 = self.up1(d3)                      # -> [B, 64, 8, 8]
-    u2 = self.up2(u1 + d2)                 # -> [B, 32, 16, 16]
-    u3 = self.up3(u2 + d1)                 # -> [B, 16, 32, 32]
+    u1 = self.up1(d3, t)                            # -> [B, 64, 8, 8]
+    u2 = self.up2(u1 + d2, t)                       # -> [B, 32, 16, 16]
+    u3 = self.up3(u2 + d1, t)                       # -> [B, 16, 32, 32]
 
-    out = self.out(u3 + x)                 # -> [B, 3, 32, 32]
+    t_expand = self.time_proj(t)[:, :, None, None]  # -> [B, 16]
+    out = self.out(u3 + x + t_expand)               # -> [B, 3, 32, 32]
     return out
 
 
@@ -103,7 +120,7 @@ class FlowMatchingTrainer:
             'sample_step':       10_000,
             'data_dir':          '../../../gpt_tests/data/',
             'save_dir':          'cifar10_exps/',
-            'exp_name':          'fm_base',
+            'exp_name':          'fm_base_alltime',
             'log_dir':           'runs/',
             'save_model_train':  True,
             'use_tf_logger':     True,
@@ -168,11 +185,24 @@ class FlowMatchingTrainer:
   def load_model(self):
     path = os.path.join(self.config['save_dir'], self.config['exp_name'], f"{self.config['exp_name']}.pt")
     if os.path.isfile(path):
-      model = torch.load(path)
+      model = torch.load(path, map_location=self.device)
       self.unet.load_state_dict(model['unet'])
       print(f'Model loaded successfully from {path}...')
     else:
       print(f'File {path} not found... No loaded model.')
+  
+  @torch.no_grad()
+  def show_sample(self, n=8, n_steps=100):
+    print('Loading model...')
+    self.load_model()
+    print('Generating Images...')
+    real_imgs, _ = next(iter(self.train_dataloader))
+    real_imgs = real_imgs.to(self.device)
+    mid_samples, samples = self.sample(n, n_steps=n_steps)
+    ori_sample = torch.cat([real_imgs[:n], mid_samples, samples], dim=0)
+    show_sample_tag = f"show_sample_{self.config['exp_name']}"
+    self.tf_logger.add_images(show_sample_tag, ori_sample)
+    print(f'Images generated upload in tensorboard {show_sample_tag}')
 
   @torch.no_grad()
   def sample(self, n_samples, n_steps=100):
@@ -257,6 +287,7 @@ def get_args():
   parser.add_argument('--train_model', '-tm', action='store_true')
   parser.add_argument('--eval_model', '-em', action='store_true')
   parser.add_argument('--save_model', '-sm', action='store_true')
+  parser.add_argument('--show_sample', '-ss', action='store_true')
   return parser.parse_args()
 
 
@@ -280,6 +311,10 @@ if __name__ == '__main__':
     if args.eval_model:
       print(f'Evaluating model... ({trainers[args.trainer].__name__})')
       trainer.evaluate()
+    
+    if args.show_sample:
+      print(f'Generating samples... ({trainers[args.trainer].__name__})')
+      trainer.show_sample()
     
     if args.save_model:
       print(f'Saving model... ({trainers[args.trainer].__name__})')
