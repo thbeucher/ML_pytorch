@@ -1,4 +1,5 @@
 import os
+import json
 import torch
 import random
 import argparse
@@ -146,6 +147,13 @@ class CNNAETrainer:
     self.instanciate_model()
     self.set_dataloader()
     self.set_optimizers_n_criterions()
+    self.dump_config()
+  
+  def dump_config(self):
+    with open(os.path.join(self.config['save_dir'],
+                           self.config['exp_name'],
+                           f"{self.config['exp_name']}_CONFIG.json"), 'w') as f:
+      json.dump(self.config, f)
   
   def set_seed(self):
     # Set seeds for reproducibility
@@ -375,11 +383,11 @@ class MAETrainer(CNNAETrainer):
   CONFIG = {'lr':             1e-4,
             'n_epochs':       200,
             'save_rec_every': 20,
-            'exp_name':       'mae_base_trainschedulecomplete',
+            'exp_name':       'mae_base_longMRschedule_recwarmup',
             'warmup_epochs':  2,
             'max_mask_ratio': 0.75,
             'min_mask_ratio': 0.1,
-            'n_step_mask_ratio_schedule': 10,
+            'n_step_mask_ratio_schedule': 50,
             'n_repeat_step_max': 100,
             'n_step_repeat_schedule': 20,
             'n_epochs_repeat_stop': 20,
@@ -435,9 +443,9 @@ class MAETrainer(CNNAETrainer):
           loss, pred, mask = self.auto_encoder(img, mask_ratio=mask_ratio)  # pred = [B, n_patch, c*h*w]
           self.tf_logger.add_scalar('repeat_batch_loss', loss.item(), j)
 
-          # if epoch < self.config['warmup_epochs']:
-          #   pred = self.auto_encoder.unpatchify(pred)
-          #   loss = loss + self.recon_criterion(pred, img)
+          if epoch < self.config['warmup_epochs']:
+            pred = self.auto_encoder.unpatchify(pred)
+            loss = loss + self.recon_criterion(pred, img)
 
           self.ae_optim.zero_grad()
           loss.backward()
