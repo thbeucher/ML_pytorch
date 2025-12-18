@@ -375,13 +375,14 @@ class MAETrainer(CNNAETrainer):
   CONFIG = {'lr':             1e-4,
             'n_epochs':       200,
             'save_rec_every': 20,
-            'exp_name':       'mae_base_trainschedule',
+            'exp_name':       'mae_base_trainschedulecomplete',
             'warmup_epochs':  2,
             'max_mask_ratio': 0.75,
             'min_mask_ratio': 0.1,
             'n_step_mask_ratio_schedule': 10,
             'n_repeat_step_max': 100,
             'n_step_repeat_schedule': 20,
+            'n_epochs_repeat_stop': 20,
             'model_config': {'img_size':32, 'patch_size':8, 'in_chans':3,
                              'embed_dim':128, 'depth':6, 'num_heads':8,
                              'decoder_embed_dim':64, 'decoder_depth':2, 'decoder_num_heads':8,
@@ -427,8 +428,9 @@ class MAETrainer(CNNAETrainer):
         if fixed_img is None:
           fixed_img = img[:8]
         
-        n_repeat = int(MAETrainer.exponential_schedule(i, self.config['n_step_repeat_schedule'],
-                                                       start=self.config['n_repeat_step_max'], end=1))
+        if epoch < self.config['n_epochs_repeat_stop']:
+          n_repeat = int(MAETrainer.exponential_schedule(i, self.config['n_step_repeat_schedule'],
+                                                         start=self.config['n_repeat_step_max'], end=1))
         for j in range(n_repeat):
           loss, pred, mask = self.auto_encoder(img, mask_ratio=mask_ratio)  # pred = [B, n_patch, c*h*w]
           self.tf_logger.add_scalar('repeat_batch_loss', loss.item(), j)
@@ -491,7 +493,7 @@ def run_all_experiments(trainers, args):
                  {'trainer': 'wgan_gp', 'config': {}}]:
     trainer = trainers[config['trainer']](config['config'],
                                           set_specific_exp_name=True if config['trainer'] == 'cnn_ae' else False)
-    print(f'Start experiment {trainer.config['exp_name']}')
+    print(f"Start experiment {trainer.config['exp_name']}")
     trainer.train()
     loss = trainer.evaluate()
     results['exp_name'].append(trainer.config['exp_name'])
