@@ -375,11 +375,13 @@ class MAETrainer(CNNAETrainer):
   CONFIG = {'lr':             1e-4,
             'n_epochs':       200,
             'save_rec_every': 20,
-            'exp_name':       'mae_base',
+            'exp_name':       'mae_base_trainschedule',
             'warmup_epochs':  2,
             'max_mask_ratio': 0.75,
-            'n_repeat_step': 50,
-            'repeating_decay_step': 10,
+            'min_mask_ratio': 0.1,
+            'n_step_mask_ratio_schedule': 10,
+            'n_repeat_step_max': 100,
+            'n_step_repeat_schedule': 20,
             'model_config': {'img_size':32, 'patch_size':8, 'in_chans':3,
                              'embed_dim':128, 'depth':6, 'num_heads':8,
                              'decoder_embed_dim':64, 'decoder_depth':2, 'decoder_num_heads':8,
@@ -390,6 +392,11 @@ class MAETrainer(CNNAETrainer):
   
   def instanciate_model(self):
     self.auto_encoder = MaskedAutoencoderViT(**self.config['model_config']).to(self.device)
+  
+  @staticmethod
+  def exponential_schedule(epoch, n_epochs_decay, start=0.1, end=0.75):
+    op_check = min if end > start else max
+    return round(op_check(end, start * (end / start) ** (epoch / (n_epochs_decay - 1))), 2)
   
   @torch.no_grad()
   def get_rec_to_plot(self, fixed_img, mask_ratio=0.75):
@@ -413,22 +420,26 @@ class MAETrainer(CNNAETrainer):
     pbar = tqdm(range(self.config['n_epochs']))
     for epoch in pbar:
       running_rec_loss = 0.
-      mask_ratio = 0.1 if epoch < self.config['warmup_epochs'] else 0.75
-      for img, _ in self.train_dataloader:
+      mask_ratio = MAETrainer.exponential_schedule(epoch, self.config['n_step_mask_ratio_schedule'])
+      for i, (img, _) in enumerate(self.train_dataloader):
         img = img.to(self.device)
 
         if fixed_img is None:
           fixed_img = img[:8]
+        
+        n_repeat = int(MAETrainer.exponential_schedule(i, self.config['n_step_repeat_schedule'],
+                                                       start=self.config['n_repeat_step_max'], end=1))
+        for j in range(n_repeat):
+          loss, pred, mask = self.auto_encoder(img, mask_ratio=mask_ratio)  # pred = [B, n_patch, c*h*w]
+          self.tf_logger.add_scalar('repeat_batch_loss', loss.item(), j)
 
-        loss, pred, mask = self.auto_encoder(img, mask_ratio=mask_ratio)  # pred = [B, n_patch, c*h*w]
+          # if epoch < self.config['warmup_epochs']:
+          #   pred = self.auto_encoder.unpatchify(pred)
+          #   loss = loss + self.recon_criterion(pred, img)
 
-        if epoch < self.config['warmup_epochs']:
-          pred = self.auto_encoder.unpatchify(pred)
-          loss = loss + self.recon_criterion(pred, img)
-
-        self.ae_optim.zero_grad()
-        loss.backward()
-        self.ae_optim.step()
+          self.ae_optim.zero_grad()
+          loss.backward()
+          self.ae_optim.step()
 
         running_rec_loss += loss.item()
 
