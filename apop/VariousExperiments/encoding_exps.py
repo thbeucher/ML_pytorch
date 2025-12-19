@@ -11,8 +11,8 @@ from tqdm import tqdm
 from tabulate import tabulate
 from torch.autograd import grad
 from torch.utils.data import DataLoader
+from torchvision import datasets, transforms
 from torch.utils.tensorboard import SummaryWriter
-from torchvision import datasets, transforms, utils
 
 from masked_autoencoder import MaskedAutoencoderViT
 
@@ -55,6 +55,54 @@ class Critic(nn.Module):
     return self.net(x).view(-1)
 
 
+class SimpleCNNEncoder(nn.Module):
+  def __init__(self, add_noise=False, noise_p=0.5, noise_std=0.1):
+    super().__init__()
+    self.add_noise = add_noise
+
+    self.down1 = nn.Sequential(nn.Conv2d(3, 64, 4, 2, 1), nn.ReLU(True))
+    self.down2 = nn.Sequential(nn.Conv2d(64, 128, 4, 2, 1), nn.BatchNorm2d(128), nn.ReLU(True))
+    self.down3 = nn.Sequential(nn.Conv2d(128, 256, 4, 2, 1), nn.BatchNorm2d(256), nn.ReLU(True))
+
+    if add_noise:
+      self.noise_layer = NoiseLayer(p=noise_p, std=noise_std)
+
+  def forward(self, x):
+    d1 = self.down1(x)  # [B, 3, 32, 32] -> [B, 64, 16, 16]
+    if self.add_noise:
+      d1 = self.noise_layer(d1)
+    
+    d2 = self.down2(d1)  #               -> [B, 128, 8, 8]
+    if self.add_noise:
+      d2 = self.noise_layer(d2)
+    
+    d3 = self.down3(d2)  #               -> [B, 256, 4, 4]
+    if self.add_noise:
+      d3 = self.noise_layer(d3)
+    
+    return d1, d2, d3
+
+
+class SimpleCNNDecoder(nn.Module):
+  def __init__(self):
+    super().__init__()
+    self.up1 = nn.Sequential(nn.ConvTranspose2d(256, 128, 4, 2, 1), nn.BatchNorm2d(128), nn.ReLU(True))
+    self.up2 = nn.Sequential(nn.ConvTranspose2d(128, 64, 4, 2, 1), nn.BatchNorm2d(64), nn.ReLU(True))
+    self.up3 = nn.Sequential(nn.ConvTranspose2d(64, 3, 4, 2, 1), nn.Sigmoid())
+  
+  def forward(self, d3, d2=None, d1=None):
+    u1 = self.up1(d3)   #                -> [B, 128, 8, 8]
+    if d2 is not None:  # skip connection
+      u1 = u1 + d2
+
+    u2 = self.up2(u1)   #                -> [B, 64, 16, 16]
+    if d1 is not None:  # skip connection
+      u2 = u2 + d1
+
+    u3 = self.up3(u2)  #                -> [B, 3, 32, 32]
+    return u3
+
+
 class CNNAE(nn.Module):
   CONFIG = {'skip_connection': True,
             'linear_bottleneck': False,
@@ -67,29 +115,21 @@ class CNNAE(nn.Module):
     super().__init__()
     self.config = {**self.CONFIG, **config}
 
-    self.down1 = nn.Sequential(nn.Conv2d(3, 64, 4, 2, 1), nn.ReLU(True))
-    self.down2 = nn.Sequential(nn.Conv2d(64, 128, 4, 2, 1), nn.BatchNorm2d(128), nn.ReLU(True))
-    self.down3 = nn.Sequential(nn.Conv2d(128, 256, 4, 2, 1), nn.BatchNorm2d(256), nn.ReLU(True))
+    self.down = SimpleCNNEncoder(add_noise=self.config['add_noise_encoder'],
+                                 noise_p=self.config['noise_prob'],
+                                 noise_std=self.config['noise_std'])
 
     if self.config['linear_bottleneck']:
       self.embedder = nn.Linear(256*4*4, self.config['latent_dim'])      # H=32,W=32 for cifar10
       self.fc_dec = nn.Linear(self.config['latent_dim'], 256*4*4)
 
-    self.up1 = nn.Sequential(nn.ConvTranspose2d(256, 128, 4, 2, 1), nn.BatchNorm2d(128), nn.ReLU(True))
-    self.up2 = nn.Sequential(nn.ConvTranspose2d(128, 64, 4, 2, 1), nn.BatchNorm2d(64), nn.ReLU(True))
-    self.up3 = nn.Sequential(nn.ConvTranspose2d(64, 3, 4, 2, 1), nn.Sigmoid())
+    self.up = SimpleCNNDecoder()
 
     if self.config['add_noise_encoder'] or self.config['add_noise_bottleneck']:
       self.noise_layer = NoiseLayer(p=self.config['noise_prob'], std=self.config['noise_std'])
   
   def forward(self, x, return_enc=False):
-    d1 = self.down1(x)   # [B, 3, 32, 32] -> [B, 64, 16, 16]
-    if self.config['add_noise_encoder']:
-      d1 = self.noise_layer(d1)
-    d2 = self.down2(d1)  #                -> [B, 128, 8, 8]
-    if self.config['add_noise_encoder']:
-      d2 = self.noise_layer(d2)
-    d3 = self.down3(d2)  #                -> [B, 256, 4, 4]
+    d1, d2, d3 = self.down(x)
 
     if self.config['linear_bottleneck']:
       d3 = self.fc_dec(self.embedder(d3.flatten(1))).view(d3.shape)
@@ -97,19 +137,13 @@ class CNNAE(nn.Module):
     if self.config['add_noise_bottleneck']:
       d3 = self.noise_layer(d3)
 
-    u1 = self.up1(d3)   #                -> [B, 128, 8, 8]
-    if self.config['skip_connection']:
-      u1 = u1 + d2
-
-    u2 = self.up2(u1)   #                -> [B, 64, 16, 16]
-    if self.config['skip_connection']:
-      u2 = u2 + d1
-
-    up3 = self.up3(u2)  #                -> [B, 3, 32, 32]
+    u3 = self.up(d3,
+                 d2 if self.config['skip_connection'] else None,
+                 d1 if self.config['skip_connection'] else None)
 
     if return_enc:
-      up3, d3
-    return up3
+      u3, d3
+    return u3
 
 
 class CNNAETrainer:
@@ -182,7 +216,7 @@ class CNNAETrainer:
 
   def set_optimizers_n_criterions(self):
     self.ae_optim = torch.optim.AdamW(self.auto_encoder.parameters(), lr=self.config['lr'], betas=(0.9, 0.95))
-    self.recon_criterion = nn.MSELoss()
+    self.rec_criterion = nn.MSELoss()
 
   def save_model(self):
     os.makedirs(self.config['save_dir'], exist_ok=True)
@@ -192,7 +226,7 @@ class CNNAETrainer:
   def load_model(self):
     path = os.path.join(self.config['save_dir'], self.config['exp_name'], f"{self.config['exp_name']}.pt")
     if os.path.isfile(path):
-      model = torch.load(path)
+      model = torch.load(path, map_location=self.device)
       self.auto_encoder.load_state_dict(model['auto_encoder'])
       print(f'Model loaded successfully from {path}...')
     else:
@@ -212,7 +246,7 @@ class CNNAETrainer:
           fixed_img = img[:8]
 
         rec = self.auto_encoder(img)
-        loss = self.recon_criterion(rec, img)
+        loss = self.rec_criterion(rec, img)
 
         self.ae_optim.zero_grad()
         loss.backward()
@@ -226,7 +260,7 @@ class CNNAETrainer:
           with torch.no_grad():
             rec = self.auto_encoder(fixed_img)
           ori_rec = torch.cat([fixed_img, rec], dim=0)
-          self.tf_logger.add_images(f'generated_epoch_{epoch+1}', ori_rec)
+          self.tf_logger.add_images(f'generated_epoch_{epoch}', ori_rec)
       
       if self.config['save_model_train'] and (running_rec_loss/len(pbar)) < best_loss:
         best_loss = running_rec_loss/len(pbar)
@@ -241,7 +275,7 @@ class CNNAETrainer:
     for img, _ in tqdm(self.test_dataloader):
       img = img.to(self.device)
       rec = self.auto_encoder(img)
-      loss = self.recon_criterion(rec, img)
+      loss = self.rec_criterion(rec, img)
       running_loss += loss.item()
     rec_loss = running_loss/len(self.test_dataloader)
     print(f'Reconstruction loss on test data: {rec_loss:.4f}')
@@ -294,7 +328,7 @@ class WGANGPTrainer(CNNAETrainer):
   def set_optimizers_n_criterions(self):
     self.ae_optim = torch.optim.AdamW(self.auto_encoder.parameters(), lr=self.config['lr'], betas=(0.9, 0.95))
     self.critic_optim = torch.optim.AdamW(self.critic.parameters(), lr=self.config['lr'], betas=(0.9, 0.95))
-    self.recon_criterion = nn.MSELoss()
+    self.rec_criterion = nn.MSELoss()
   
   def train(self):
     self.auto_encoder.train()
@@ -341,7 +375,7 @@ class WGANGPTrainer(CNNAETrainer):
         fake_imgs = self.auto_encoder(real_imgs)
         # Generator tries to minimize -E[critic(fake)] (i.e. maximize critic score)
         gen_adv = -self.critic(fake_imgs).mean()
-        rec_loss = self.recon_criterion(fake_imgs, real_imgs)
+        rec_loss = self.rec_criterion(fake_imgs, real_imgs)
         gen_loss = gen_adv + self.config['rec_loss_lambda'] * rec_loss
 
         self.ae_optim.zero_grad()
@@ -357,7 +391,7 @@ class WGANGPTrainer(CNNAETrainer):
           with torch.no_grad():
             rec = self.auto_encoder(fixed_img)
           ori_rec = torch.cat([fixed_img, rec], dim=0)
-          self.tf_logger.add_images(f'generated_epoch_{epoch+1}', ori_rec)
+          self.tf_logger.add_images(f'generated_epoch_{epoch}', ori_rec)
       
       if self.config['save_model_train'] and (running_rec_loss/len(pbar)) < best_loss:
         best_loss = running_rec_loss/len(pbar)
@@ -372,7 +406,7 @@ class WGANGPTrainer(CNNAETrainer):
     for img, _ in tqdm(self.test_dataloader):
       img = img.to(self.device)
       rec = self.auto_encoder(img)
-      loss = self.recon_criterion(rec, img)
+      loss = self.rec_criterion(rec, img)
       running_loss += loss.item()
     rec_loss = running_loss/len(self.test_dataloader)
     print(f'Reconstruction loss on test data: {rec_loss:.4f}')
@@ -445,7 +479,7 @@ class MAETrainer(CNNAETrainer):
 
           if epoch < self.config['warmup_epochs']:
             pred = self.auto_encoder.unpatchify(pred)
-            loss = loss + self.recon_criterion(pred, img)
+            loss = loss + self.rec_criterion(pred, img)
 
           self.ae_optim.zero_grad()
           loss.backward()
@@ -457,7 +491,7 @@ class MAETrainer(CNNAETrainer):
         self.tf_logger.add_scalar('masked_reconstruction_loss', running_rec_loss/len(pbar), epoch)
         if epoch % self.config['save_rec_every'] == 0 or epoch == (self.config['n_epochs'] - 1):
           ori_masked_rec = self.get_rec_to_plot(fixed_img, mask_ratio=mask_ratio)
-          self.tf_logger.add_images(f'generated_epoch_{epoch+1}', ori_masked_rec)
+          self.tf_logger.add_images(f'generated_epoch_{epoch}', ori_masked_rec)
       
       if self.config['save_model_train'] and (running_rec_loss/len(pbar)) < best_loss:
         best_loss = running_rec_loss/len(pbar)
@@ -473,12 +507,125 @@ class MAETrainer(CNNAETrainer):
       img = img.to(self.device)
       loss, pred, mask = self.auto_encoder(img)
       pred = self.auto_encoder.unpatchify(pred)
-      rec_loss = self.recon_criterion(pred, img)
+      rec_loss = self.rec_criterion(pred, img)
       running_loss += loss.item()
       running_rec_loss += rec_loss.item()
     loss = running_loss / len(self.test_dataloader)
     rec_loss = running_rec_loss / len(self.test_dataloader)
     print(f'Masked reconstruction loss on test data: {loss:.4f}')
+    print(f'Reconstruction loss on test data: {rec_loss:.4f}')
+    return rec_loss
+
+
+class SnakeAETrainer(CNNAETrainer):
+  CONFIG = {'lr':             1e-4,
+            'n_epochs':       30,
+            'save_rec_every': 5,
+            'exp_name':       'snakeAE_base'}
+  def __init__(self, config={}, *args, **kwargs):
+    super().__init__(SnakeAETrainer.CONFIG)
+    self.config = {**self.config, **config}
+  
+  def instanciate_model(self):
+    self.encoder = SimpleCNNEncoder().to(self.device)
+    self.decoder = SimpleCNNDecoder().to(self.device)
+  
+  def set_optimizers_n_criterions(self):
+    self.encoder_optim = torch.optim.AdamW(self.encoder.parameters(), lr=self.config['lr'], betas=(0.9, 0.95))
+    self.decoder_optim = torch.optim.AdamW(self.decoder.parameters(), lr=self.config['lr'], betas=(0.9, 0.95))
+    self.rec_criterion = nn.MSELoss()
+  
+  def save_model(self):
+    os.makedirs(self.config['save_dir'], exist_ok=True)
+    torch.save({'encoder': self.encoder.state_dict(), 'decoder': self.decoder.state_dict()},
+               os.path.join(self.config['save_dir'], self.config['exp_name'], f"{self.config['exp_name']}.pt"))
+
+  def load_model(self):
+    path = os.path.join(self.config['save_dir'], self.config['exp_name'], f"{self.config['exp_name']}.pt")
+    if os.path.isfile(path):
+      model = torch.load(path, map_location=self.device)
+      self.encoder.load_state_dict(model['encoder'])
+      self.decoder.load_state_dict(model['decoder'])
+      print(f'Model loaded successfully from {path}...')
+    else:
+      print(f'File {path} not found... No loaded model.')
+
+  def train(self):
+    self.encoder.train()
+    self.decoder.train()
+
+    fixed_img = None
+    best_loss = torch.inf
+
+    pbar = tqdm(range(self.config['n_epochs']))
+    for epoch in pbar:
+      running_rec_loss = 0.
+      for img, _ in self.train_dataloader:
+        img = img.to(self.device)
+
+        if fixed_img is None:
+          fixed_img = img[:8]
+        
+        # ============================================
+        # Phase 1: Autoencoder (train E + D)
+        # ============================================
+        z1, z2, z3 = self.encoder(img)
+        rec = self.decoder(z3, z2, z1)
+
+        loss = self.rec_criterion(rec, img)
+        self.encoder_optim.zero_grad()
+        self.decoder_optim.zero_grad()
+        loss.backward()
+        self.encoder_optim.step()
+        self.decoder_optim.step()
+
+        running_rec_loss += loss.item()
+
+        # ============================================
+        # Phase 2: Latent consistency (train D only)
+        # ============================================
+        with torch.no_grad():
+          z1, z2, z3 = self.encoder(img)
+        
+        rec_img = self.decoder(z3, z2, z1)
+        rec_z1, rec_z2, rec_z3 = self.encoder(rec_img)
+
+        loss = self.rec_criterion(rec_z3, z3) + self.rec_criterion(rec_z2, z2) + self.rec_criterion(rec_z1, z1)
+        self.decoder_optim.zero_grad()
+        loss.backward()
+        self.decoder_optim.step()
+
+      if self.tf_logger is not None:
+        self.tf_logger.add_scalar('reconstruction_loss', running_rec_loss/len(pbar), epoch)
+        if epoch % self.config['save_rec_every'] == 0 or epoch == (self.config['n_epochs'] - 1):
+          with torch.no_grad():
+            z1, z2, z3 = self.encoder(fixed_img)
+            rec = self.decoder(z3, z2, z1)
+          ori_rec = torch.cat([fixed_img, rec], dim=0)
+          self.tf_logger.add_images(f'generated_epoch_{epoch}', ori_rec)
+      
+      if self.config['save_model_train'] and (running_rec_loss/len(pbar)) < best_loss:
+        best_loss = running_rec_loss/len(pbar)
+        self.save_model()
+
+      pbar.set_postfix(loss=f'{running_rec_loss/len(pbar):.4f}')
+
+  @torch.no_grad()
+  def evaluate(self):
+    self.encoder.eval()
+    self.decoder.eval()
+
+    running_loss = 0.
+    for img, _ in tqdm(self.test_dataloader):
+      img = img.to(self.device)
+
+      z1, z2, z3 = self.encoder(img)
+      rec = self.decoder(z3, z2, z1)
+
+      loss = self.rec_criterion(rec, img)
+      running_loss += loss.item()
+
+    rec_loss = running_loss/len(self.test_dataloader)
     print(f'Reconstruction loss on test data: {rec_loss:.4f}')
     return rec_loss
 
@@ -522,7 +669,8 @@ def get_args():
 
 
 if __name__ == '__main__':
-  trainers = {'cnn_ae': CNNAETrainer, 'mae': MAETrainer, 'wgan_gp': WGANGPTrainer}
+  trainers = {'cnn_ae': CNNAETrainer, 'mae': MAETrainer, 'wgan_gp': WGANGPTrainer,
+              'snake_ae': SnakeAETrainer}
   args = get_args()
 
   if args.run_all_exps:
