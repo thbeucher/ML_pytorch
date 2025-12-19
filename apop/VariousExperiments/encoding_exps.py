@@ -14,6 +14,8 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from torch.utils.tensorboard import SummaryWriter
 
+from vision_transformer.cvt import CvT
+from vision_transformer.vit import ViT
 from masked_autoencoder import MaskedAutoencoderViT
 
 
@@ -55,10 +57,11 @@ class Critic(nn.Module):
     return self.net(x).view(-1)
 
 
-class SimpleCNNEncoder(nn.Module):
-  def __init__(self, add_noise=False, noise_p=0.5, noise_std=0.1):
+class CNNEncoder(nn.Module):
+  def __init__(self, add_noise=False, noise_p=0.5, noise_std=0.1, add_attn=False):
     super().__init__()
     self.add_noise = add_noise
+    self.add_attn = add_attn
 
     self.down1 = nn.Sequential(nn.Conv2d(3, 64, 4, 2, 1), nn.ReLU(True))
     self.down2 = nn.Sequential(nn.Conv2d(64, 128, 4, 2, 1), nn.BatchNorm2d(128), nn.ReLU(True))
@@ -66,15 +69,25 @@ class SimpleCNNEncoder(nn.Module):
 
     if add_noise:
       self.noise_layer = NoiseLayer(p=noise_p, std=noise_std)
+    
+    if add_attn:
+      self.attn1 = ViT(image_size=16, patch_size=4, dim=64, depth=2, heads=4, mlp_dim=128, dim_head=32, channels=64)
+      self.attn2 = ViT(image_size=8, patch_size=4, dim=64, depth=2, heads=4, mlp_dim=128, dim_head=32, channels=128)
 
   def forward(self, x):
     d1 = self.down1(x)  # [B, 3, 32, 32] -> [B, 64, 16, 16]
     if self.add_noise:
       d1 = self.noise_layer(d1)
     
+    if self.add_attn:
+      d1 = self.attn1(d1)
+    
     d2 = self.down2(d1)  #               -> [B, 128, 8, 8]
     if self.add_noise:
       d2 = self.noise_layer(d2)
+    
+    if self.add_attn:
+      d2 = self.attn2(d2)
     
     d3 = self.down3(d2)  #               -> [B, 256, 4, 4]
     if self.add_noise:
@@ -83,19 +96,28 @@ class SimpleCNNEncoder(nn.Module):
     return d1, d2, d3
 
 
-class SimpleCNNDecoder(nn.Module):
-  def __init__(self):
+class CNNDecoder(nn.Module):
+  def __init__(self, add_attn=False):
     super().__init__()
     self.up1 = nn.Sequential(nn.ConvTranspose2d(256, 128, 4, 2, 1), nn.BatchNorm2d(128), nn.ReLU(True))
     self.up2 = nn.Sequential(nn.ConvTranspose2d(128, 64, 4, 2, 1), nn.BatchNorm2d(64), nn.ReLU(True))
     self.up3 = nn.Sequential(nn.ConvTranspose2d(64, 3, 4, 2, 1), nn.Sigmoid())
+
+    self.add_attn = add_attn
+    if add_attn:
+      self.attn1 = ViT(image_size=8, patch_size=4, dim=64, depth=2, heads=4, mlp_dim=128, dim_head=32, channels=128)
+      self.attn2 = ViT(image_size=16, patch_size=4, dim=64, depth=2, heads=4, mlp_dim=128, dim_head=32, channels=64)
   
   def forward(self, d3, d2=None, d1=None):
     u1 = self.up1(d3)   #                -> [B, 128, 8, 8]
+    if self.add_attn:
+      u1 = self.attn1(u1)
     if d2 is not None:  # skip connection
       u1 = u1 + d2
 
     u2 = self.up2(u1)   #                -> [B, 64, 16, 16]
+    if self.add_attn:
+      u2 = self.attn2(u2)
     if d1 is not None:  # skip connection
       u2 = u2 + d1
 
@@ -108,22 +130,25 @@ class CNNAE(nn.Module):
             'linear_bottleneck': False,
             'add_noise_bottleneck': False,
             'add_noise_encoder': False,
+            'add_enc_attn': False,
+            'add_dec_attn': True,
             'noise_prob': 0.5,
             'noise_std': 0.1,
             'latent_dim': 128}
   def __init__(self, config={}):
     super().__init__()
-    self.config = {**self.CONFIG, **config}
+    self.config = {**CNNAE.CONFIG, **config}
 
-    self.down = SimpleCNNEncoder(add_noise=self.config['add_noise_encoder'],
-                                 noise_p=self.config['noise_prob'],
-                                 noise_std=self.config['noise_std'])
+    self.down = CNNEncoder(add_noise=self.config['add_noise_encoder'],
+                           noise_p=self.config['noise_prob'],
+                           noise_std=self.config['noise_std'],
+                           add_attn=self.config['add_enc_attn'])
 
     if self.config['linear_bottleneck']:
       self.embedder = nn.Linear(256*4*4, self.config['latent_dim'])      # H=32,W=32 for cifar10
       self.fc_dec = nn.Linear(self.config['latent_dim'], 256*4*4)
 
-    self.up = SimpleCNNDecoder()
+    self.up = CNNDecoder(add_attn=self.config['add_dec_attn'])
 
     if self.config['add_noise_encoder'] or self.config['add_noise_bottleneck']:
       self.noise_layer = NoiseLayer(p=self.config['noise_prob'], std=self.config['noise_std'])
@@ -146,6 +171,19 @@ class CNNAE(nn.Module):
     return u3
 
 
+class MixedAE(nn.Module):
+  CONFIG = {'add_dec_attn': True}
+  def __init__(self, config={}):
+    super().__init__()
+    self.config = {**MixedAE.CONFIG, **config}
+    self.encoder = CvT()
+    self.decoder = CNNDecoder(add_attn=self.config['add_dec_attn'])
+  
+  def forward(self, x):
+    z = self.encoder(x)
+    return self.decoder(z)
+
+
 class CNNAETrainer:
   '''ConvNeuralNet_AutoEncoder_Trainer'''
   CONFIG = {'lr':                1e-4,
@@ -160,10 +198,12 @@ class CNNAETrainer:
             'use_tf_logger':     True,
             'seed':              42,
             'save_model_train':  True,
-            'model_config': {'skip_connection': False,
-                             'linear_bottleneck': True,
+            'model_config': {'skip_connection': True,
+                             'linear_bottleneck': False,
                              'add_noise_bottleneck': False,
-                             'add_noise_encoder': False}}
+                             'add_noise_encoder': False,
+                             'add_enc_attn': False,
+                             'add_dec_attn': True}}
   def __init__(self, config={}, set_specific_exp_name=False):
     self.config = {**CNNAETrainer.CONFIG, **config}
 
@@ -283,6 +323,7 @@ class CNNAETrainer:
 
 
 class WGANGPTrainer(CNNAETrainer):
+  '''Wasserstein_GAN_GradientPenalty_Trainer'''
   CONFIG = {'exp_name': 'wgan_gp',
             'n_critic_train_steps_per_epoch': 5,
             'gradient_penalty_lambda': 10.0,
@@ -527,8 +568,8 @@ class SnakeAETrainer(CNNAETrainer):
     self.config = {**self.config, **config}
   
   def instanciate_model(self):
-    self.encoder = SimpleCNNEncoder().to(self.device)
-    self.decoder = SimpleCNNDecoder().to(self.device)
+    self.encoder = CNNEncoder().to(self.device)
+    self.decoder = CNNDecoder().to(self.device)
   
   def set_optimizers_n_criterions(self):
     self.encoder_optim = torch.optim.AdamW(self.encoder.parameters(), lr=self.config['lr'], betas=(0.9, 0.95))
@@ -630,11 +671,24 @@ class SnakeAETrainer(CNNAETrainer):
     return rec_loss
 
 
+class CvTTrainer(CNNAETrainer):
+  CONFIG = {'lr':             1e-4,
+            'n_epochs':       30,
+            'save_rec_every': 5,
+            'exp_name':       'cvt_base'}
+  def __init__(self, config={}, *args, **kwargs):
+    super().__init__(CvTTrainer.CONFIG)
+    self.config = {**self.config, **config}
+  
+  def instanciate_model(self):
+    self.auto_encoder = MixedAE().to(self.device)
+
+
 def run_all_experiments(trainers, args):
   results = {'exp_name': [], 'test_loss': []}
   for config in [{'trainer': 'cnn_ae', 'config': {}},
                  {'trainer': 'cnn_ae',
-                  'config': {'model_config': {'skip_connection': False, 'linear_bottleneck': False,
+                  'config': {'model_config': {'skip_connection': False, 'linear_bottleneck': True,
                                               'add_noise_bottleneck': False, 'add_noise_encoder': False}}},
                  {'trainer': 'cnn_ae',
                   'config': {'model_config': {'skip_connection': True, 'linear_bottleneck': False,
@@ -645,7 +699,8 @@ def run_all_experiments(trainers, args):
                  {'trainer': 'cnn_ae',
                   'config': {'model_config': {'skip_connection': True, 'linear_bottleneck': False,
                                               'add_noise_bottleneck': True, 'add_noise_encoder': True}}},
-                 {'trainer': 'wgan_gp', 'config': {}}]:
+                 {'trainer': 'wgan_gp', 'config': {}},
+                 {'trainer': 'snake_ae', 'config': {}}]:
     trainer = trainers[config['trainer']](config['config'],
                                           set_specific_exp_name=True if config['trainer'] == 'cnn_ae' else False)
     print(f"Start experiment {trainer.config['exp_name']}")
@@ -660,6 +715,7 @@ def run_all_experiments(trainers, args):
 def get_args():
   parser = argparse.ArgumentParser(description='Image encoding experiments')
   parser.add_argument('--trainer', '-t', type=str, default='cnn_ae')
+  parser.add_argument('--exp_name', '-en', type=str, default=None)
   parser.add_argument('--run_all_exps', '-rae', action='store_true')
   parser.add_argument('--load_model', '-lm', action='store_true')
   parser.add_argument('--train_model', '-tm', action='store_true')
@@ -670,7 +726,7 @@ def get_args():
 
 if __name__ == '__main__':
   trainers = {'cnn_ae': CNNAETrainer, 'mae': MAETrainer, 'wgan_gp': WGANGPTrainer,
-              'snake_ae': SnakeAETrainer}
+              'snake_ae': SnakeAETrainer, 'cvt_ae': CvTTrainer}
   args = get_args()
 
   if args.run_all_exps:
