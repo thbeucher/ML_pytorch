@@ -1,5 +1,6 @@
 import os
 import json
+import time
 import torch
 import random
 import argparse
@@ -8,15 +9,18 @@ import pandas as pd
 import torch.nn as nn
 
 from tqdm import tqdm
+from copy import deepcopy
 from tabulate import tabulate
+from itertools import product
 from torch.autograd import grad
+from collections import defaultdict
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from torch.utils.tensorboard import SummaryWriter
 
 from vision_transformer.cvt import CvT
 from vision_transformer.vit import ViT
-from masked_autoencoder import MaskedAutoencoderViT
+from vision_transformer.mae import MaskedAutoencoderViT
 
 
 class NoiseLayer(nn.Module):
@@ -97,7 +101,7 @@ class CNNEncoder(nn.Module):
 
 
 class CNNDecoder(nn.Module):
-  def __init__(self, add_attn=False):
+  def __init__(self, add_attn=True):
     super().__init__()
     self.up1 = nn.Sequential(nn.ConvTranspose2d(256, 128, 4, 2, 1), nn.BatchNorm2d(128), nn.ReLU(True))
     self.up2 = nn.Sequential(nn.ConvTranspose2d(128, 64, 4, 2, 1), nn.BatchNorm2d(64), nn.ReLU(True))
@@ -172,7 +176,7 @@ class CNNAE(nn.Module):
 
 
 class MixedAE(nn.Module):
-  CONFIG = {'add_dec_attn': True}
+  CONFIG = {'add_dec_attn': True, 'skip_connection': True}
   def __init__(self, config={}):
     super().__init__()
     self.config = {**MixedAE.CONFIG, **config}
@@ -180,8 +184,10 @@ class MixedAE(nn.Module):
     self.decoder = CNNDecoder(add_attn=self.config['add_dec_attn'])
   
   def forward(self, x):
-    z = self.encoder(x)
-    return self.decoder(z)
+    z1, z2, z3 = self.encoder(x)
+    return self.decoder(z3,
+                        z2 if self.config['skip_connection'] else None,
+                        z1 if self.config['skip_connection'] else None)
 
 
 class CNNAETrainer:
@@ -191,7 +197,7 @@ class CNNAETrainer:
             'batch_size':        64,
             'data_dir':          '../../../gpt_tests/data/',
             'save_dir':          'cifar10_exps/',
-            'exp_name':          'cnn_ae_base',
+            'exp_name':          'cnn_ae_best',
             'log_dir':           'runs/',
             'save_rec_every':    5,
             'eval_every':        5,
@@ -204,24 +210,22 @@ class CNNAETrainer:
                              'add_noise_encoder': False,
                              'add_enc_attn': False,
                              'add_dec_attn': True}}
-  def __init__(self, config={}, set_specific_exp_name=False):
+  def __init__(self, config={}):
     self.config = {**CNNAETrainer.CONFIG, **config}
-
     self.device = torch.device('cuda' if torch.cuda.is_available() else
                                'mps' if torch.backends.mps.is_available() else
                                'cpu')
-
-    if set_specific_exp_name:
-      self.config['exp_name'] = self.config['exp_name'] +\
-        ''.join(s for s, cond in [(f'_{k}', v) for k, v in self.config['model_config'].items()] if cond)
-    save_dir_run = os.path.join(self.config['save_dir'], self.config['exp_name'], self.config['log_dir'])
-    self.tf_logger = SummaryWriter(save_dir_run) if self.config['use_tf_logger'] else None
-
     self.set_seed()
     self.instanciate_model()
     self.set_dataloader()
     self.set_optimizers_n_criterions()
+    self.set_logger()  # tensorboard logger create the folders used by dump_config and save_model
     self.dump_config()
+  
+  def set_logger(self, exp_name=None):
+    exp_name = self.config['exp_name'] if exp_name is None else exp_name
+    save_dir_run = os.path.join(self.config['save_dir'], exp_name, self.config['log_dir'])
+    self.tf_logger = SummaryWriter(save_dir_run) if self.config['use_tf_logger'] else None
   
   def dump_config(self):
     with open(os.path.join(self.config['save_dir'],
@@ -307,6 +311,7 @@ class CNNAETrainer:
         self.save_model()
 
       pbar.set_postfix(loss=f'{running_rec_loss/len(pbar):.4f}')
+    return running_rec_loss/len(pbar)
 
   @torch.no_grad()
   def evaluate(self):
@@ -324,7 +329,7 @@ class CNNAETrainer:
 
 class WGANGPTrainer(CNNAETrainer):
   '''Wasserstein_GAN_GradientPenalty_Trainer'''
-  CONFIG = {'exp_name': 'wgan_gp',
+  CONFIG = {'exp_name': 'wgan_gp_best',
             'n_critic_train_steps_per_epoch': 5,
             'gradient_penalty_lambda': 10.0,
             'rec_loss_lambda': 10.0,
@@ -332,8 +337,10 @@ class WGANGPTrainer(CNNAETrainer):
                              'linear_bottleneck': False,
                              'add_noise_bottleneck': True,
                              'add_noise_encoder': False,
-                             'noise_prob': 1.0}}
-  def __init__(self, config={}, *args, **kwargs):
+                             'noise_prob': 1.0,
+                             'add_enc_attn': False,
+                             'add_dec_attn': True}}
+  def __init__(self, config={}):
     super().__init__(WGANGPTrainer.CONFIG)
     self.config = {**self.config, **config}
   
@@ -439,6 +446,7 @@ class WGANGPTrainer(CNNAETrainer):
         self.save_model()
 
       pbar.set_postfix(loss=f'{running_rec_loss/len(pbar):.4f}')
+    return running_rec_loss/len(pbar)
 
   @torch.no_grad()
   def evaluate(self):
@@ -470,7 +478,7 @@ class MAETrainer(CNNAETrainer):
                              'embed_dim':128, 'depth':6, 'num_heads':8,
                              'decoder_embed_dim':64, 'decoder_depth':2, 'decoder_num_heads':8,
                              'mlp_ratio':4.}}
-  def __init__(self, config={}, *args, **kwargs):
+  def __init__(self, config={}):
     super().__init__(MAETrainer.CONFIG)
     self.config = {**self.config, **config}
   
@@ -539,6 +547,7 @@ class MAETrainer(CNNAETrainer):
         self.save_model()
           
       pbar.set_postfix(loss=f'{running_rec_loss/len(pbar):.4f}')
+    return running_rec_loss/len(pbar)
 
   @torch.no_grad()
   def evaluate(self):
@@ -562,14 +571,16 @@ class SnakeAETrainer(CNNAETrainer):
   CONFIG = {'lr':             1e-4,
             'n_epochs':       30,
             'save_rec_every': 5,
-            'exp_name':       'snakeAE_base'}
-  def __init__(self, config={}, *args, **kwargs):
+            'exp_name':       'snakeAE_best',
+            'model_config': {'encoder_config': {'add_noise': False, 'add_attn': False},
+                             'decoder_config': {'add_attn': True}}}  # the .train() logic made skip_connection to True
+  def __init__(self, config={}):
     super().__init__(SnakeAETrainer.CONFIG)
     self.config = {**self.config, **config}
   
   def instanciate_model(self):
-    self.encoder = CNNEncoder().to(self.device)
-    self.decoder = CNNDecoder().to(self.device)
+    self.encoder = CNNEncoder(**self.config['model_config']['encoder_config']).to(self.device)
+    self.decoder = CNNDecoder(**self.config['model_config']['decoder_config']).to(self.device)
   
   def set_optimizers_n_criterions(self):
     self.encoder_optim = torch.optim.AdamW(self.encoder.parameters(), lr=self.config['lr'], betas=(0.9, 0.95))
@@ -650,6 +661,7 @@ class SnakeAETrainer(CNNAETrainer):
         self.save_model()
 
       pbar.set_postfix(loss=f'{running_rec_loss/len(pbar):.4f}')
+    return running_rec_loss/len(pbar)
 
   @torch.no_grad()
   def evaluate(self):
@@ -675,47 +687,121 @@ class CvTTrainer(CNNAETrainer):
   CONFIG = {'lr':             1e-4,
             'n_epochs':       30,
             'save_rec_every': 5,
-            'exp_name':       'cvt_base'}
-  def __init__(self, config={}, *args, **kwargs):
+            'exp_name':       'cvt_best',
+            'model_config': {'add_dec_attn': True, 'skip_connection': True}}
+  def __init__(self, config={}):
     super().__init__(CvTTrainer.CONFIG)
     self.config = {**self.config, **config}
   
   def instanciate_model(self):
-    self.auto_encoder = MixedAE().to(self.device)
+    self.auto_encoder = MixedAE(self.config['model_config']).to(self.device)
 
 
-def run_all_experiments(trainers, args):
-  results = {'exp_name': [], 'test_loss': []}
-  for config in [{'trainer': 'cnn_ae', 'config': {}},
-                 {'trainer': 'cnn_ae',
-                  'config': {'model_config': {'skip_connection': False, 'linear_bottleneck': True,
-                                              'add_noise_bottleneck': False, 'add_noise_encoder': False}}},
-                 {'trainer': 'cnn_ae',
-                  'config': {'model_config': {'skip_connection': True, 'linear_bottleneck': False,
-                                              'add_noise_bottleneck': False, 'add_noise_encoder': False}}},
-                 {'trainer': 'cnn_ae',
-                  'config': {'model_config': {'skip_connection': True, 'linear_bottleneck': False,
-                                              'add_noise_bottleneck': True, 'add_noise_encoder': False}}},
-                 {'trainer': 'cnn_ae',
-                  'config': {'model_config': {'skip_connection': True, 'linear_bottleneck': False,
-                                              'add_noise_bottleneck': True, 'add_noise_encoder': True}}},
-                 {'trainer': 'wgan_gp', 'config': {}},
-                 {'trainer': 'snake_ae', 'config': {}}]:
-    trainer = trainers[config['trainer']](config['config'],
-                                          set_specific_exp_name=True if config['trainer'] == 'cnn_ae' else False)
-    print(f"Start experiment {trainer.config['exp_name']}")
-    trainer.train()
-    loss = trainer.evaluate()
-    results['exp_name'].append(trainer.config['exp_name'])
-    results['test_loss'].append(round(loss, 4))
+def flatten_dict(d, parent_key="", sep="."):
+  """Recursively flattens a nested dictionary."""
+  items = {}
+  for k, v in d.items():
+    new_key = f"{parent_key}{sep}{k}" if parent_key else k
+    if isinstance(v, dict):
+      items.update(flatten_dict(v, new_key, sep=sep))
+    else:
+      items[new_key] = v
+  return items
+
+
+def unflatten_dict(d, sep="."):
+  result = {}
+  for key, value in d.items():
+    keys = key.split(sep)
+    current = result
+    for k in keys[:-1]:
+      current = current.setdefault(k, {})
+    current[keys[-1]] = value
+  return result
+
+
+def generate_boolean_configs(base_config):
+  """
+  Takes a full trainer CONFIG and returns a list of configs
+  with all boolean combinations in model_config.
+  """
+  base_config = deepcopy(base_config)
+  model_cfg = base_config.get("model_config", {})
+
+  flat_cfg = flatten_dict(model_cfg)
+
+  bool_keys = [k for k, v in flat_cfg.items() if isinstance(v, bool)]
+
+  configs = []
+  for values in product([False, True], repeat=len(bool_keys)):
+    new_flat_cfg = flat_cfg.copy()
+    for k, v in zip(bool_keys, values):
+      new_flat_cfg[k] = v
+
+    new_cfg = deepcopy(base_config)
+    new_cfg["model_config"] = unflatten_dict(new_flat_cfg)
+    configs.append(new_cfg)
+
+  return configs
+
+
+def build_exp_name(trainer_name, config):
+  """
+  Builds experiment name by appending boolean flags that are True
+  from model_config.
+  """
+  exp_name = trainer_name
+
+  model_cfg = config.get("model_config", {})
+  flat_cfg = flatten_dict(model_cfg)
+
+  for key, value in flat_cfg.items():
+    if isinstance(value, bool) and value:
+      # flag_name = '_'.join(key.split(".")[-2:])
+      exp_name += f"_{key.replace('.', '_')}"
+      # exp_name += f"_{flag_name}"
+
+  return exp_name
+
+
+def run_all_experiments(trainers):
+  del trainers['mae']  # Currently not converging
+  results = defaultdict(list)
+  for trainer_name, trainer_cls in trainers.items():
+    all_configs = generate_boolean_configs(trainer_cls.CONFIG)
+    for config in all_configs:
+      config['exp_name'] = build_exp_name(trainer_name, config)
+      trainer = trainer_cls(config)
+
+      print(f"Start experiment {trainer.config['exp_name']}")
+      start = time.perf_counter()
+      train_loss = trainer.train()
+      train_time = time.perf_counter() - start
+      train_epoch_time = train_time / trainer.config['n_epochs']
+
+      start = time.perf_counter()
+      test_loss = trainer.evaluate()
+      test_time = time.perf_counter() - start
+      test_batch_time = test_time / len(trainer.test_dataloader)
+
+      results['trainer_name'].append(trainer_name)
+      results['exp_name'].append(trainer.config['exp_name'])
+      results['train_loss'].append(round(train_loss, 5))
+      results['test_loss'].append(round(test_loss, 5))
+      results['train_time'].append(round(train_time, 3))
+      results['train_epoch_time'].append(round(train_epoch_time, 3))
+      results['test_time'].append(round(test_time, 3))
+      results['test_batch_time'].append(round(test_batch_time, 3))
+
   df = pd.DataFrame.from_dict(results)
+  df = df.sort_values('test_loss')
   print(tabulate(df, headers='keys', tablefmt='psql'))
+  df.to_csv('report_encoding_exps_all_experiments.csv')
 
 
 def get_args():
   parser = argparse.ArgumentParser(description='Image encoding experiments')
   parser.add_argument('--trainer', '-t', type=str, default='cnn_ae')
-  parser.add_argument('--exp_name', '-en', type=str, default=None)
   parser.add_argument('--run_all_exps', '-rae', action='store_true')
   parser.add_argument('--load_model', '-lm', action='store_true')
   parser.add_argument('--train_model', '-tm', action='store_true')
@@ -730,7 +816,7 @@ if __name__ == '__main__':
   args = get_args()
 
   if args.run_all_exps:
-    run_all_experiments(trainers, args)
+    run_all_experiments(trainers)
   else:
     trainer = trainers[args.trainer]()
 
@@ -749,3 +835,13 @@ if __name__ == '__main__':
     if args.save_model:
       print(f'Saving model... ({trainers[args.trainer].__name__})')
       trainer.save_model()
+'''
++---+--------------+--------------+-------------+--------------+--------------------+-------------+-------------------+
+|   | exp_name     |   train_loss |   test_loss |   train_time |   train_epoch_time |   test_time |   test_batch_time |
+|---+--------------+--------------+-------------+--------------+--------------------+-------------+-------------------|
+| 1 | wgan_gp_best |       0.1382 |      0.0049 |      940.316 |             31.344 |       0.868 |             0.006 |
+| 2 | snakeAE_best |       0.0083 |      0.0003 |      555.021 |             18.501 |       0.869 |             0.006 |
+| 3 | cvt_best     |       0.0023 |      0.0003 |      1265.78 |             42.193 |       3.048 |             0.019 |
+| 0 | cnn_ae_best  |       0.0042 |      0.0002 |      277.828 |              9.261 |       0.852 |             0.005 |
++---+--------------+--------------+-------------+--------------+--------------------+-------------+-------------------+
+'''

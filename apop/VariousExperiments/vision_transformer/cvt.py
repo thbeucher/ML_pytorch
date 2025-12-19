@@ -231,16 +231,17 @@ class CvT(nn.Module):
         self.layers = nn.ModuleList(layers)
 
     def forward(self, x):
-        for layer in self.layers:
-            x = layer(x).contiguous() 
-            # without .contiguous() it will raise error during loss.backward():
-            # RuntimeError: view size is not compatible with input tensor's size and stride
-            # (at least one dimension spans across two contiguous subspaces). Use .reshape(...) instead.
-        return x
+        # without .contiguous() it will raise error during loss.backward():
+        # RuntimeError: view size is not compatible with input tensor's size and stride
+        # (at least one dimension spans across two contiguous subspaces). Use .reshape(...) instead.
+        d1 = self.layers[0](x).contiguous()   # -> [B, 64, 16, 16]
+        d2 = self.layers[1](d1).contiguous()  # -> [B, 128, 8, 8]
+        d3 = self.layers[2](d2).contiguous()  # -> [B, 256, 4, 4]
+        return d1, d2, d3
 
 
 if __name__ == '__main__':
     vit = CvT(channels=3)
     inp = torch.rand(2, 3, 32, 32)
     out = vit(inp)
-    print(f'{out.shape=}')
+    print(f'{out[-1].shape=}')
