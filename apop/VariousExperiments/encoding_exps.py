@@ -263,7 +263,7 @@ class CNNAETrainer:
 
   def set_optimizers_n_criterions(self):
     self.ae_optim = torch.optim.AdamW(self.auto_encoder.parameters(), lr=self.config['lr'], betas=(0.9, 0.95))
-    self.rec_criterion = nn.MSELoss()
+    self.mse_criterion = nn.MSELoss()
     self.ssim_criterion = SSIM(data_range=1, size_average=True, channel=3)
     # Image size should be larger than 160 due to the 4 downsamplings in ms-ssim
     # self.ms_ssim_criterion = MS_SSIM(data_range=1, size_average=True, channel=3)
@@ -288,7 +288,7 @@ class CNNAETrainer:
     best_loss = torch.inf
     pbar = tqdm(range(self.config['n_epochs']))
     for epoch in pbar:
-      running_rec_loss, running_ssim_loss, running_loss = 0., 0., 0.
+      running_rec_loss, running_ssim_loss, running_mse_loss = 0., 0., 0.
       for img, _ in self.train_dataloader:
         img = img.to(self.device)
 
@@ -296,34 +296,36 @@ class CNNAETrainer:
           fixed_img = img[:8]
 
         rec = self.auto_encoder(img)
-        rec_loss = self.rec_criterion(rec, img)
+        mse_loss = self.mse_criterion(rec, img)
         ssim_loss = 1 - self.ssim_criterion(rec, img)
         # ms_ssim_loss = 1 - self.ms_ssim_criterion(rec, img)
-        loss = self.config['lambda_mse'] * rec_loss + self.config['lambda_ssim'] * ssim_loss
+        rec_loss = self.config['lambda_mse'] * mse_loss + self.config['lambda_ssim'] * ssim_loss
 
         self.ae_optim.zero_grad()
-        loss.backward()
+        rec_loss.backward()
         self.ae_optim.step()
 
-        running_rec_loss += rec_loss.item()
+        running_mse_loss += mse_loss.item()
         running_ssim_loss += ssim_loss.item()
-        running_loss += loss.item()
+        running_rec_loss += rec_loss.item()
 
       if self.tf_logger is not None:
         self.tf_logger.add_scalar('reconstruction_loss', running_rec_loss/len(pbar), epoch)
+        self.tf_logger.add_scalar('mse_loss', running_mse_loss/len(pbar), epoch)
         self.tf_logger.add_scalar('ssim_loss', running_ssim_loss/len(pbar), epoch)
+
         if epoch % self.config['save_rec_every'] == 0 or epoch == (self.config['n_epochs'] - 1):
           with torch.no_grad():
             rec = self.auto_encoder(fixed_img)
           ori_rec = torch.cat([fixed_img, rec], dim=0)
           self.tf_logger.add_images(f'generated_epoch_{epoch}', ori_rec)
       
-      if self.config['save_model_train'] and (running_loss/len(pbar)) < best_loss:
-        best_loss = running_loss/len(pbar)
+      if self.config['save_model_train'] and (running_rec_loss/len(pbar)) < best_loss:
+        best_loss = running_rec_loss/len(pbar)
         self.save_model()
 
-      pbar.set_postfix(loss=f'{running_loss/len(pbar):.4f}')
-    return running_loss/len(pbar)
+      pbar.set_postfix(loss=f'{running_rec_loss/len(pbar):.4f}')
+    return running_rec_loss/len(pbar)
 
   @torch.no_grad()
   def evaluate(self):
@@ -332,7 +334,9 @@ class CNNAETrainer:
     for img, _ in tqdm(self.test_dataloader):
       img = img.to(self.device)
       rec = self.auto_encoder(img)
-      loss = self.rec_criterion(rec, img)
+      mse_loss = self.mse_criterion(rec, img)
+      ssim_loss = 1 - self.ssim_criterion(rec, img)
+      loss = self.config['lambda_mse'] * mse_loss + self.config['lambda_ssim'] * ssim_loss
       running_loss += loss.item()
     rec_loss = running_loss/len(self.test_dataloader)
     print(f'Reconstruction loss on test data: {rec_loss:.4f}')
@@ -388,7 +392,8 @@ class WGANGPTrainer(CNNAETrainer):
   def set_optimizers_n_criterions(self):
     self.ae_optim = torch.optim.AdamW(self.auto_encoder.parameters(), lr=self.config['lr'], betas=(0.9, 0.95))
     self.critic_optim = torch.optim.AdamW(self.critic.parameters(), lr=self.config['lr'], betas=(0.9, 0.95))
-    self.rec_criterion = nn.MSELoss()
+    self.mse_criterion = nn.MSELoss()
+    self.ssim_criterion = SSIM(data_range=1, size_average=True, channel=3)
   
   def train(self):
     self.auto_encoder.train()
@@ -402,6 +407,8 @@ class WGANGPTrainer(CNNAETrainer):
       running_gp = 0.0
       running_critic_loss = 0.0
       running_gen_loss = 0.0
+      running_mse_loss = 0.0
+      running_ssim_loss = 0.0
       running_rec_loss = 0.0
       for real_imgs, _ in self.train_dataloader:
         real_imgs = real_imgs.to(self.device)
@@ -435,7 +442,11 @@ class WGANGPTrainer(CNNAETrainer):
         fake_imgs = self.auto_encoder(real_imgs)
         # Generator tries to minimize -E[critic(fake)] (i.e. maximize critic score)
         gen_adv = -self.critic(fake_imgs).mean()
-        rec_loss = self.rec_criterion(fake_imgs, real_imgs)
+
+        mse_loss = self.mse_criterion(fake_imgs, real_imgs)
+        ssim_loss = 1 - self.ssim_criterion(fake_imgs, real_imgs)
+        rec_loss = self.config['lambda_mse'] * mse_loss + self.config['lambda_ssim'] * ssim_loss
+
         gen_loss = gen_adv + self.config['rec_loss_lambda'] * rec_loss
 
         self.ae_optim.zero_grad()
@@ -444,9 +455,14 @@ class WGANGPTrainer(CNNAETrainer):
 
         running_gen_loss += gen_adv.item()
         running_rec_loss += rec_loss.item()
+        running_mse_loss += mse_loss.item()
+        running_ssim_loss += ssim_loss.item()
 
       if self.tf_logger is not None:
         self.tf_logger.add_scalar('reconstruction_loss', running_rec_loss/len(pbar), epoch)
+        self.tf_logger.add_scalar('mse_loss', running_mse_loss/len(pbar), epoch)
+        self.tf_logger.add_scalar('ssim_loss', running_ssim_loss/len(pbar), epoch)
+
         if epoch % self.config['save_rec_every'] == 0 or epoch == (self.config['n_epochs'] - 1):
           with torch.no_grad():
             rec = self.auto_encoder(fixed_img)
@@ -467,7 +483,9 @@ class WGANGPTrainer(CNNAETrainer):
     for img, _ in tqdm(self.test_dataloader):
       img = img.to(self.device)
       rec = self.auto_encoder(img)
-      loss = self.rec_criterion(rec, img)
+      mse_loss = self.mse_criterion(rec, img)
+      ssim_loss = 1 - self.ssim_criterion(rec, img)
+      loss = self.config['lambda_mse'] * mse_loss + self.config['lambda_ssim'] * ssim_loss
       running_loss += loss.item()
     rec_loss = running_loss/len(self.test_dataloader)
     print(f'Reconstruction loss on test data: {rec_loss:.4f}')
@@ -540,7 +558,7 @@ class MAETrainer(CNNAETrainer):
 
           if epoch < self.config['warmup_epochs']:
             pred = self.auto_encoder.unpatchify(pred)
-            loss = loss + self.rec_criterion(pred, img)
+            loss = loss + self.mse_criterion(pred, img)
 
           self.ae_optim.zero_grad()
           loss.backward()
@@ -569,7 +587,7 @@ class MAETrainer(CNNAETrainer):
       img = img.to(self.device)
       loss, pred, mask = self.auto_encoder(img)
       pred = self.auto_encoder.unpatchify(pred)
-      rec_loss = self.rec_criterion(pred, img)
+      rec_loss = self.mse_criterion(pred, img)
       running_loss += loss.item()
       running_rec_loss += rec_loss.item()
     loss = running_loss / len(self.test_dataloader)
@@ -597,7 +615,8 @@ class SnakeAETrainer(CNNAETrainer):
   def set_optimizers_n_criterions(self):
     self.encoder_optim = torch.optim.AdamW(self.encoder.parameters(), lr=self.config['lr'], betas=(0.9, 0.95))
     self.decoder_optim = torch.optim.AdamW(self.decoder.parameters(), lr=self.config['lr'], betas=(0.9, 0.95))
-    self.rec_criterion = nn.MSELoss()
+    self.mse_criterion = nn.MSELoss()
+    self.ssim_criterion = SSIM(data_range=1, size_average=True, channel=3)
   
   def save_model(self):
     os.makedirs(self.config['save_dir'], exist_ok=True)
@@ -623,7 +642,7 @@ class SnakeAETrainer(CNNAETrainer):
 
     pbar = tqdm(range(self.config['n_epochs']))
     for epoch in pbar:
-      running_rec_loss = 0.
+      running_rec_loss, running_mse_loss, running_ssim_loss = 0., 0., 0.
       for img, _ in self.train_dataloader:
         img = img.to(self.device)
 
@@ -636,14 +655,19 @@ class SnakeAETrainer(CNNAETrainer):
         z1, z2, z3 = self.encoder(img)
         rec = self.decoder(z3, z2, z1)
 
-        loss = self.rec_criterion(rec, img)
+        mse_loss = self.mse_criterion(rec, img)
+        ssim_loss = 1 - self.ssim_criterion(rec, img)
+        rec_loss = self.config['lambda_mse'] * mse_loss + self.config['lambda_ssim'] * ssim_loss
+
         self.encoder_optim.zero_grad()
         self.decoder_optim.zero_grad()
-        loss.backward()
+        rec_loss.backward()
         self.encoder_optim.step()
         self.decoder_optim.step()
 
-        running_rec_loss += loss.item()
+        running_rec_loss += rec_loss.item()
+        running_mse_loss += mse_loss.item()
+        running_ssim_loss += ssim_loss.item()
 
         # ============================================
         # Phase 2: Latent consistency (train D only)
@@ -654,13 +678,16 @@ class SnakeAETrainer(CNNAETrainer):
         rec_img = self.decoder(z3, z2, z1)
         rec_z1, rec_z2, rec_z3 = self.encoder(rec_img)
 
-        loss = self.rec_criterion(rec_z3, z3) + self.rec_criterion(rec_z2, z2) + self.rec_criterion(rec_z1, z1)
+        loss = self.mse_criterion(rec_z3, z3) + self.mse_criterion(rec_z2, z2) + self.mse_criterion(rec_z1, z1)
         self.decoder_optim.zero_grad()
         loss.backward()
         self.decoder_optim.step()
 
       if self.tf_logger is not None:
         self.tf_logger.add_scalar('reconstruction_loss', running_rec_loss/len(pbar), epoch)
+        self.tf_logger.add_scalar('mse_loss', running_mse_loss/len(pbar), epoch)
+        self.tf_logger.add_scalar('ssim_loss', running_ssim_loss/len(pbar), epoch)
+
         if epoch % self.config['save_rec_every'] == 0 or epoch == (self.config['n_epochs'] - 1):
           with torch.no_grad():
             z1, z2, z3 = self.encoder(fixed_img)
@@ -687,7 +714,9 @@ class SnakeAETrainer(CNNAETrainer):
       z1, z2, z3 = self.encoder(img)
       rec = self.decoder(z3, z2, z1)
 
-      loss = self.rec_criterion(rec, img)
+      mse_loss = self.mse_criterion(rec, img)
+      ssim_loss = 1 - self.ssim_criterion(rec, img)
+      loss = self.config['lambda_mse'] * mse_loss + self.config['lambda_ssim'] * ssim_loss
       running_loss += loss.item()
 
     rec_loss = running_loss/len(self.test_dataloader)
@@ -776,13 +805,19 @@ def build_exp_name(trainer_name, config):
   return exp_name
 
 
-def run_all_experiments(trainers):
+def run_all_experiments(trainers, only_best=True):
+  print(f'Run all experiments ({only_best=})')
   del trainers['mae']  # Currently not converging
   results = defaultdict(list)
   for trainer_name, trainer_cls in trainers.items():
-    all_configs = generate_boolean_configs(trainer_cls.CONFIG)
+    if only_best:
+      all_configs = [trainer_cls.CONFIG]
+    else:
+      all_configs = generate_boolean_configs(trainer_cls.CONFIG)
+
     for config in all_configs:
-      config['exp_name'] = build_exp_name(trainer_name, config)
+      if not only_best:
+        config['exp_name'] = build_exp_name(trainer_name, config)
       trainer = trainer_cls(config)
 
       print(f"Start experiment {trainer.config['exp_name']}")
@@ -819,6 +854,7 @@ def get_args():
   parser.add_argument('--train_model', '-tm', action='store_true')
   parser.add_argument('--eval_model', '-em', action='store_true')
   parser.add_argument('--save_model', '-sm', action='store_true')
+  parser.add_argument('--rae_only_best', '-rob', action='store_false')
   return parser.parse_args()
 
 
@@ -828,7 +864,7 @@ if __name__ == '__main__':
   args = get_args()
 
   if args.run_all_exps:
-    run_all_experiments(trainers)
+    run_all_experiments(trainers, only_best=args.rae_only_best)
   else:
     trainer = trainers[args.trainer]()
 
@@ -848,6 +884,26 @@ if __name__ == '__main__':
       print(f'Saving model... ({trainers[args.trainer].__name__})')
       trainer.save_model()
 '''
+SSIM — Structural Similarity Index
+What it measures
+  SSIM compares images based on:
+    1) Luminance (brightness)
+    2) Contrast
+    3) Structure (local patterns / edges)
+  Instead of treating each pixel independently (like MSE), SSIM looks at local windows and compares statistics.
+
+Output range
+  -1 to 1 (practically 0 to 1)
+  1.0 = identical images
+
+Interpretation (rule of thumb)
+  |       SSIM | Perceptual quality            |
+  | ---------: | ----------------------------- |
+  |      < 0.7 | Poor                          |
+  |        0.8 | Acceptable                    |
+  |        0.9 | High quality                  |
+  |     ≥ 0.95 | Visually almost identical.    |
+
 +---+--------------+--------------+-------------+--------------+--------------------+-------------+-------------------+
 |   | exp_name     |   train_loss |   test_loss |   train_time |   train_epoch_time |   test_time |   test_batch_time |
 |---+--------------+--------------+-------------+--------------+--------------------+-------------+-------------------|
