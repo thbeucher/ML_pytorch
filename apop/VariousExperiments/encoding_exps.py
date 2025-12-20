@@ -198,7 +198,7 @@ class CNNAETrainer:
             'batch_size':        64,
             'data_dir':          '../../../gpt_tests/data/',
             'save_dir':          'cifar10_exps/',
-            'exp_name':          'cnn_ae_besttest',
+            'exp_name':          'cnn_ae_best',
             'log_dir':           'runs/',
             'save_rec_every':    5,
             'eval_every':        5,
