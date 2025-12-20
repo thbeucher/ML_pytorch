@@ -15,6 +15,7 @@ from itertools import product
 from torch.autograd import grad
 from collections import defaultdict
 from torch.utils.data import DataLoader
+from pytorch_msssim import SSIM, MS_SSIM
 from torchvision import datasets, transforms
 from torch.utils.tensorboard import SummaryWriter
 
@@ -197,13 +198,15 @@ class CNNAETrainer:
             'batch_size':        64,
             'data_dir':          '../../../gpt_tests/data/',
             'save_dir':          'cifar10_exps/',
-            'exp_name':          'cnn_ae_best',
+            'exp_name':          'cnn_ae_besttest',
             'log_dir':           'runs/',
             'save_rec_every':    5,
             'eval_every':        5,
             'use_tf_logger':     True,
             'seed':              42,
             'save_model_train':  True,
+            'lambda_mse': 0.8,
+            'lambda_ssim': 0.2,
             'model_config': {'skip_connection': True,
                              'linear_bottleneck': False,
                              'add_noise_bottleneck': False,
@@ -261,6 +264,9 @@ class CNNAETrainer:
   def set_optimizers_n_criterions(self):
     self.ae_optim = torch.optim.AdamW(self.auto_encoder.parameters(), lr=self.config['lr'], betas=(0.9, 0.95))
     self.rec_criterion = nn.MSELoss()
+    self.ssim_criterion = SSIM(data_range=1, size_average=True, channel=3)
+    # Image size should be larger than 160 due to the 4 downsamplings in ms-ssim
+    # self.ms_ssim_criterion = MS_SSIM(data_range=1, size_average=True, channel=3)
 
   def save_model(self):
     os.makedirs(self.config['save_dir'], exist_ok=True)
@@ -282,7 +288,7 @@ class CNNAETrainer:
     best_loss = torch.inf
     pbar = tqdm(range(self.config['n_epochs']))
     for epoch in pbar:
-      running_rec_loss = 0.
+      running_rec_loss, running_ssim_loss, running_loss = 0., 0., 0.
       for img, _ in self.train_dataloader:
         img = img.to(self.device)
 
@@ -290,28 +296,34 @@ class CNNAETrainer:
           fixed_img = img[:8]
 
         rec = self.auto_encoder(img)
-        loss = self.rec_criterion(rec, img)
+        rec_loss = self.rec_criterion(rec, img)
+        ssim_loss = 1 - self.ssim_criterion(rec, img)
+        # ms_ssim_loss = 1 - self.ms_ssim_criterion(rec, img)
+        loss = self.config['lambda_mse'] * rec_loss + self.config['lambda_ssim'] * ssim_loss
 
         self.ae_optim.zero_grad()
         loss.backward()
         self.ae_optim.step()
 
-        running_rec_loss += loss.item()
+        running_rec_loss += rec_loss.item()
+        running_ssim_loss += ssim_loss.item()
+        running_loss += loss.item()
 
       if self.tf_logger is not None:
         self.tf_logger.add_scalar('reconstruction_loss', running_rec_loss/len(pbar), epoch)
+        self.tf_logger.add_scalar('ssim_loss', running_ssim_loss/len(pbar), epoch)
         if epoch % self.config['save_rec_every'] == 0 or epoch == (self.config['n_epochs'] - 1):
           with torch.no_grad():
             rec = self.auto_encoder(fixed_img)
           ori_rec = torch.cat([fixed_img, rec], dim=0)
           self.tf_logger.add_images(f'generated_epoch_{epoch}', ori_rec)
       
-      if self.config['save_model_train'] and (running_rec_loss/len(pbar)) < best_loss:
-        best_loss = running_rec_loss/len(pbar)
+      if self.config['save_model_train'] and (running_loss/len(pbar)) < best_loss:
+        best_loss = running_loss/len(pbar)
         self.save_model()
 
-      pbar.set_postfix(loss=f'{running_rec_loss/len(pbar):.4f}')
-    return running_rec_loss/len(pbar)
+      pbar.set_postfix(loss=f'{running_loss/len(pbar):.4f}')
+    return running_loss/len(pbar)
 
   @torch.no_grad()
   def evaluate(self):
