@@ -11,9 +11,9 @@ import torch.nn as nn
 from tqdm import tqdm
 from copy import deepcopy
 from tabulate import tabulate
-from itertools import product
 from torch.autograd import grad
 from collections import defaultdict
+from itertools import product, chain
 from torch.utils.data import DataLoader
 from pytorch_msssim import SSIM, MS_SSIM
 from torchvision import datasets, transforms
@@ -247,6 +247,7 @@ class CNNAETrainer:
 
   def instanciate_model(self):
     self.auto_encoder = CNNAE(self.config['model_config']).to(self.device)
+    self.n_trainable_params = sum(p.numel() for p in self.auto_encoder.parameters() if p.requires_grad)
 
   def set_dataloader(self):
     os.makedirs(self.config['data_dir'], exist_ok=True)
@@ -388,6 +389,8 @@ class WGANGPTrainer(CNNAETrainer):
   def instanciate_model(self):
     self.auto_encoder = CNNAE(self.config['model_config']).to(self.device)
     self.critic = Critic().to(self.device)
+    self.n_trainable_params = sum(p.numel() for p in chain(self.auto_encoder.parameters(), self.critic.parameters())
+                                  if p.requires_grad)
 
   def set_optimizers_n_criterions(self):
     self.ae_optim = torch.optim.AdamW(self.auto_encoder.parameters(), lr=self.config['lr'], betas=(0.9, 0.95))
@@ -514,6 +517,7 @@ class MAETrainer(CNNAETrainer):
   
   def instanciate_model(self):
     self.auto_encoder = MaskedAutoencoderViT(**self.config['model_config']).to(self.device)
+    self.n_trainable_params = sum(p.numel() for p in self.auto_encoder.parameters() if p.requires_grad)
   
   @staticmethod
   def exponential_schedule(epoch, n_epochs_decay, start=0.1, end=0.75):
@@ -611,6 +615,8 @@ class SnakeAETrainer(CNNAETrainer):
   def instanciate_model(self):
     self.encoder = CNNEncoder(**self.config['model_config']['encoder_config']).to(self.device)
     self.decoder = CNNDecoder(**self.config['model_config']['decoder_config']).to(self.device)
+    self.n_trainable_params = sum(p.numel() for p in chain(self.encoder.parameters(), self.decoder.parameters())
+                                  if p.requires_grad)
   
   def set_optimizers_n_criterions(self):
     self.encoder_optim = torch.optim.AdamW(self.encoder.parameters(), lr=self.config['lr'], betas=(0.9, 0.95))
@@ -736,7 +742,7 @@ class CvTTrainer(CNNAETrainer):
   
   def instanciate_model(self):
     self.auto_encoder = MixedAE(self.config['model_config']).to(self.device)
-
+    self.n_trainable_params = sum(p.numel() for p in self.auto_encoder.parameters() if p.requires_grad)
 
 def flatten_dict(d, parent_key="", sep="."):
   """Recursively flattens a nested dictionary."""
@@ -839,6 +845,7 @@ def run_all_experiments(trainers, only_best=True):
       results['train_epoch_time'].append(round(train_epoch_time, 3))
       results['test_time'].append(round(test_time, 3))
       results['test_batch_time'].append(round(test_batch_time, 3))
+      results['n_trainable_parameters'].append(f'{trainer.n_trainable_params:,}')
 
   df = pd.DataFrame.from_dict(results)
   df = df.sort_values('test_loss')
