@@ -19,115 +19,9 @@ from pytorch_msssim import SSIM, MS_SSIM
 from torchvision import datasets, transforms
 from torch.utils.tensorboard import SummaryWriter
 
+import cnn_layers as cl
 from vision_transformer.cvt import CvT
-from vision_transformer.vit import ViT
 from vision_transformer.mae import MaskedAutoencoderViT
-
-
-class NoiseLayer(nn.Module):
-  """
-  A layer that conditionally adds Gaussian noise to the input tensor.
-  """
-  def __init__(self, p=0.5, std=0.1):
-    super().__init__()
-    self.p = p
-    self.std = std
-
-  def forward(self, x, p=None, std=None):
-    p = self.p if p is None else p
-    std = self.std if std is None else std
-    if self.training and p > 0 and std > 0:
-      # Check if we should apply noise in this forward pass
-      if random.random() < p:
-        # Add Gaussian noise
-        noise = torch.randn_like(x) * std
-        # Add noise and clip the values to the valid [0, 1] range
-        noisy_x = torch.clamp(x + noise, 0., 1.)
-        return noisy_x
-    return x
-
-
-class Critic(nn.Module):
-  def __init__(self):
-    super().__init__()
-    self.net = nn.Sequential(
-      nn.Conv2d(3, 64, 4, 2, 1), nn.LeakyReLU(0.2, inplace=True),
-      nn.Conv2d(64, 128, 4, 2, 1), nn.LeakyReLU(0.2, inplace=True),
-      nn.Conv2d(128, 256, 4, 2, 1), nn.LeakyReLU(0.2, inplace=True),
-      nn.Flatten(),
-      nn.Linear(256*4*4, 1),
-    )
-
-  def forward(self, x):
-    return self.net(x).view(-1)
-
-
-class CNNEncoder(nn.Module):
-  def __init__(self, add_noise=False, noise_p=0.5, noise_std=0.1, add_attn=False):
-    super().__init__()
-    self.add_noise = add_noise
-    self.add_attn = add_attn
-
-    self.down1 = nn.Sequential(nn.Conv2d(3, 64, 4, 2, 1), nn.ReLU(True))
-    self.down2 = nn.Sequential(nn.Conv2d(64, 128, 4, 2, 1), nn.BatchNorm2d(128), nn.ReLU(True))
-    self.down3 = nn.Sequential(nn.Conv2d(128, 256, 4, 2, 1), nn.BatchNorm2d(256), nn.ReLU(True))
-
-    if add_noise:
-      self.noise_layer = NoiseLayer(p=noise_p, std=noise_std)
-    
-    if add_attn:
-      self.attn1 = ViT(image_size=16, patch_size=4, dim=64, depth=2, heads=4, mlp_dim=128, dim_head=32, channels=64)
-      self.attn2 = ViT(image_size=8, patch_size=4, dim=64, depth=2, heads=4, mlp_dim=128, dim_head=32, channels=128)
-
-  def forward(self, x):
-    d1 = self.down1(x)  # [B, 3, 32, 32] -> [B, 64, 16, 16]
-    if self.add_noise:
-      d1 = self.noise_layer(d1)
-    
-    if self.add_attn:
-      d1 = self.attn1(d1)
-    
-    d2 = self.down2(d1)  #               -> [B, 128, 8, 8]
-    if self.add_noise:
-      d2 = self.noise_layer(d2)
-    
-    if self.add_attn:
-      d2 = self.attn2(d2)
-    
-    d3 = self.down3(d2)  #               -> [B, 256, 4, 4]
-    if self.add_noise:
-      d3 = self.noise_layer(d3)
-    
-    return d1, d2, d3
-
-
-class CNNDecoder(nn.Module):
-  def __init__(self, add_attn=True):
-    super().__init__()
-    self.up1 = nn.Sequential(nn.ConvTranspose2d(256, 128, 4, 2, 1), nn.BatchNorm2d(128), nn.ReLU(True))
-    self.up2 = nn.Sequential(nn.ConvTranspose2d(128, 64, 4, 2, 1), nn.BatchNorm2d(64), nn.ReLU(True))
-    self.up3 = nn.Sequential(nn.ConvTranspose2d(64, 3, 4, 2, 1), nn.Sigmoid())
-
-    self.add_attn = add_attn
-    if add_attn:
-      self.attn1 = ViT(image_size=8, patch_size=4, dim=64, depth=2, heads=4, mlp_dim=128, dim_head=32, channels=128)
-      self.attn2 = ViT(image_size=16, patch_size=4, dim=64, depth=2, heads=4, mlp_dim=128, dim_head=32, channels=64)
-  
-  def forward(self, d3, d2=None, d1=None):
-    u1 = self.up1(d3)   #                -> [B, 128, 8, 8]
-    if self.add_attn:
-      u1 = self.attn1(u1)
-    if d2 is not None:  # skip connection
-      u1 = u1 + d2
-
-    u2 = self.up2(u1)   #                -> [B, 64, 16, 16]
-    if self.add_attn:
-      u2 = self.attn2(u2)
-    if d1 is not None:  # skip connection
-      u2 = u2 + d1
-
-    u3 = self.up3(u2)  #                -> [B, 3, 32, 32]
-    return u3
 
 
 class CNNAE(nn.Module):
@@ -139,24 +33,22 @@ class CNNAE(nn.Module):
             'add_dec_attn': True,
             'noise_prob': 0.5,
             'noise_std': 0.1,
-            'latent_dim': 128}
+            'latent_dim': 128,
+            'encoder_archi': 'CNNEncoder'}
   def __init__(self, config={}):
     super().__init__()
     self.config = {**CNNAE.CONFIG, **config}
 
-    self.down = CNNEncoder(add_noise=self.config['add_noise_encoder'],
-                           noise_p=self.config['noise_prob'],
-                           noise_std=self.config['noise_std'],
-                           add_attn=self.config['add_enc_attn'])
+    self.down = cl.CNN_LAYERS[self.config['encoder_archi']](**self.config)
 
     if self.config['linear_bottleneck']:
       self.embedder = nn.Linear(256*4*4, self.config['latent_dim'])      # H=32,W=32 for cifar10
       self.fc_dec = nn.Linear(self.config['latent_dim'], 256*4*4)
 
-    self.up = CNNDecoder(add_attn=self.config['add_dec_attn'])
+    self.up = cl.CNNDecoder(add_attn=self.config['add_dec_attn'])
 
     if self.config['add_noise_encoder'] or self.config['add_noise_bottleneck']:
-      self.noise_layer = NoiseLayer(p=self.config['noise_prob'], std=self.config['noise_std'])
+      self.noise_layer = cl.NoiseLayer(p=self.config['noise_prob'], std=self.config['noise_std'])
   
   def forward(self, x, return_enc=False):
     d1, d2, d3 = self.down(x)
@@ -182,7 +74,7 @@ class MixedAE(nn.Module):
     super().__init__()
     self.config = {**MixedAE.CONFIG, **config}
     self.encoder = CvT()
-    self.decoder = CNNDecoder(add_attn=self.config['add_dec_attn'])
+    self.decoder = cl.CNNDecoder(add_attn=self.config['add_dec_attn'])
   
   def forward(self, x):
     z1, z2, z3 = self.encoder(x)
@@ -212,7 +104,8 @@ class CNNAETrainer:
                              'add_noise_bottleneck': False,
                              'add_noise_encoder': False,
                              'add_enc_attn': False,
-                             'add_dec_attn': True}}
+                             'add_dec_attn': True,
+                             'encoder_archi': 'CNNEncoder'}}
   def __init__(self, config={}):
     self.config = {**CNNAETrainer.CONFIG, **config}
     self.device = torch.device('cuda' if torch.cuda.is_available() else
@@ -388,7 +281,7 @@ class WGANGPTrainer(CNNAETrainer):
   
   def instanciate_model(self):
     self.auto_encoder = CNNAE(self.config['model_config']).to(self.device)
-    self.critic = Critic().to(self.device)
+    self.critic = cl.Critic().to(self.device)
     self.n_trainable_params = sum(p.numel() for p in chain(self.auto_encoder.parameters(), self.critic.parameters())
                                   if p.requires_grad)
 
@@ -613,8 +506,8 @@ class SnakeAETrainer(CNNAETrainer):
     self.config = {**self.config, **config}
   
   def instanciate_model(self):
-    self.encoder = CNNEncoder(**self.config['model_config']['encoder_config']).to(self.device)
-    self.decoder = CNNDecoder(**self.config['model_config']['decoder_config']).to(self.device)
+    self.encoder = cl.CNNEncoder(**self.config['model_config']['encoder_config']).to(self.device)
+    self.decoder = cl.CNNDecoder(**self.config['model_config']['decoder_config']).to(self.device)
     self.n_trainable_params = sum(p.numel() for p in chain(self.encoder.parameters(), self.decoder.parameters())
                                   if p.requires_grad)
   
@@ -744,6 +637,7 @@ class CvTTrainer(CNNAETrainer):
     self.auto_encoder = MixedAE(self.config['model_config']).to(self.device)
     self.n_trainable_params = sum(p.numel() for p in self.auto_encoder.parameters() if p.requires_grad)
 
+
 def flatten_dict(d, parent_key="", sep="."):
   """Recursively flattens a nested dictionary."""
   items = {}
@@ -811,6 +705,29 @@ def build_exp_name(trainer_name, config):
   return exp_name
 
 
+def start_experiment(trainer, trainer_name, results):
+  print(f"Start experiment {trainer.config['exp_name']} (trainer={trainer_name})")
+  start = time.perf_counter()
+  train_loss = trainer.train()
+  train_time = time.perf_counter() - start
+  train_epoch_time = train_time / trainer.config['n_epochs']
+
+  start = time.perf_counter()
+  test_loss = trainer.evaluate()
+  test_time = time.perf_counter() - start
+  test_batch_time = test_time / len(trainer.test_dataloader)
+
+  results['trainer_name'].append(trainer_name)
+  results['exp_name'].append(trainer.config['exp_name'])
+  results['train_loss'].append(round(train_loss, 5))
+  results['test_loss'].append(round(test_loss, 5))
+  results['train_time'].append(round(train_time, 3))
+  results['train_epoch_time'].append(round(train_epoch_time, 3))
+  results['test_time'].append(round(test_time, 3))
+  results['test_batch_time'].append(round(test_batch_time, 3))
+  results['n_trainable_parameters'].append(f'{trainer.n_trainable_params:,}')
+  return results
+
 def run_all_experiments(trainers, only_best=True):
   print(f'Run all experiments ({only_best=})')
   del trainers['mae']  # Currently not converging
@@ -826,37 +743,31 @@ def run_all_experiments(trainers, only_best=True):
         config['exp_name'] = build_exp_name(trainer_name, config)
       trainer = trainer_cls(config)
 
-      print(f"Start experiment {trainer.config['exp_name']}")
-      start = time.perf_counter()
-      train_loss = trainer.train()
-      train_time = time.perf_counter() - start
-      train_epoch_time = train_time / trainer.config['n_epochs']
-
-      start = time.perf_counter()
-      test_loss = trainer.evaluate()
-      test_time = time.perf_counter() - start
-      test_batch_time = test_time / len(trainer.test_dataloader)
-
-      results['trainer_name'].append(trainer_name)
-      results['exp_name'].append(trainer.config['exp_name'])
-      results['train_loss'].append(round(train_loss, 5))
-      results['test_loss'].append(round(test_loss, 5))
-      results['train_time'].append(round(train_time, 3))
-      results['train_epoch_time'].append(round(train_epoch_time, 3))
-      results['test_time'].append(round(test_time, 3))
-      results['test_batch_time'].append(round(test_batch_time, 3))
-      results['n_trainable_parameters'].append(f'{trainer.n_trainable_params:,}')
+      results = start_experiment(trainer, trainer_name, results)
 
   df = pd.DataFrame.from_dict(results)
   df = df.sort_values('test_loss')
   print(tabulate(df, headers='keys', tablefmt='psql'))
-  df.to_csv('report_encoding_exps_all_experiments.csv')
+  df.to_csv('report_encoding_all_experiments.csv')
+
+
+def run_encoder_archi_experiments():
+  print('Run encoder architecture experiments...')
+  results = defaultdict(list)
+  for encoder_name in ['CNNEncoder', 'BigCNNEncoder', 'ResEncoder', 'SEGEncoder']:
+    trainer = CNNAETrainer({'exp_name': 'cnn_ae_' + encoder_name, 'model_config': {'encoder_archi': encoder_name}})
+    results = start_experiment(trainer, encoder_name, results)
+  df = pd.DataFrame.from_dict(results)
+  df = df.sort_values('test_loss')
+  print(tabulate(df, headers='keys', tablefmt='psql'))
+  df.to_csv('report_encoding_archi_experiments.csv')
 
 
 def get_args():
   parser = argparse.ArgumentParser(description='Image encoding experiments')
   parser.add_argument('--trainer', '-t', type=str, default='cnn_ae')
   parser.add_argument('--run_all_exps', '-rae', action='store_true')
+  parser.add_argument('--run_encoder_archi_exps', '-reae', action='store_true')
   parser.add_argument('--load_model', '-lm', action='store_true')
   parser.add_argument('--train_model', '-tm', action='store_true')
   parser.add_argument('--eval_model', '-em', action='store_true')
@@ -872,8 +783,11 @@ if __name__ == '__main__':
 
   if args.run_all_exps:
     run_all_experiments(trainers, only_best=args.rae_only_best)
+  elif args.run_encoder_archi_exps:
+    run_encoder_archi_experiments()
   else:
     trainer = trainers[args.trainer]()
+    print(f'Experiment name: {trainer.exp_name}')
 
     if args.load_model:
       print(f'Loading model... ({trainers[args.trainer].__name__})')
@@ -911,12 +825,12 @@ Interpretation (rule of thumb)
   |        0.9 | High quality                  |
   |     ≥ 0.95 | Visually almost identical.    |
 
-+--------------+--------------+------------+-----------+------------+------------------+-----------+-----------------+------------+
-| trainer_name | exp_name     | train_loss | test_loss | train_time | train_epoch_time | test_time | test_batch_time | n_params   |
-|--------------+--------------+------------+-----------+------------+------------------+-----------+-----------------+------------|
-| cvt_ae       | cvt_best     |    0.01857 |   0.0008  |    1726.71 |           57.557 |     3.389 |           0.022 | 11,410,627 |
-| cnn_ae       | cnn_ae_best  |    0.03253 |   0.00129 |    395.377 |           13.179 |     1.148 |           0.007 | 1,920,387  |
-| snake_ae     | snakeAE_best |    0.03996 |   0.00162 |    703.853 |           23.462 |     1.167 |           0.007 | 1,920,387  |
-| wgan_gp      | wgan_gp_best |    0.4778  |   0.01671 |    2445.14 |           81.505 |     1.171 |           0.007 | 2,583,364  |
-+--------------+--------------+------------+-----------+------------+------------------+-----------+-----------------+------------+
++----------+------------+-----------+------------+------------------+-----------+-----------------+------------+
+| exp_name | train_loss | test_loss | train_time | train_epoch_time | test_time | test_batch_time | n_params   |
+|----------+------------+-----------+------------+------------------+-----------+-----------------+------------|
+| cvt      |    0.01857 |   0.0008  |    1726.71 |           57.557 |     3.389 |           0.022 | 11,410,627 |
+| cnn_ae   |    0.03253 |   0.00129 |    395.377 |           13.179 |     1.148 |           0.007 | 1,920,387  |
+| snakeAE  |    0.03996 |   0.00162 |    703.853 |           23.462 |     1.167 |           0.007 | 1,920,387  |
+| wgan_gp  |    0.4778  |   0.01671 |    2445.14 |           81.505 |     1.171 |           0.007 | 2,583,364  |
++----------+------------+-----------+------------+------------------+-----------+-----------------+------------+
 '''
