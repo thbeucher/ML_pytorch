@@ -198,7 +198,7 @@ class CNNDecoder(nn.Module):
       self.attn1 = ViT(image_size=8, patch_size=4, dim=64, depth=2, heads=4, mlp_dim=128, dim_head=32, channels=128)
       self.attn2 = ViT(image_size=16, patch_size=4, dim=64, depth=2, heads=4, mlp_dim=128, dim_head=32, channels=64)
   
-  def forward(self, d3, d2=None, d1=None):
+  def forward(self, d3, d2=None, d1=None, return_intermediate=False):
     u1 = self.up1(d3)   #                -> [B, 128, 8, 8]
     if self.add_attn:
       u1 = self.attn1(u1)
@@ -212,6 +212,9 @@ class CNNDecoder(nn.Module):
       u2 = u2 + d1
 
     u3 = self.up3(u2)  #                -> [B, 3, 32, 32]
+
+    if return_intermediate:
+      return u1, u2, u3
     return u3
 
 

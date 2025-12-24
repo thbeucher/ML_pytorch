@@ -1,5 +1,7 @@
 import os
+import copy
 import json
+import math
 import time
 import torch
 import random
@@ -22,6 +24,23 @@ from torch.utils.tensorboard import SummaryWriter
 import cnn_layers as cl
 from vision_transformer.cvt import CvT
 from vision_transformer.mae import MaskedAutoencoderViT
+
+
+def exponential_schedule(epoch, n_epochs_decay, start=0.1, end=0.75):
+  if end == 0.0:
+    end = 1e-6
+  op_check = min if end > start else max
+  return round(op_check(end, start * (end / start) ** (epoch / (n_epochs_decay - 1))), 2)
+
+
+def linear_schedule(epoch, n_epochs, start, end):
+    t = min(epoch / (n_epochs - 1), 1.0)
+    return round(start + t * (end - start), 2)
+
+
+def cosine_schedule(epoch, n_epochs, start, end):
+    t = min(epoch / (n_epochs - 1), 1.0)
+    return round(end + (start - end) * 0.5 * (1 + math.cos(math.pi * t)), 2)
 
 
 class CNNAE(nn.Module):
@@ -50,7 +69,7 @@ class CNNAE(nn.Module):
     if self.config['add_noise_encoder'] or self.config['add_noise_bottleneck']:
       self.noise_layer = cl.NoiseLayer(p=self.config['noise_prob'], std=self.config['noise_std'])
   
-  def forward(self, x, return_enc=False):
+  def forward(self, x, return_latent=False):
     d1, d2, d3 = self.down(x)
 
     if self.config['linear_bottleneck']:
@@ -63,8 +82,8 @@ class CNNAE(nn.Module):
                  d2 if self.config['skip_connection'] else None,
                  d1 if self.config['skip_connection'] else None)
 
-    if return_enc:
-      u3, d3
+    if return_latent:
+      return u3, d3
     return u3
 
 
@@ -413,12 +432,7 @@ class MAETrainer(CNNAETrainer):
   def instanciate_model(self):
     self.auto_encoder = MaskedAutoencoderViT(**self.config['model_config']).to(self.device)
     self.n_trainable_params = sum(p.numel() for p in self.auto_encoder.parameters() if p.requires_grad)
-  
-  @staticmethod
-  def exponential_schedule(epoch, n_epochs_decay, start=0.1, end=0.75):
-    op_check = min if end > start else max
-    return round(op_check(end, start * (end / start) ** (epoch / (n_epochs_decay - 1))), 2)
-  
+    
   @torch.no_grad()
   def get_rec_to_plot(self, fixed_img, mask_ratio=0.75):
     loss, pred, mask = self.auto_encoder(fixed_img, mask_ratio=mask_ratio)
@@ -441,7 +455,7 @@ class MAETrainer(CNNAETrainer):
     pbar = tqdm(range(self.config['n_epochs']))
     for epoch in pbar:
       running_rec_loss = 0.
-      mask_ratio = MAETrainer.exponential_schedule(epoch, self.config['n_step_mask_ratio_schedule'])
+      mask_ratio = exponential_schedule(epoch, self.config['n_step_mask_ratio_schedule'])
       for i, (img, _) in enumerate(self.train_dataloader):
         img = img.to(self.device)
 
@@ -449,8 +463,8 @@ class MAETrainer(CNNAETrainer):
           fixed_img = img[:8]
         
         if epoch < self.config['n_epochs_repeat_stop']:
-          n_repeat = int(MAETrainer.exponential_schedule(i, self.config['n_step_repeat_schedule'],
-                                                         start=self.config['n_repeat_step_max'], end=1))
+          n_repeat = int(exponential_schedule(i, self.config['n_step_repeat_schedule'],
+                                              start=self.config['n_repeat_step_max'], end=1))
         for j in range(n_repeat):
           loss, pred, mask = self.auto_encoder(img, mask_ratio=mask_ratio)  # pred = [B, n_patch, c*h*w]
           self.tf_logger.add_scalar('repeat_batch_loss', loss.item(), j)
@@ -640,6 +654,68 @@ class CvTTrainer(CNNAETrainer):
     self.n_trainable_params = sum(p.numel() for p in self.auto_encoder.parameters() if p.requires_grad)
 
 
+class BANTrainer(CNNAETrainer):
+  # Born-Again Network: https://arxiv.org/pdf/1805.04770
+  CONFIG = {'exp_name': 'ban_itself_best',
+            'beta_latent_distill': 0.5,
+            'teacher_model_path': 'cifar10_exps/cnn_ae_CNNEncoder/cnn_ae_CNNEncoder.pt'}
+  def __init__(self, config={}):
+    super().__init__(BANTrainer.CONFIG)
+    self.config = {**self.config, **config}
+    self.teacher = copy.deepcopy(self.auto_encoder)
+    self.teacher.load_state_dict(torch.load(self.config['teacher_model_path'], map_location=self.device)['auto_encoder'])
+    for p in self.teacher.parameters(): p.requires_grad = False
+  
+  def train(self):
+    self.auto_encoder.train()
+    fixed_img = None
+    best_loss = torch.inf
+    pbar = tqdm(range(self.config['n_epochs']))
+    for epoch in pbar:
+      running_rec_loss, running_ssim_loss, running_mse_loss = 0., 0., 0.
+      for img, _ in self.train_dataloader:
+        img = img.to(self.device)
+
+        if fixed_img is None:
+          fixed_img = img[:8]
+
+        rec, latent = self.auto_encoder(img, return_latent=True)
+        mse_loss = self.mse_criterion(rec, img)
+        ssim_loss = 1 - self.ssim_criterion(rec, img)
+        # ms_ssim_loss = 1 - self.ms_ssim_criterion(rec, img)
+        rec_loss = self.config['lambda_mse'] * mse_loss + self.config['lambda_ssim'] * ssim_loss
+        # Add KD (Knowledge Distillation loss on latent)
+        teacher_rec, teacher_latent = self.teacher(img, return_latent=True)
+        loss = rec_loss + self.config['beta_latent_distill'] * self.mse_criterion(latent, teacher_latent)
+
+        self.ae_optim.zero_grad()
+        loss.backward()
+        self.ae_optim.step()
+
+        running_mse_loss += mse_loss.item()
+        running_ssim_loss += ssim_loss.item()
+        running_rec_loss += rec_loss.item()
+
+      if self.tf_logger is not None:
+        self.tf_logger.add_scalar('reconstruction_loss', running_rec_loss/len(pbar), epoch)
+        self.tf_logger.add_scalar('mse_loss', running_mse_loss/len(pbar), epoch)
+        self.tf_logger.add_scalar('ssim_loss', running_ssim_loss/len(pbar), epoch)
+
+        if epoch % self.config['save_rec_every'] == 0 or epoch == (self.config['n_epochs'] - 1):
+          with torch.no_grad():
+            rec = self.auto_encoder(fixed_img)
+          ori_rec = torch.cat([fixed_img, rec], dim=0)
+          self.tf_logger.add_images(f'generated_epoch_{epoch}', ori_rec)
+      
+      if self.config['save_model_train'] and (running_rec_loss/len(pbar)) < best_loss:
+        best_loss = running_rec_loss/len(pbar)
+        self.save_model()
+
+      pbar.set_postfix(loss=f'{running_rec_loss/len(pbar):.4f}')
+    return running_rec_loss/len(pbar)
+
+
+
 def flatten_dict(d, parent_key="", sep="."):
   """Recursively flattens a nested dictionary."""
   items = {}
@@ -781,7 +857,7 @@ def get_args():
 
 if __name__ == '__main__':
   trainers = {'cnn_ae': CNNAETrainer, 'mae': MAETrainer, 'wgan_gp': WGANGPTrainer,
-              'snake_ae': SnakeAETrainer, 'cvt_ae': CvTTrainer}
+              'snake_ae': SnakeAETrainer, 'cvt_ae': CvTTrainer, 'ban_ae': BANTrainer}
   args = get_args()
 
   if args.run_all_exps:
@@ -790,7 +866,7 @@ if __name__ == '__main__':
     run_encoder_archi_experiments()
   else:
     trainer = trainers[args.trainer]()
-    print(f'Experiment name: {trainer.exp_name}')
+    print(f"Experiment name: {trainer.config['exp_name']}")
 
     if args.load_model:
       print(f'Loading model... ({trainers[args.trainer].__name__})')
@@ -838,7 +914,7 @@ Interpretation (rule of thumb)
 +----------+------------+-----------+------------+------------------+-----------+-----------------+------------+
 
 +---------------+------------+-----------+------------+------------------+-----------+-----------------+-----------+
-| trainer_name  | train_loss | test_loss | train_time | train_epoch_time | test_time | test_batch_time | n_params  |
+| Encoder_Archi | train_loss | test_loss | train_time | train_epoch_time | test_time | test_batch_time | n_params  |
 |---------------+------------+-----------+------------+------------------+-----------+-----------------+-----------|
 | BigCNNEncoder |    0.018   |   0.00052 |    1088.3  |           36.277 |     2.44  |           0.016 | 4,858,355 |
 | ResEncoder    |    0.03924 |   0.00128 |    550.572 |           18.352 |     1.473 |           0.009 | 2,659,874 |
