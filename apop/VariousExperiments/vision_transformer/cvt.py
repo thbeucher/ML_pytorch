@@ -1,4 +1,5 @@
 # Taken from https://github.com/lucidrains/vit-pytorch/
+# https://arxiv.org/pdf/2106.09785
 # Modified for experiment purpose
 import torch
 

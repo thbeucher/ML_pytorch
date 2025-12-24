@@ -151,9 +151,11 @@ class CNNAETrainer:
     test_dataset = datasets.CIFAR10(root=self.config['data_dir'], train=False, download=True, transform=transform)
 
     self.train_dataloader = DataLoader(train_dataset, batch_size=self.config['batch_size'], shuffle=True,
-                                       num_workers=6, pin_memory=True if torch.cuda.is_available() else False)
+                                       num_workers=min(6, os.cpu_count()),
+                                       pin_memory=True if torch.cuda.is_available() else False)
     self.test_dataloader = DataLoader(test_dataset, batch_size=self.config['batch_size'], shuffle=True,
-                                      num_workers=6, pin_memory=True if torch.cuda.is_available() else False)
+                                      num_workers=min(6, os.cpu_count()),
+                                      pin_memory=True if torch.cuda.is_available() else False)
 
   def set_optimizers_n_criterions(self):
     self.ae_optim = torch.optim.AdamW(self.auto_encoder.parameters(), lr=self.config['lr'], betas=(0.9, 0.95))
@@ -728,6 +730,7 @@ def start_experiment(trainer, trainer_name, results):
   results['n_trainable_parameters'].append(f'{trainer.n_trainable_params:,}')
   return results
 
+
 def run_all_experiments(trainers, only_best=True):
   print(f'Run all experiments ({only_best=})')
   del trainers['mae']  # Currently not converging
@@ -833,4 +836,13 @@ Interpretation (rule of thumb)
 | snakeAE  |    0.03996 |   0.00162 |    703.853 |           23.462 |     1.167 |           0.007 | 1,920,387  |
 | wgan_gp  |    0.4778  |   0.01671 |    2445.14 |           81.505 |     1.171 |           0.007 | 2,583,364  |
 +----------+------------+-----------+------------+------------------+-----------+-----------------+------------+
+
++---------------+------------+-----------+------------+------------------+-----------+-----------------+-----------+
+| trainer_name  | train_loss | test_loss | train_time | train_epoch_time | test_time | test_batch_time | n_params  |
+|---------------+------------+-----------+------------+------------------+-----------+-----------------+-----------|
+| BigCNNEncoder |    0.018   |   0.00052 |    1088.3  |           36.277 |     2.44  |           0.016 | 4,858,355 |
+| ResEncoder    |    0.03924 |   0.00128 |    550.572 |           18.352 |     1.473 |           0.009 | 2,659,874 |
+| CNNEncoder    |    0.0427  |   0.00148 |    395.697 |           13.19  |     1.149 |           0.007 | 1,920,515 |
+| SEGEncoder    |    0.04004 |   0.00188 |    415.853 |           13.862 |     1.204 |           0.008 | 1,942,523 |
++---------------+------------+-----------+------------+------------------+-----------+-----------------+-----------+
 '''

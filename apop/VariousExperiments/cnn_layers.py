@@ -49,7 +49,7 @@ class CNNEncoder(nn.Module):
     self.add_noise = add_noise
     self.add_attn = add_attn
 
-    self.down1 = nn.Sequential(nn.Conv2d(3, 64, 4, 2, 1), nn.ReLU(True))
+    self.down1 = nn.Sequential(nn.Conv2d(3, 64, 4, 2, 1), nn.BatchNorm2d(64), nn.ReLU(True))
     self.down2 = nn.Sequential(nn.Conv2d(64, 128, 4, 2, 1), nn.BatchNorm2d(128), nn.ReLU(True))
     self.down3 = nn.Sequential(nn.Conv2d(128, 256, 4, 2, 1), nn.BatchNorm2d(256), nn.ReLU(True))
 
@@ -130,9 +130,9 @@ class ResDownBlock(nn.Module):
 class ResEncoder(nn.Module):
   def __init__(self, *args, **kwargs):
     super().__init__()
-    self.down1 = ResDownBlock(3, 64, 32)
-    self.down2 = ResDownBlock(64, 128, 96)
-    self.down3 = ResDownBlock(128, 256, 192)
+    self.down1 = ResDownBlock(3, 64)
+    self.down2 = ResDownBlock(64, 128)
+    self.down3 = ResDownBlock(128, 256)
   
   def forward(self, x):
     d1 = self.down1(x)
@@ -218,3 +218,11 @@ class CNNDecoder(nn.Module):
 CNN_LAYERS = {'NoiseLayer': NoiseLayer, 'Critic': Critic, 'CNNEncoder': CNNEncoder, 'CNNDecoder': CNNDecoder,
               'BigCNNBlock':BigCNNBlock, 'BigCNNEncoder': BigCNNEncoder, 'ResDownBlock': ResDownBlock,
               'ResEncoder': ResEncoder, 'SEBlock': SEBlock, 'SEGEncoder': SEGEncoder}
+
+
+if __name__ == '__main__':
+  print(f'Number of trainable parameters:')
+  for k, v in CNN_LAYERS.items():
+    if 'Encoder' in k:
+      n_trainable_params = sum(p.numel() for p in v().parameters() if p.requires_grad)
+      print(f'{k:<15}: {n_trainable_params:,}')
