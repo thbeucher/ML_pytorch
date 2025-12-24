@@ -49,7 +49,7 @@ class CNNEncoder(nn.Module):
     self.add_noise = add_noise
     self.add_attn = add_attn
 
-    self.down1 = nn.Sequential(nn.Conv2d(3, 64, 4, 2, 1), nn.BatchNorm2d(64), nn.ReLU(True))
+    self.down1 = nn.Sequential(nn.Conv2d(3, 64, 4, 2, 1), nn.ReLU(True))
     self.down2 = nn.Sequential(nn.Conv2d(64, 128, 4, 2, 1), nn.BatchNorm2d(128), nn.ReLU(True))
     self.down3 = nn.Sequential(nn.Conv2d(128, 256, 4, 2, 1), nn.BatchNorm2d(256), nn.ReLU(True))
 
@@ -85,7 +85,7 @@ class CNNEncoder(nn.Module):
 class BigCNNBlock(nn.Module):
   def __init__(self, in_c, out_c, se_ratio=4):
     super().__init__()
-    self.conv3 = nn.Sequential(nn.Conv2d(in_c, out_c, 3, 1, 1), nn.BatchNorm2d(out_c), nn.ReLU(True))
+    self.conv3 = nn.Sequential(nn.Conv2d(in_c, out_c, 3, 1, 1), nn.ReLU(True))
     self.conv5 = nn.Sequential(nn.Conv2d(in_c, out_c, 5, 1, 2), nn.BatchNorm2d(out_c), nn.ReLU(True))
     self.convm = nn.Sequential(nn.Conv2d(out_c, out_c, 3, 1, 1), nn.BatchNorm2d(out_c), nn.ReLU(True))
     self.se = SEBlock(out_c, ratio=se_ratio)
@@ -114,12 +114,14 @@ class BigCNNEncoder(nn.Module):
 
 
 class ResDownBlock(nn.Module):
-  def __init__(self, in_chan, out_chan, inner_ratio=2):
+  def __init__(self, in_chan, out_chan, inner_ratio=2, batch_norm=True):
     super().__init__()
     self.conv = nn.Sequential(nn.Conv2d(in_chan, int(in_chan*inner_ratio), 3, 1, 1),
-                              nn.BatchNorm2d(int(in_chan*inner_ratio)), nn.ReLU(True),
+                              nn.BatchNorm2d(int(in_chan*inner_ratio)) if batch_norm else nn.Identity(),
+                              nn.ReLU(True),
                               nn.Conv2d(int(in_chan*inner_ratio), in_chan, 3, 1, 1),
-                              nn.BatchNorm2d(in_chan), nn.ReLU(True))
+                              nn.BatchNorm2d(in_chan) if batch_norm else nn.Identity(),
+                              nn.ReLU(True))
     self.down = nn.Sequential(nn.Conv2d(in_chan, out_chan, 4, 2, 1), nn.BatchNorm2d(out_chan), nn.ReLU(True))
   
   def forward(self, x):
@@ -130,7 +132,7 @@ class ResDownBlock(nn.Module):
 class ResEncoder(nn.Module):
   def __init__(self, *args, **kwargs):
     super().__init__()
-    self.down1 = ResDownBlock(3, 64)
+    self.down1 = ResDownBlock(3, 64, batch_norm=False)
     self.down2 = ResDownBlock(64, 128)
     self.down3 = ResDownBlock(128, 256)
   
@@ -172,7 +174,7 @@ class SEBlock(nn.Module):
 class SEGEncoder(nn.Module):
   def __init__(self, *args, groups=1, **kwargs):
     super().__init__()
-    self.down1 = nn.Sequential(nn.Conv2d(3, 64, 4, 2, 1), nn.BatchNorm2d(64), nn.ReLU(True))
+    self.down1 = nn.Sequential(nn.Conv2d(3, 64, 4, 2, 1), nn.ReLU(True))
     self.down2 = nn.Sequential(nn.Conv2d(64, 128, 4, 2, 1, groups=groups), nn.BatchNorm2d(128), nn.ReLU(True))
     self.down3 = nn.Sequential(nn.Conv2d(128, 256, 4, 2, 1, groups=groups), nn.BatchNorm2d(256), nn.ReLU(True))
     self.se1 = SEBlock(64)

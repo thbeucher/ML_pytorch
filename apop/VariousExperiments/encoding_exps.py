@@ -118,6 +118,8 @@ class CNNAETrainer:
             'save_model_train':  True,
             'lambda_mse': 0.8,
             'lambda_ssim': 0.2,
+            'lambda_latent_distill': 0.5,
+            'self_latent_distillation': False,
             'model_config': {'skip_connection': True,
                              'linear_bottleneck': False,
                              'add_noise_bottleneck': False,
@@ -134,6 +136,12 @@ class CNNAETrainer:
     self.instanciate_model()
     self.set_dataloader()
     self.set_optimizers_n_criterions()
+
+    if self.config['self_latent_distillation']:
+      self.teacher = self.load_model(this_model=copy.deepcopy(self.auto_encoder))
+      for p in self.teacher.parameters(): p.requires_grad = False
+      self.config['exp_name'] += '_latentdistill'
+
     self.set_logger()  # tensorboard logger create the folders used by dump_config and save_model
     self.dump_config()
   
@@ -188,10 +196,13 @@ class CNNAETrainer:
     torch.save({'auto_encoder': self.auto_encoder.state_dict()},
                os.path.join(self.config['save_dir'], self.config['exp_name'], f"{self.config['exp_name']}.pt"))
 
-  def load_model(self):
+  def load_model(self, this_model=None):
     path = os.path.join(self.config['save_dir'], self.config['exp_name'], f"{self.config['exp_name']}.pt")
     if os.path.isfile(path):
       model = torch.load(path, map_location=self.device)
+      if this_model:
+        this_model.load_state_dict(model['auto_encoder'])
+        return this_model
       self.auto_encoder.load_state_dict(model['auto_encoder'])
       print(f'Model loaded successfully from {path}...')
     else:
@@ -210,14 +221,21 @@ class CNNAETrainer:
         if fixed_img is None:
           fixed_img = img[:8]
 
-        rec = self.auto_encoder(img)
+        rec, latent = self.auto_encoder(img, return_latent=True)
         mse_loss = self.mse_criterion(rec, img)
         ssim_loss = 1 - self.ssim_criterion(rec, img)
         # ms_ssim_loss = 1 - self.ms_ssim_criterion(rec, img)
         rec_loss = self.config['lambda_mse'] * mse_loss + self.config['lambda_ssim'] * ssim_loss
 
+        if self.config['self_latent_distillation']:
+          teacher_rec, teacher_latent = self.teacher(img, return_latent=True)
+          loss = rec_loss + self.config['lambda_latent_distill'] * self.mse_criterion(latent, teacher_latent)
+
         self.ae_optim.zero_grad()
-        rec_loss.backward()
+        if self.config['self_latent_distillation']:
+          loss.backward()
+        else:
+          rec_loss.backward()
         self.ae_optim.step()
 
         running_mse_loss += mse_loss.item()
@@ -654,68 +672,6 @@ class CvTTrainer(CNNAETrainer):
     self.n_trainable_params = sum(p.numel() for p in self.auto_encoder.parameters() if p.requires_grad)
 
 
-class BANTrainer(CNNAETrainer):
-  # Born-Again Network: https://arxiv.org/pdf/1805.04770
-  CONFIG = {'exp_name': 'ban_itself_best',
-            'beta_latent_distill': 0.5,
-            'teacher_model_path': 'cifar10_exps/cnn_ae_CNNEncoder/cnn_ae_CNNEncoder.pt'}
-  def __init__(self, config={}):
-    super().__init__(BANTrainer.CONFIG)
-    self.config = {**self.config, **config}
-    self.teacher = copy.deepcopy(self.auto_encoder)
-    self.teacher.load_state_dict(torch.load(self.config['teacher_model_path'], map_location=self.device)['auto_encoder'])
-    for p in self.teacher.parameters(): p.requires_grad = False
-  
-  def train(self):
-    self.auto_encoder.train()
-    fixed_img = None
-    best_loss = torch.inf
-    pbar = tqdm(range(self.config['n_epochs']))
-    for epoch in pbar:
-      running_rec_loss, running_ssim_loss, running_mse_loss = 0., 0., 0.
-      for img, _ in self.train_dataloader:
-        img = img.to(self.device)
-
-        if fixed_img is None:
-          fixed_img = img[:8]
-
-        rec, latent = self.auto_encoder(img, return_latent=True)
-        mse_loss = self.mse_criterion(rec, img)
-        ssim_loss = 1 - self.ssim_criterion(rec, img)
-        # ms_ssim_loss = 1 - self.ms_ssim_criterion(rec, img)
-        rec_loss = self.config['lambda_mse'] * mse_loss + self.config['lambda_ssim'] * ssim_loss
-        # Add KD (Knowledge Distillation loss on latent)
-        teacher_rec, teacher_latent = self.teacher(img, return_latent=True)
-        loss = rec_loss + self.config['beta_latent_distill'] * self.mse_criterion(latent, teacher_latent)
-
-        self.ae_optim.zero_grad()
-        loss.backward()
-        self.ae_optim.step()
-
-        running_mse_loss += mse_loss.item()
-        running_ssim_loss += ssim_loss.item()
-        running_rec_loss += rec_loss.item()
-
-      if self.tf_logger is not None:
-        self.tf_logger.add_scalar('reconstruction_loss', running_rec_loss/len(pbar), epoch)
-        self.tf_logger.add_scalar('mse_loss', running_mse_loss/len(pbar), epoch)
-        self.tf_logger.add_scalar('ssim_loss', running_ssim_loss/len(pbar), epoch)
-
-        if epoch % self.config['save_rec_every'] == 0 or epoch == (self.config['n_epochs'] - 1):
-          with torch.no_grad():
-            rec = self.auto_encoder(fixed_img)
-          ori_rec = torch.cat([fixed_img, rec], dim=0)
-          self.tf_logger.add_images(f'generated_epoch_{epoch}', ori_rec)
-      
-      if self.config['save_model_train'] and (running_rec_loss/len(pbar)) < best_loss:
-        best_loss = running_rec_loss/len(pbar)
-        self.save_model()
-
-      pbar.set_postfix(loss=f'{running_rec_loss/len(pbar):.4f}')
-    return running_rec_loss/len(pbar)
-
-
-
 def flatten_dict(d, parent_key="", sep="."):
   """Recursively flattens a nested dictionary."""
   items = {}
@@ -852,12 +808,13 @@ def get_args():
   parser.add_argument('--eval_model', '-em', action='store_true')
   parser.add_argument('--save_model', '-sm', action='store_true')
   parser.add_argument('--rae_only_best', '-rob', action='store_false')
+  parser.add_argument('--experiment_name', '-en', type=str, default=None)
   return parser.parse_args()
 
 
 if __name__ == '__main__':
   trainers = {'cnn_ae': CNNAETrainer, 'mae': MAETrainer, 'wgan_gp': WGANGPTrainer,
-              'snake_ae': SnakeAETrainer, 'cvt_ae': CvTTrainer, 'ban_ae': BANTrainer}
+              'snake_ae': SnakeAETrainer, 'cvt_ae': CvTTrainer}
   args = get_args()
 
   if args.run_all_exps:
@@ -865,7 +822,7 @@ if __name__ == '__main__':
   elif args.run_encoder_archi_exps:
     run_encoder_archi_experiments()
   else:
-    trainer = trainers[args.trainer]()
+    trainer = trainers[args.trainer]({} if args.experiment_name is None else {'exp_name': args.experiment_name})
     print(f"Experiment name: {trainer.config['exp_name']}")
 
     if args.load_model:
