@@ -9,9 +9,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from tqdm import tqdm
+from scipy.integrate import solve_ivp
 from torch.utils.data import DataLoader
-from torchvision import datasets, transforms
 from torch.utils.tensorboard import SummaryWriter
+from torchvision import datasets, transforms, utils
 
 import cnn_layers as cl
 
@@ -175,22 +176,34 @@ class ClassConditionalFlowMatchingTrainer:
       print(f'File {path} not found... No loaded model.')
   
   @torch.no_grad()
-  def show_sample(self, n=8, n_steps=100):
+  def show_sample(self, n=8, n_steps=10, get_step=5, solver='euler'):
     print('Generating Images...')
     real_imgs, class_labels = next(iter(self.train_dataloader))
-    real_imgs = real_imgs.to(self.device)
+    real_imgs = (real_imgs.to(self.device)+1)/2
     class_labels = class_labels.to(self.device)
-    mid_samples, samples = self.euler_sampling(n, n_steps=n_steps, class_labels=class_labels[:n])
-    mid_samples, samples = mid_samples.clamp(-1, 1), samples.clamp(-1, 1)
-    real_imgs, mid_samples, samples = (real_imgs+1)/2, (mid_samples+1)/2, (samples+1)/2 # denormalize [-1, 1]->[0, 1]
-    ori_sample = torch.cat([real_imgs[:n], mid_samples, samples], dim=0)
-    show_sample_tag = f"show_sample_{self.config['exp_name']}"
+
+    if solver == 'euler':
+      samples = self.euler_sampling(n, n_steps=n_steps, get_step=get_step, class_labels=class_labels[:n])
+    else:
+      samples = self.ode_sampling(class_labels[:n].cpu().numpy(), n_steps=n_steps)
+      samples = torch.from_numpy(samples[-1]).float().to(self.device)
+
+    samples = [(s.clamp(-1, 1)+1)/2 for s in samples]  # denormalize [-1, 1] -> [0, 1]
+    ori_sample = torch.cat([real_imgs[:n]] + samples, dim=0)
+
+    show_sample_tag = f"show_sample_{solver}_{self.config['exp_name']}"
     self.tf_logger.add_images(show_sample_tag, ori_sample)
+
+    path = os.path.join(self.config['save_dir'], self.config['exp_name'], 'samples/')
+    os.makedirs(path, exist_ok=True)
+    grid = utils.make_grid(ori_sample, nrow=8, normalize=True, value_range=(0, 1))
+    utils.save_image(grid, os.path.join(path, f'{show_sample_tag}.png'))
     print(f'Images generated upload in tensorboard {show_sample_tag}')
 
   @torch.no_grad()
-  def euler_sampling(self, n_samples, n_steps=2, class_labels=None):
+  def euler_sampling(self, n_samples, n_steps=10, get_step=5, class_labels=None):
     self.unet.eval()
+    samples = []
 
     # Start from pure Gaussian noise
     xt = torch.randn(n_samples, 3, 32, 32).to(self.device)
@@ -203,10 +216,29 @@ class ClassConditionalFlowMatchingTrainer:
       xt = xt + v * dt  # Euler update
       xt = torch.clamp(xt, -3.0, 3.0)
 
-      if i % (n_steps//2) == 0:
-        mid_samples = xt.clone()
+      if i % get_step == 0:
+        samples.append(xt.clone())
 
-    return mid_samples, xt
+    return samples + [xt]
+  
+  @torch.no_grad()
+  def ode_sampling(self, class_labels, n_steps=100):
+    def ode_fn(t, x_flat):
+      x = torch.tensor(x_flat, dtype=torch.float32, device=self.device).reshape(1, 3, 32, 32)
+      t_tensor = torch.tensor([[t]], dtype=torch.float32, device=self.device)
+      c_tensor = torch.tensor([class_index], dtype=torch.long, device=self.device)
+      with torch.no_grad():
+        v = self.unet(x, t_tensor, c_tensor)
+      return v.cpu().numpy().flatten()
+    
+    generated = []
+    for class_index in class_labels:
+      x0 = torch.randn(1, 3, 32, 32).squeeze(0).numpy().flatten()
+      t_eval = np.linspace(0, 1, n_steps)
+      sol = solve_ivp(ode_fn, (0, 1), x0, t_eval=t_eval, method='RK45')
+      x1 = sol.y[:, -1].reshape(3, 32, 32)
+      generated.append(x1)
+    return np.array(generated)
 
   def flow_matching_loss(self, x1, class_labels=None):
     # ---- Sample Gaussian noise as x0 ----
@@ -296,6 +328,9 @@ def get_args():
   parser.add_argument('--eval_model', '-em', action='store_true')
   parser.add_argument('--save_model', '-sm', action='store_true')
   parser.add_argument('--show_sample', '-ss', action='store_true')
+  parser.add_argument('--n_steps', '-ns', type=int, default=10, help='Number of denoising steps')
+  parser.add_argument('--get_step', '-gs', type=int, default=5, help='Get intermediate states during sampling')
+  parser.add_argument('--ode_solver', '-os', type=str, default='euler', choices=['euler', 'RK45'])
   return parser.parse_args()
 
 
@@ -323,7 +358,7 @@ if __name__ == '__main__':
     if args.show_sample:
       print(f'Generating samples... ({trainers[args.trainer].__name__})')
       trainer.load_model()
-      trainer.show_sample()
+      trainer.show_sample(n_steps=args.n_steps, get_step=args.get_step, solver=args.ode_solver)
     
     if args.save_model:
       print(f'Saving model... ({trainers[args.trainer].__name__})')
