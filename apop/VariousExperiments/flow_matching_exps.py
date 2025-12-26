@@ -48,7 +48,8 @@ class TimeEmbedding(nn.Module):
 class ClassConditionalFlowUnet(nn.Module):
   def __init__(self, img_chan=3, time_emb_dim=64, n_classes=10, class_emb_dim=32):
     super().__init__()
-    self.time_emb = nn.Sequential(nn.Linear(1, time_emb_dim), nn.SiLU(), nn.Linear(time_emb_dim, time_emb_dim))
+    # self.time_emb = nn.Sequential(nn.Linear(1, time_emb_dim), nn.SiLU(), nn.Linear(time_emb_dim, time_emb_dim))
+    self.time_emb = nn.Sequential(TimeEmbedding(time_emb_dim), nn.Linear(time_emb_dim, time_emb_dim), nn.SiLU())
     self.class_emb = nn.Sequential(nn.Embedding(n_classes, class_emb_dim), nn.Linear(class_emb_dim, class_emb_dim))
 
     self.init_conv = nn.Conv2d(img_chan + class_emb_dim + time_emb_dim, 64, 3, 1, 1)
@@ -67,7 +68,8 @@ class ClassConditionalFlowUnet(nn.Module):
   def forward(self, x, t, labels):
     B, C, H, W = x.shape
     c_embed = self.class_emb(labels)[:, :, None, None].expand(-1, -1, H, W)  # -> [B, c_dim, H, W]
-    t_embed = self.time_emb(t)[:, :, None, None].expand(-1, -1, H, W)  # -> [B, t_dim, H, W]
+    # t_embed = self.time_emb(t)[:, :, None, None].expand(-1, -1, H, W)  # -> [B, t_dim, H, W]
+    t_embed = self.time_emb(t.squeeze(-1))[:, :, None, None].expand(-1, -1, H, W)  # when using sinusoidal embedding
 
     x = torch.cat([x, c_embed, t_embed], dim=1)   # -> [B, C + c_dim + (t_dim or 0), H, W]
     x = self.init_conv(x)                         # -> [B, 64, H, W]
@@ -91,7 +93,7 @@ class ClassConditionalFlowMatchingTrainer:
             'lr':                2e-4,
             'data_dir':          'data/',
             'save_dir':          'cifar10_exps/',
-            'exp_name':          'cc_fm',
+            'exp_name':          'cc_fm_sinemb',
             'log_dir':           'runs/',
             'save_model_train':  True,
             'use_tf_logger':     True,
@@ -179,7 +181,7 @@ class ClassConditionalFlowMatchingTrainer:
     real_imgs = real_imgs.to(self.device)
     class_labels = class_labels.to(self.device)
     mid_samples, samples = self.euler_sampling(n, n_steps=n_steps, class_labels=class_labels[:n])
-    real_imgs, mid_samples, samples = real_imgs.clamp(-1, 1), mid_samples.clamp(-1, 1), samples.clamp(-1, 1)
+    mid_samples, samples = mid_samples.clamp(-1, 1), samples.clamp(-1, 1)
     real_imgs, mid_samples, samples = (real_imgs+1)/2, (mid_samples+1)/2, (samples+1)/2 # denormalize [-1, 1]->[0, 1]
     ori_sample = torch.cat([real_imgs[:n], mid_samples, samples], dim=0)
     show_sample_tag = f"show_sample_{self.config['exp_name']}"
@@ -187,7 +189,7 @@ class ClassConditionalFlowMatchingTrainer:
     print(f'Images generated upload in tensorboard {show_sample_tag}')
 
   @torch.no_grad()
-  def euler_sampling(self, n_samples, n_steps=100, class_labels=None):
+  def euler_sampling(self, n_samples, n_steps=2, class_labels=None):
     self.unet.eval()
 
     # Start from pure Gaussian noise
@@ -241,7 +243,7 @@ class ClassConditionalFlowMatchingTrainer:
 
     best_loss = torch.inf
 
-    fixed_imgs = torch.stack(self.get_real_samples_by_class()[:8]).to(self.device)
+    fixed_imgs = (torch.stack(self.get_real_samples_by_class()[:8]).to(self.device)+1)/2
 
     pbar = tqdm(range(self.config['n_epochs']))
     for epoch in pbar:
@@ -265,8 +267,8 @@ class ClassConditionalFlowMatchingTrainer:
 
         if epoch % self.config['sample_every'] == 0 or epoch == (self.config['n_epochs'] - 1):
           mid_samples, samples = self.euler_sampling(8, class_labels=torch.tensor(list(range(8)), dtype=torch.long, device=self.device))
-          fixed_imgs, mid_samples, samples = fixed_imgs.clamp(-1, 1), mid_samples.clamp(-1, 1), samples.clamp(-1, 1)
-          fixed_imgs, mid_samples, samples = (fixed_imgs+1)/2, (mid_samples+1)/2, (samples+1)/2  # denormalize [-1, 1] -> [0, 1]
+          mid_samples, samples = mid_samples.clamp(-1, 1), samples.clamp(-1, 1)
+          mid_samples, samples = (mid_samples+1)/2, (samples+1)/2  # denormalize [-1, 1] -> [0, 1]
           ori_sample = torch.cat([fixed_imgs, mid_samples, samples], dim=0)
           self.tf_logger.add_images(f'generated_epoch_{epoch}', ori_sample)
       
