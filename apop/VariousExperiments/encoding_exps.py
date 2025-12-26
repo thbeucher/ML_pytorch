@@ -18,7 +18,7 @@ from collections import defaultdict
 from itertools import product, chain
 from torch.utils.data import DataLoader
 from pytorch_msssim import SSIM, MS_SSIM
-from torchvision import datasets, transforms
+from torchvision import datasets, transforms, utils
 from torch.utils.tensorboard import SummaryWriter
 
 import cnn_layers as cl
@@ -107,7 +107,7 @@ class CNNAETrainer:
   CONFIG = {'lr':                1e-4,
             'n_epochs':          30,
             'batch_size':        64,
-            'data_dir':          '../../../gpt_tests/data/',
+            'data_dir':          'data/',
             'save_dir':          'cifar10_exps/',
             'exp_name':          'cnn_ae_best',
             'log_dir':           'runs/',
@@ -145,10 +145,10 @@ class CNNAETrainer:
     self.set_logger()  # tensorboard logger create the folders used by dump_config and save_model
     self.dump_config()
   
-  def set_logger(self, exp_name=None):
-    exp_name = self.config['exp_name'] if exp_name is None else exp_name
-    save_dir_run = os.path.join(self.config['save_dir'], exp_name, self.config['log_dir'])
-    self.tf_logger = SummaryWriter(save_dir_run) if self.config['use_tf_logger'] else None
+  def set_logger(self, log_dir=None):
+    if log_dir is None:
+      log_dir = os.path.join(self.config['save_dir'], self.config['exp_name'], self.config['log_dir'])
+    self.tf_logger = SummaryWriter(log_dir) if self.config['use_tf_logger'] else None
   
   def dump_config(self):
     with open(os.path.join(self.config['save_dir'],
@@ -275,6 +275,26 @@ class CNNAETrainer:
     print(f'Reconstruction loss on test data: {rec_loss:.4f}')
     return rec_loss
 
+  @torch.no_grad()
+  def sample(self, n_sample=8, n_steps=10, lambda_reg=math.sqrt(0.1)):
+    # https://cea.hal.science/cea-02917445/document
+    # https://cea.hal.science/cea-02917445v1/file/ICMLA_supplementary_materials.pdf
+    path = os.path.join(self.config['save_dir'], self.config['exp_name'], 'samples/')
+    os.makedirs(path, exist_ok=True)
+
+    imgs = torch.randn(n_sample, 3, 32, 32, device=self.device)
+    ori_rec = imgs.clone()
+
+    for s in range(n_steps):
+      eps = torch.randn(n_sample, 3, 32, 32, device=self.device)
+      imgs = self.auto_encoder(imgs) + lambda_reg * eps
+
+      if s == n_steps // 2:
+        ori_rec = torch.cat([ori_rec, imgs.clamp(0, 1)])
+
+    ori_rec = torch.cat([ori_rec, imgs.clamp(0, 1)], dim=0)
+    grid = utils.make_grid(ori_rec, nrow=8, normalize=True, value_range=(0, 1))
+    utils.save_image(grid, os.path.join(path, f"samples.png"))
 
 class WGANGPTrainer(CNNAETrainer):
   '''Wasserstein_GAN_GradientPenalty_Trainer'''
@@ -807,6 +827,7 @@ def get_args():
   parser.add_argument('--train_model', '-tm', action='store_true')
   parser.add_argument('--eval_model', '-em', action='store_true')
   parser.add_argument('--save_model', '-sm', action='store_true')
+  parser.add_argument('--sample_from_model', '-sfm', action='store_true')
   parser.add_argument('--rae_only_best', '-rob', action='store_false')
   parser.add_argument('--experiment_name', '-en', type=str, default=None)
   return parser.parse_args()
@@ -836,6 +857,10 @@ if __name__ == '__main__':
     if args.eval_model:
       print(f'Evaluating model... ({trainers[args.trainer].__name__})')
       trainer.evaluate()
+    
+    if args.sample_from_model:
+      print(f'Sampling from model... ({trainers[args.trainer].__name__})')
+      trainer.sample()
     
     if args.save_model:
       print(f'Saving model... ({trainers[args.trainer].__name__})')

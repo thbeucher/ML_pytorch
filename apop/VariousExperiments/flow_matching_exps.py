@@ -13,6 +13,8 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from torch.utils.tensorboard import SummaryWriter
 
+import cnn_layers as cl
+
 
 class TimeEmbedding(nn.Module):
   """
@@ -43,92 +45,60 @@ class TimeEmbedding(nn.Module):
     return emb
 
 
-class ResBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, time_dim, pooling=False, upscale=False):
-        super().__init__()
-        self.pooling = pooling
-        self.upscale = upscale
-
-        if pooling:
-          self.conv_pool = nn.Conv2d(in_channels, in_channels, 4, 2, 1)
-
-        if upscale:
-          self.conv_upscale = nn.ConvTranspose2d(in_channels, in_channels, 4, 2, 1)
-
-        self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, 3, padding=1)
-
-        self.time_proj = nn.Linear(time_dim, out_channels)
-        self.act = nn.SiLU()
-
-        self.skip = nn.Conv2d(in_channels, out_channels, 1) if in_channels != out_channels else nn.Identity()
-
-    def forward(self, x, t):
-        """
-        x: (B, C, H, W)
-        t: (B, time_dim)
-        """
-        xp = self.conv_pool(x) if self.pooling else self.conv_upscale(x) if self.upscale else x
-        h = self.act(self.conv1(xp))
-        h = h + self.time_proj(t)[:, :, None, None]
-        h = self.act(self.conv2(h))
-        return h + self.skip(xp)
-
-
-class Unet(nn.Module):
-  CONFIG = {'time_dim': 128}
-  def __init__(self, config={}):
+class ClassConditionalFlowUnet(nn.Module):
+  def __init__(self, img_chan=3, time_emb_dim=64, n_classes=10, class_emb_dim=32):
     super().__init__()
-    self.config = {**Unet.CONFIG, **config}
-    self.time_embed = TimeEmbedding(self.config['time_dim'])
+    self.time_emb = nn.Sequential(nn.Linear(1, time_emb_dim), nn.SiLU(), nn.Linear(time_emb_dim, time_emb_dim))
+    self.class_emb = nn.Sequential(nn.Embedding(n_classes, class_emb_dim), nn.Linear(class_emb_dim, class_emb_dim))
 
-    self.inp = ResBlock(3, 16, self.config['time_dim'])
+    self.init_conv = nn.Conv2d(img_chan + class_emb_dim + time_emb_dim, 64, 3, 1, 1)
 
-    self.down1 = ResBlock(16, 32, self.config['time_dim'], pooling=True)
-    self.down2 = ResBlock(32, 64, self.config['time_dim'], pooling=True)
-    self.down3 = ResBlock(64, 128, self.config['time_dim'], pooling=True)
+    self.down1 = cl.EnhancedResidualFullBlock(64, 128, batch_norm_first=False, pooling=True)
+    self.down2 = cl.EnhancedResidualFullBlock(128, 256, pooling=True)
+    self.down3 = cl.EnhancedResidualFullBlock(256, 512, pooling=True)
 
-    self.up1 = ResBlock(128, 64, self.config['time_dim'], upscale=True)
-    self.up2 = ResBlock(64, 32, self.config['time_dim'], upscale=True)
-    self.up3 = ResBlock(32, 16, self.config['time_dim'], upscale=True)
-
-    self.time_proj = nn.Linear(self.config['time_dim'], 16)
-    self.out = nn.Sequential(nn.Conv2d(16, 3, kernel_size=3, padding=1), nn.Sigmoid())
+    self.up1 = cl.EnhancedResidualFullBlock(512, 256, upscaling=True)
+    self.up2 = cl.EnhancedResidualFullBlock(256, 128, upscaling=True)
+    self.up3 = cl.EnhancedResidualFullBlock(128, 64, upscaling=True)
+    
+    self.final_conv = nn.Sequential(nn.Conv2d(64, 32, 3, 1, 1), nn.BatchNorm2d(32), nn.SiLU(),
+                                    nn.Conv2d(32, img_chan, 3, 1, 1))
   
-  def forward(self, x, t):
-    t = self.time_embed(t)                          # -> [B, 128]
-    
-    x = self.inp(x, t)                              # -> [B, 16, 32, 32]
-    
-    d1 = self.down1(x, t)                           # -> [B, 32, 16, 16]
-    d2 = self.down2(d1, t)                          # -> [B, 64, 8, 8]
-    d3 = self.down3(d2, t)                          # -> [B, 128, 4, 4]
+  def forward(self, x, t, labels):
+    B, C, H, W = x.shape
+    c_embed = self.class_emb(labels)[:, :, None, None].expand(-1, -1, H, W)  # -> [B, c_dim, H, W]
+    t_embed = self.time_emb(t)[:, :, None, None].expand(-1, -1, H, W)  # -> [B, t_dim, H, W]
 
-    u1 = self.up1(d3, t)                            # -> [B, 64, 8, 8]
-    u2 = self.up2(u1 + d2, t)                       # -> [B, 32, 16, 16]
-    u3 = self.up3(u2 + d1, t)                       # -> [B, 16, 32, 32]
+    x = torch.cat([x, c_embed, t_embed], dim=1)   # -> [B, C + c_dim + (t_dim or 0), H, W]
+    x = self.init_conv(x)                         # -> [B, 64, H, W]
 
-    t_expand = self.time_proj(t)[:, :, None, None]  # -> [B, 16]
-    out = self.out(u3 + x + t_expand)               # -> [B, 3, 32, 32]
-    return out
+    d1 = self.down1(x)                            # -> [B, 128, H/2, W/2]
+    d2 = self.down2(d1)                           # -> [B, 256, H/4, W/4]
+    d3 = self.down3(d2)                           # -> [B, 512, H/8, W/8]
+
+    u1 = self.up1(d3)                             # -> [B, 256, H/4, W/4]
+    u2 = self.up2(u1 + d2)                        # -> [B, 128, H/2, W/2]
+    u3 = self.up3(u2 + d1)                        # -> [B, 64, H, W]
+
+    velocity = self.final_conv(u3)                # -> [B, img_chan, H, W]
+    return velocity
 
 
-class FlowMatchingTrainer:
-  CONFIG = {'batch_size':        64,
-            'lr':                1e-4,
-            'n_training_steps':  80_000,
-            'sample_step':       10_000,
-            'data_dir':          '../../../gpt_tests/data/',
+class ClassConditionalFlowMatchingTrainer:
+  CONFIG = {'n_epochs':          200,
+            'sample_every':      10,
+            'batch_size':        128,
+            'lr':                2e-4,
+            'data_dir':          'data/',
             'save_dir':          'cifar10_exps/',
-            'exp_name':          'fm_base_alltime',
+            'exp_name':          'cc_fm',
             'log_dir':           'runs/',
             'save_model_train':  True,
             'use_tf_logger':     True,
-            'seed':              42,
-            'model_config':      {'time_dim': 128}}
+            'seed':              42}
   def __init__(self, config={}):
-    self.config = {**FlowMatchingTrainer.CONFIG, **config}
-
+    self.config = {**ClassConditionalFlowMatchingTrainer.CONFIG, **config}
+  
     self.device = torch.device('cuda' if torch.cuda.is_available() else
                                'mps' if torch.backends.mps.is_available() else
                                'cpu')
@@ -141,6 +111,8 @@ class FlowMatchingTrainer:
     self.set_dataloader()
     self.set_optimizers_n_criterions()
     self.dump_config()
+
+    self.cifar_classes = ['airplane', 'automobile', 'bird', 'cat', 'deer','dog', 'frog', 'horse', 'ship', 'truck']
   
   def dump_config(self):
     with open(os.path.join(self.config['save_dir'],
@@ -156,10 +128,11 @@ class FlowMatchingTrainer:
     if self.device.type == 'cuda':
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
-
+  
   def instanciate_model(self):
-    self.unet = Unet(self.config['model_config']).to(self.device)
-
+    self.unet = ClassConditionalFlowUnet().to(self.device)
+    self.n_trainable_params = sum(p.numel() for p in self.unet.parameters() if p.requires_grad)
+  
   def set_dataloader(self):
     os.makedirs(self.config['data_dir'], exist_ok=True)
 
@@ -169,13 +142,19 @@ class FlowMatchingTrainer:
     test_dataset = datasets.CIFAR10(root=self.config['data_dir'], train=False, download=True, transform=transform)
 
     self.train_dataloader = DataLoader(train_dataset, batch_size=self.config['batch_size'], shuffle=True,
-                                       num_workers=6, pin_memory=True if torch.cuda.is_available() else False)
+                                       num_workers=min(6, os.cpu_count()),
+                                       pin_memory=True if torch.cuda.is_available() else False)
     self.test_dataloader = DataLoader(test_dataset, batch_size=self.config['batch_size'], shuffle=True,
-                                      num_workers=6, pin_memory=True if torch.cuda.is_available() else False)
+                                      num_workers=min(6, os.cpu_count()),
+                                      pin_memory=True if torch.cuda.is_available() else False)
 
   def set_optimizers_n_criterions(self):
-    self.unet_optim = torch.optim.AdamW(self.unet.parameters(), lr=self.config['lr'], betas=(0.9, 0.95))
-    self.recon_criterion = nn.MSELoss()
+    self.optimizer = torch.optim.AdamW(self.unet.parameters(), lr=self.config['lr'],
+                                        weight_decay=1e-4, betas=(0.9, 0.999))
+    self.criterion = nn.MSELoss()
+    self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer,
+                                                                T_max=self.config['n_epochs'],
+                                                                eta_min=1e-6)
 
   def save_model(self):
     os.makedirs(self.config['save_dir'], exist_ok=True)
@@ -193,83 +172,104 @@ class FlowMatchingTrainer:
   
   @torch.no_grad()
   def show_sample(self, n=8, n_steps=100):
-    print('Loading model...')
-    self.load_model()
     print('Generating Images...')
-    real_imgs, _ = next(iter(self.train_dataloader))
+    real_imgs, class_labels = next(iter(self.train_dataloader))
     real_imgs = real_imgs.to(self.device)
-    mid_samples, samples = self.sample(n, n_steps=n_steps)
+    class_labels = class_labels.to(self.device)
+    mid_samples, samples = self.euler_sampling(n, n_steps=n_steps, class_labels=class_labels[:n])
     ori_sample = torch.cat([real_imgs[:n], mid_samples, samples], dim=0)
     show_sample_tag = f"show_sample_{self.config['exp_name']}"
     self.tf_logger.add_images(show_sample_tag, ori_sample)
     print(f'Images generated upload in tensorboard {show_sample_tag}')
 
   @torch.no_grad()
-  def sample(self, n_samples, n_steps=100):
+  def euler_sampling(self, n_samples, n_steps=100, class_labels=None):
     self.unet.eval()
 
     # Start from pure Gaussian noise
     xt = torch.randn(n_samples, 3, 32, 32).to(self.device)
 
     # Euler integration from t=0 → t=1
-    for i, t in enumerate(torch.linspace(0, 1, n_steps).to(self.device)):
-      tt = torch.full((n_samples,), t, device=self.device)
-      v = self.unet(xt, tt)  # vector field
-      xt = xt + (1 / n_steps) * v  # Euler update
+    dt = 1.0 / n_steps
+    for i, step in enumerate(range(n_steps)):
+      t = torch.full((n_samples, 1), step * dt, device=self.device)
+      v = self.unet(xt, t, labels=class_labels)  # vector field
+      xt = xt + v * dt  # Euler update
+      xt = torch.clamp(xt, 0.0, 1.0)
 
       if i % (n_steps//2) == 0:
-        mid_samples = xt.clamp(0, 1)
+        mid_samples = xt.clone()
 
-    # xt now contains generated samples in [0,1]
-    samples = xt.clamp(0, 1)
-    return mid_samples, samples
+    return mid_samples, xt
 
+  def flow_matching_loss(self, x1, class_labels=None):
+    # ---- Sample Gaussian noise as x0 ----
+    x0 = torch.randn_like(x1)
+
+    # ---- Sample t uniformly ----
+    t = torch.rand(x1.size(0), 1, device=self.device)
+    t_expand = t[:, :, None, None]
+
+    # ---- The target vector field (x1 - x0) ----
+    v_target = x1 - x0
+
+    # ---- Interpolate x_t = (1-t)x0 + t x1 ----
+    xt = (1 - t_expand) * x0 + t_expand * x1
+
+    # ---- Predict velocity and compute loss ----
+    v_pred = self.unet(xt, t, labels=class_labels)
+    return self.criterion(v_pred, v_target)
+  
+  def get_real_samples_by_class(self):
+    samples = list(range(10))
+    class_ok = [False] * 10
+    for images, labels in self.test_dataloader:
+      for img , label in zip(images, labels):
+        samples[label.item()] = img
+        class_ok[label.item()] = True
+      
+      if all(class_ok):
+        break
+    return samples
+  
   def train(self):
     self.unet.train()
 
     best_loss = torch.inf
 
-    pbar = tqdm(range(self.config['n_training_steps']))
-    for step in pbar:
-      # ---- Sample a batch of images ----
-      x1, _ = next(iter(self.train_dataloader))
-      x1 = x1.to(self.device)
+    fixed_imgs = torch.stack(self.get_real_samples_by_class()[:8]).to(self.device)
 
-      # ---- Sample Gaussian noise as x0 ----
-      x0 = torch.randn_like(x1)
+    pbar = tqdm(range(self.config['n_epochs']))
+    for epoch in pbar:
+      running_loss = 0.0
+      for real_imgs, class_labels in tqdm(self.train_dataloader, leave=False):
+        x1 = real_imgs.to(self.device)
+        class_labels = class_labels.to(self.device)
+        
+        loss = self.flow_matching_loss(x1, class_labels=class_labels)
 
-      # ---- The target vector field (x1 - x0) ----
-      target = x1 - x0
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
 
-      # ---- Sample t uniformly ----
-      t = torch.rand(x1.size(0), device=self.device)
-      t_expand = t[:, None, None, None]
-
-      # ---- Interpolate x_t = (1-t)x0 + t x1 ----
-      xt = (1 - t_expand) * x0 + t_expand * x1
-
-      pred = self.unet(xt, t)
-      loss = self.recon_criterion(pred, target)
-
-      self.unet_optim.zero_grad()
-      loss.backward()
-      self.unet_optim.step()
+        running_loss += loss.item()
+      
+      self.scheduler.step()
 
       if self.tf_logger is not None:
-        self.tf_logger.add_scalar('fm_loss', loss.item(), step)
+        self.tf_logger.add_scalar('fm_loss', running_loss / len(self.train_dataloader), epoch)
 
-        if step % self.config['sample_step'] == 0 or step == (self.config['n_training_steps'] - 1):
-          real_imgs = x1[:8]
-          mid_samples, samples = self.sample(8)
-          ori_sample = torch.cat([real_imgs, mid_samples, samples], dim=0)
-          self.tf_logger.add_images(f'generated_epoch_{step}', ori_sample)
+        if epoch % self.config['sample_every'] == 0 or epoch == (self.config['n_epochs'] - 1):
+          mid_samples, samples = self.euler_sampling(8, class_labels=torch.tensor(list(range(8)), dtype=torch.long, device=self.device))
+          ori_sample = torch.cat([fixed_imgs, mid_samples, samples], dim=0)
+          self.tf_logger.add_images(f'generated_epoch_{epoch}', ori_sample)
       
           if self.config['save_model_train'] and loss < best_loss:
             best_loss = loss.item()
             self.save_model()
 
-      pbar.set_postfix(loss=f'{loss.item():.4f}')
-
+      pbar.set_postfix(loss=f'{running_loss/len(self.train_dataloader):.4f}')
+  
   @torch.no_grad()
   def evaluate(self):
     pass
@@ -281,7 +281,7 @@ def run_all_experiments(trainers, args):
 
 def get_args():
   parser = argparse.ArgumentParser(description='Flow matching experiments')
-  parser.add_argument('--trainer', '-t', type=str, default='fm_base')
+  parser.add_argument('--trainer', '-t', type=str, default='ccfm')
   parser.add_argument('--run_all_exps', '-rae', action='store_true')
   parser.add_argument('--load_model', '-lm', action='store_true')
   parser.add_argument('--train_model', '-tm', action='store_true')
@@ -292,7 +292,7 @@ def get_args():
 
 
 if __name__ == '__main__':
-  trainers = {'fm_base': FlowMatchingTrainer}
+  trainers = {'ccfm': ClassConditionalFlowMatchingTrainer}
   args = get_args()
 
   if args.run_all_exps:
@@ -305,7 +305,7 @@ if __name__ == '__main__':
       trainer.load_model()
 
     if args.train_model:
-      print(f'Training model... ({trainers[args.trainer].__name__})')
+      print(f'Training model... ({trainers[args.trainer].__name__})({trainer.n_trainable_params=:,})')
       trainer.train()
     
     if args.eval_model:
@@ -314,6 +314,7 @@ if __name__ == '__main__':
     
     if args.show_sample:
       print(f'Generating samples... ({trainers[args.trainer].__name__})')
+      trainer.load_model()
       trainer.show_sample()
     
     if args.save_model:

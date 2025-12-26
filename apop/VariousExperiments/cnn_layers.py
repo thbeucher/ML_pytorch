@@ -44,12 +44,15 @@ class Critic(nn.Module):
 
 
 class CNNEncoder(nn.Module):
-  def __init__(self, *args, add_noise=False, noise_p=0.5, noise_std=0.1, add_attn=False, **kwargs):
+  def __init__(self, *args, add_noise=False, noise_p=0.5, noise_std=0.1, add_attn=False,
+               batch_norm_first=False, **kwargs):
     super().__init__()
     self.add_noise = add_noise
     self.add_attn = add_attn
 
-    self.down1 = nn.Sequential(nn.Conv2d(3, 64, 4, 2, 1), nn.ReLU(True))
+    self.down1 = nn.Sequential(nn.Conv2d(3, 64, 4, 2, 1),
+                               nn.BatchNorm2d(64) if batch_norm_first else nn.Identity(),
+                               nn.ReLU(True))
     self.down2 = nn.Sequential(nn.Conv2d(64, 128, 4, 2, 1), nn.BatchNorm2d(128), nn.ReLU(True))
     self.down3 = nn.Sequential(nn.Conv2d(128, 256, 4, 2, 1), nn.BatchNorm2d(256), nn.ReLU(True))
 
@@ -83,10 +86,14 @@ class CNNEncoder(nn.Module):
 
 
 class BigCNNBlock(nn.Module):
-  def __init__(self, in_c, out_c, se_ratio=4):
+  def __init__(self, in_c, out_c, se_ratio=4, batch_norm=True):
     super().__init__()
-    self.conv3 = nn.Sequential(nn.Conv2d(in_c, out_c, 3, 1, 1), nn.ReLU(True))
-    self.conv5 = nn.Sequential(nn.Conv2d(in_c, out_c, 5, 1, 2), nn.BatchNorm2d(out_c), nn.ReLU(True))
+    self.conv3 = nn.Sequential(nn.Conv2d(in_c, out_c, 3, 1, 1),
+                               nn.BatchNorm2d(out_c) if batch_norm else nn.Identity(),
+                               nn.ReLU(True))
+    self.conv5 = nn.Sequential(nn.Conv2d(in_c, out_c, 5, 1, 2),
+                               nn.BatchNorm2d(out_c) if batch_norm else nn.Identity(),
+                               nn.ReLU(True))
     self.convm = nn.Sequential(nn.Conv2d(out_c, out_c, 3, 1, 1), nn.BatchNorm2d(out_c), nn.ReLU(True))
     self.se = SEBlock(out_c, ratio=se_ratio)
     self.down = nn.Sequential(nn.Conv2d(out_c, out_c, 4, 2, 1), nn.ReLU(True))
@@ -102,7 +109,7 @@ class BigCNNBlock(nn.Module):
 class BigCNNEncoder(nn.Module):
   def __init__(self, *args, **kwargs):
     super().__init__()
-    self.down1 = BigCNNBlock(3, 64)
+    self.down1 = BigCNNBlock(3, 64, batch_norm=False)
     self.down2 = BigCNNBlock(64, 128)
     self.down3 = BigCNNBlock(128, 256)
   
@@ -160,11 +167,13 @@ class SEBlock(nn.Module):
   “Excitation”: Learn channel importance
   -> Forces the network to learn compact inter-channel dependencies
   '''
-  def __init__(self, n_channels, ratio=8):
+  def __init__(self, n_channels, ratio=8, inner_chan_min=8, bias=False):
     super().__init__()
+    inner_chan = max(n_channels // ratio, inner_chan_min)
     self.squeeze = nn.AdaptiveAvgPool2d(1)  # [B, C, H, W] -> [B, C, 1, 1]
-    self.excit = nn.Sequential(nn.Conv2d(n_channels, n_channels//ratio, 1), nn.ReLU(),
-                               nn.Conv2d(n_channels//ratio, n_channels, 1), nn.Sigmoid())
+    self.excit = nn.Sequential(nn.Conv2d(n_channels, inner_chan, 1, bias=bias), nn.ReLU(True),
+                               nn.Conv2d(inner_chan, n_channels, 1, bias=bias), nn.Sigmoid())
+  
   def forward(self, x):
     out = self.squeeze(x)    # [B, C, H, W] -> [B, C, 1, 1]
     excit = self.excit(out)  # [B, C, 1, 1] -> [B, C//ratio, 1, 1] -> [B, C, 1, 1]
@@ -218,6 +227,65 @@ class CNNDecoder(nn.Module):
     if return_intermediate:
       return u1, u2, u3
     return u3
+
+
+class ResidualFullBlock(nn.Module):
+  def __init__(self, in_chan, out_chan, batch_norm_first=True,
+               use_attn=True, attn_ratio=8,
+               pooling=False, pool_opt='cnn',      # 'cnn' or 'avg'
+               upscaling=False, upscale_opt='cnn'):  # 'cnn' or 'upsample'
+    super().__init__()
+    self.conv = nn.Sequential(nn.Conv2d(in_chan, out_chan, 3, 1, 1),
+                               nn.BatchNorm2d(out_chan) if batch_norm_first else nn.Identity(),
+                               nn.SiLU(),
+                               nn.Conv2d(out_chan, out_chan, 3, 1, 1),
+                               nn.BatchNorm2d(out_chan) if batch_norm_first else nn.Identity())
+    
+    self.skip_connection = nn.Conv2d(in_chan, out_chan, 1) if in_chan != out_chan else nn.Identity()
+    
+    self.use_attn = use_attn
+    if use_attn:
+      self.chan_attn = SEBlock(out_chan, ratio=attn_ratio)
+    
+    self.act = nn.SiLU()
+    
+    self.pooling = pooling
+    if pooling:
+      self.pool = nn.Sequential(nn.Conv2d(out_chan, out_chan, 4, 2, 1), nn.BatchNorm2d(out_chan), nn.SiLU())\
+        if pool_opt == 'cnn' else nn.AvgPool2d(2)
+    
+    self.upscaling = upscaling
+    if upscaling:
+      self.upscale = nn.Sequential(nn.ConvTranspose2d(out_chan, out_chan, 4, 2, 1), nn.BatchNorm2d(out_chan), nn.SiLU())\
+        if upscale_opt == 'cnn' else nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+  
+  def forward(self, x):                                # x: [B, Ci, H, W] | t: [B, time_dim]
+    out = self.conv(x)                                 # -> [B, Co, H, W]
+    if self.use_attn:
+      out = self.chan_attn(out)
+    out = self.act(out + self.skip_connection(x))
+    if self.pooling:
+      out = self.pool(out)                             # -> [B, Co, H/2, W/2]
+    if self.upscaling:
+      out = self.upscale(out)                          # -> [B, Co, H*2, W*2]
+    return out
+
+
+class EnhancedResidualFullBlock(nn.Module):
+  def __init__(self, in_chan, out_chan, batch_norm_first=True,
+               use_attn=True, attn_ratio=8,
+               pooling=False, pool_opt='cnn',
+               upscaling=False, upscale_opt='cnn'):
+    super().__init__()
+    self.rfb = ResidualFullBlock(in_chan=in_chan, out_chan=out_chan, batch_norm_first=batch_norm_first,
+                                 use_attn=use_attn, attn_ratio=attn_ratio,
+                                 pooling=pooling, pool_opt=pool_opt,
+                                 upscaling=upscaling, upscale_opt=upscale_opt)
+    self.refine = nn.Sequential(nn.Conv2d(out_chan, out_chan, 1), nn.BatchNorm2d(out_chan), nn.SiLU())
+
+  def forward(self, x):
+    out = self.rfb(x)
+    return self.refine(out)
 
 
 CNN_LAYERS = {'NoiseLayer': NoiseLayer, 'Critic': Critic, 'CNNEncoder': CNNEncoder, 'CNNDecoder': CNNDecoder,
