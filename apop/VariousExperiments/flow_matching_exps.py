@@ -53,7 +53,7 @@ class ClassConditionalFlowUnet(nn.Module):
 
     self.init_conv = nn.Conv2d(img_chan + class_emb_dim + time_emb_dim, 64, 3, 1, 1)
 
-    self.down1 = cl.EnhancedResidualFullBlock(64, 128, batch_norm_first=False, pooling=True)
+    self.down1 = cl.EnhancedResidualFullBlock(64, 128, batch_norm_first=True, pooling=True)
     self.down2 = cl.EnhancedResidualFullBlock(128, 256, pooling=True)
     self.down3 = cl.EnhancedResidualFullBlock(256, 512, pooling=True)
 
@@ -136,7 +136,9 @@ class ClassConditionalFlowMatchingTrainer:
   def set_dataloader(self):
     os.makedirs(self.config['data_dir'], exist_ok=True)
 
-    transform = transforms.Compose([transforms.ToTensor()])
+    transform = transforms.Compose([transforms.ToTensor(),
+                                    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))  # Maps [0,1] to [-1,1]
+                                    ])
 
     train_dataset = datasets.CIFAR10(root=self.config['data_dir'], train=True, download=True, transform=transform)
     test_dataset = datasets.CIFAR10(root=self.config['data_dir'], train=False, download=True, transform=transform)
@@ -177,6 +179,8 @@ class ClassConditionalFlowMatchingTrainer:
     real_imgs = real_imgs.to(self.device)
     class_labels = class_labels.to(self.device)
     mid_samples, samples = self.euler_sampling(n, n_steps=n_steps, class_labels=class_labels[:n])
+    real_imgs, mid_samples, samples = real_imgs.clamp(-1, 1), mid_samples.clamp(-1, 1), samples.clamp(-1, 1)
+    real_imgs, mid_samples, samples = (real_imgs+1)/2, (mid_samples+1)/2, (samples+1)/2 # denormalize [-1, 1]->[0, 1]
     ori_sample = torch.cat([real_imgs[:n], mid_samples, samples], dim=0)
     show_sample_tag = f"show_sample_{self.config['exp_name']}"
     self.tf_logger.add_images(show_sample_tag, ori_sample)
@@ -195,7 +199,7 @@ class ClassConditionalFlowMatchingTrainer:
       t = torch.full((n_samples, 1), step * dt, device=self.device)
       v = self.unet(xt, t, labels=class_labels)  # vector field
       xt = xt + v * dt  # Euler update
-      xt = torch.clamp(xt, 0.0, 1.0)
+      xt = torch.clamp(xt, -3.0, 3.0)
 
       if i % (n_steps//2) == 0:
         mid_samples = xt.clone()
@@ -261,6 +265,8 @@ class ClassConditionalFlowMatchingTrainer:
 
         if epoch % self.config['sample_every'] == 0 or epoch == (self.config['n_epochs'] - 1):
           mid_samples, samples = self.euler_sampling(8, class_labels=torch.tensor(list(range(8)), dtype=torch.long, device=self.device))
+          fixed_imgs, mid_samples, samples = fixed_imgs.clamp(-1, 1), mid_samples.clamp(-1, 1), samples.clamp(-1, 1)
+          fixed_imgs, mid_samples, samples = (fixed_imgs+1)/2, (mid_samples+1)/2, (samples+1)/2  # denormalize [-1, 1] -> [0, 1]
           ori_sample = torch.cat([fixed_imgs, mid_samples, samples], dim=0)
           self.tf_logger.add_images(f'generated_epoch_{epoch}', ori_sample)
       
