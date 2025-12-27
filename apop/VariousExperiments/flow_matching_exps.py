@@ -186,7 +186,7 @@ class ClassConditionalFlowMatchingTrainer:
       samples = self.euler_sampling(n, n_steps=n_steps, get_step=get_step, class_labels=class_labels[:n])
     else:
       samples = self.ode_sampling(class_labels[:n].cpu().numpy(), n_steps=n_steps)
-      samples = torch.from_numpy(samples[-1]).float().to(self.device)
+      samples = [torch.from_numpy(samples).float().to(self.device)]
 
     samples = [(s.clamp(-1, 1)+1)/2 for s in samples]  # denormalize [-1, 1] -> [0, 1]
     ori_sample = torch.cat([real_imgs[:n]] + samples, dim=0)
@@ -222,7 +222,8 @@ class ClassConditionalFlowMatchingTrainer:
     return samples + [xt]
   
   @torch.no_grad()
-  def ode_sampling(self, class_labels, n_steps=100):
+  def ode_sampling(self, class_labels, n_steps=10):
+    self.unet.eval()
     def ode_fn(t, x_flat):
       x = torch.tensor(x_flat, dtype=torch.float32, device=self.device).reshape(1, 3, 32, 32)
       t_tensor = torch.tensor([[t]], dtype=torch.float32, device=self.device)
@@ -233,7 +234,7 @@ class ClassConditionalFlowMatchingTrainer:
     
     generated = []
     for class_index in class_labels:
-      x0 = torch.randn(1, 3, 32, 32).squeeze(0).numpy().flatten()
+      x0 = torch.randn(1, 3, 32, 32).numpy().reshape(-1)
       t_eval = np.linspace(0, 1, n_steps)
       sol = solve_ivp(ode_fn, (0, 1), x0, t_eval=t_eval, method='RK45')
       x1 = sol.y[:, -1].reshape(3, 32, 32)
@@ -241,6 +242,16 @@ class ClassConditionalFlowMatchingTrainer:
     return np.array(generated)
 
   def flow_matching_loss(self, x1, class_labels=None):
+    '''
+    Training logic of flow model:
+    1) Sample random points from our source and target distributions, and pair the points (x1 and x0)
+    2) Sample random times between 0 and 1
+    3) Calculate the locations where these points would be at those times
+       if they were moving at constant velocity from source to target locations (interpolation, xt)
+    4) Calculate what velocity they would have at those locations if they were moving at constant velocity (x1-x0)
+    5) Train the network to predict these velocities – which will end up “seeking the mean”
+       when the network has to do the same for many, many points.
+    '''
     # ---- Sample Gaussian noise as x0 ----
     x0 = torch.randn_like(x1)
 
