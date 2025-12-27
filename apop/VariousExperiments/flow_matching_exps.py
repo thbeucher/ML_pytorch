@@ -1,4 +1,5 @@
 import os
+import copy
 import json
 import math
 import torch
@@ -91,6 +92,8 @@ class ClassConditionalFlowMatchingTrainer:
             'sample_every':      10,
             'batch_size':        128,
             'lr':                2e-4,
+            'n_epochs_reflow':   30,
+            'n_steps_reflow':    100,
             'data_dir':          'data/',
             'save_dir':          'cifar10_exps/',
             'exp_name':          'cc_fm_sinemb',
@@ -160,13 +163,18 @@ class ClassConditionalFlowMatchingTrainer:
                                                                 T_max=self.config['n_epochs'],
                                                                 eta_min=1e-6)
 
-  def save_model(self):
-    os.makedirs(self.config['save_dir'], exist_ok=True)
-    torch.save({'unet': self.unet.state_dict()},
-                os.path.join(self.config['save_dir'], self.config['exp_name'], f"{self.config['exp_name']}.pt"))
+  def save_model(self, save_as_reflow=False):
+    save_dir = os.path.join(self.config['save_dir'], self.config['exp_name'])
+    os.makedirs(save_dir, exist_ok=True)
+    reflow_suffix = '_reflow' if save_as_reflow else ''
+    path = os.path.join(save_dir, f"{self.config['exp_name']}{reflow_suffix}.pt")
+    torch.save({'unet': self.unet.state_dict()}, path)
 
-  def load_model(self):
-    path = os.path.join(self.config['save_dir'], self.config['exp_name'], f"{self.config['exp_name']}.pt")
+  def load_model(self, load_reflow=False):
+    reflow_suffix = '_reflow' if load_reflow else ''
+    path = os.path.join(self.config['save_dir'],
+                        self.config['exp_name'],
+                        f"{self.config['exp_name']}{reflow_suffix}.pt")
     if os.path.isfile(path):
       model = torch.load(path, map_location=self.device)
       self.unet.load_state_dict(model['unet'])
@@ -174,22 +182,41 @@ class ClassConditionalFlowMatchingTrainer:
     else:
       print(f'File {path} not found... No loaded model.')
   
+  def get_real_samples_by_class(self):
+    samples = list(range(10))
+    class_ok = [False] * 10
+    for images, labels in self.test_dataloader:
+      for img , label in zip(images, labels):
+        samples[label.item()] = img
+        class_ok[label.item()] = True
+      
+      if all(class_ok):
+        break
+    return samples
+  
   @torch.no_grad()
-  def show_sample(self, n=8, n_steps=10, get_step=5, solver='euler'):
-    print('Generating Images...')
+  def show_sample(self, n=8, n_steps=10, get_step=5, solver='euler', compare_n_steps=False, reflow=False):
+    print(f'Generating Images using {solver} sampler...')
+    samplers = {'euler': self.euler_sampling, 'RK45': self.rk45_sampling}
+    sampler = samplers[solver]
+    
     real_imgs, class_labels = next(iter(self.train_dataloader))
     real_imgs = (real_imgs.to(self.device)+1)/2
     class_labels = class_labels.to(self.device)
 
-    if solver == 'euler':
-      samples = self.euler_sampling(n, n_steps=n_steps, get_step=get_step, class_labels=class_labels[:n])
+    if compare_n_steps:
+      samples = []
+      print('Comparing generation using those number of steps: [1, 2, 4, 6, 8, 10, 20]')
+      for n_steps in [1, 2, 4, 6, 8, 10, 20]:
+        samples.append(sampler(n, n_steps=n_steps, get_step=30, class_labels=class_labels[:n])[-1])
     else:
-      samples = self.rk45_sampling(n, n_steps=n_steps, get_step=get_step, class_labels=class_labels[:n])
+      samples = sampler(n, n_steps=n_steps, get_step=get_step, class_labels=class_labels[:n])
 
     samples = [(s.clamp(-1, 1)+1)/2 for s in samples]  # denormalize [-1, 1] -> [0, 1]
     ori_sample = torch.cat([real_imgs[:n]] + samples, dim=0)
 
-    show_sample_tag = f"show_sample_{solver}_{self.config['exp_name']}"
+    reflow_suffix = '_reflow' if reflow else ''
+    show_sample_tag = f"show_sample_{solver}_{self.config['exp_name']}{reflow_suffix}"
     self.tf_logger.add_images(show_sample_tag, ori_sample)
 
     path = os.path.join(self.config['save_dir'], self.config['exp_name'], 'samples/')
@@ -216,7 +243,7 @@ class ClassConditionalFlowMatchingTrainer:
       if clamp:
         x = torch.clamp(x, -3.0, 3.0)
 
-      if i % get_step == 0:
+      if i % get_step == 0 and n_steps > 1:
         samples.append(x.clone())
 
     return samples + [x]
@@ -268,12 +295,12 @@ class ClassConditionalFlowMatchingTrainer:
       if clamp:
         x = torch.clamp(x, -3.0, 3.0)
       
-      if i % get_step == 0:
+      if i % get_step == 0 and n_steps > 1:
         samples.append(x.clone())
 
     return samples + [x]
   
-  def flow_matching_loss(self, x1, class_labels=None):
+  def flow_matching_loss(self, x1, class_labels=None, reflow=False):
     '''
     Training logic of flow model:
     1) Sample random points from our source and target distributions, and pair the points (x1 and x0)
@@ -298,27 +325,32 @@ class ClassConditionalFlowMatchingTrainer:
     xt = (1 - t_expand) * x0 + t_expand * x1
 
     # ---- Predict velocity and compute loss ----
-    v_pred = self.unet(xt, t, labels=class_labels)
+    model = self.reflow if reflow else self.unet
+    v_pred = model(xt, t, labels=class_labels)
     return self.criterion(v_pred, v_target)
   
-  def get_real_samples_by_class(self):
-    samples = list(range(10))
-    class_ok = [False] * 10
-    for images, labels in self.test_dataloader:
-      for img , label in zip(images, labels):
-        samples[label.item()] = img
-        class_ok[label.item()] = True
-      
-      if all(class_ok):
-        break
-    return samples
+  def train_log_n_save(self, fixed_imgs, epoch, best_loss, loss, reflow=False):
+    if self.tf_logger is not None:
+      reflow_suffix = '_reflow' if reflow else ''
+      self.tf_logger.add_scalar(f'fm_loss{reflow_suffix}', loss, epoch)
+
+      if epoch % self.config['sample_every'] == 0 or epoch == (self.config['n_epochs'] - 1):
+        samples = self.euler_sampling(8, class_labels=torch.tensor(list(range(8)), dtype=torch.long, device=self.device))
+        samples = (samples[-1].clamp(-1, 1) + 1) / 2  # clamp and denormalize [-1, 1] -> [0, 1]
+        ori_sample = torch.cat([fixed_imgs, samples], dim=0)
+        self.tf_logger.add_images(f'generated_epoch_{epoch}{reflow_suffix}', ori_sample)
+    
+        if self.config['save_model_train'] and loss < best_loss:
+          best_loss = loss
+          self.save_model(save_as_reflow=reflow)
+    return best_loss
   
   def train(self):
     self.unet.train()
 
     best_loss = torch.inf
 
-    fixed_imgs = (torch.stack(self.get_real_samples_by_class()[:8]).to(self.device)+1)/2
+    fixed_imgs = (torch.stack(self.get_real_samples_by_class()[:8]).to(self.device) + 1) / 2
 
     pbar = tqdm(range(self.config['n_epochs']))
     for epoch in pbar:
@@ -337,22 +369,54 @@ class ClassConditionalFlowMatchingTrainer:
       
       self.scheduler.step()
 
-      if self.tf_logger is not None:
-        self.tf_logger.add_scalar('fm_loss', running_loss / len(self.train_dataloader), epoch)
+      epoch_loss = running_loss / len(self.train_dataloader)
 
-        if epoch % self.config['sample_every'] == 0 or epoch == (self.config['n_epochs'] - 1):
-          mid_samples, samples = self.euler_sampling(8, class_labels=torch.tensor(list(range(8)), dtype=torch.long, device=self.device))
-          mid_samples, samples = mid_samples.clamp(-1, 1), samples.clamp(-1, 1)
-          mid_samples, samples = (mid_samples+1)/2, (samples+1)/2  # denormalize [-1, 1] -> [0, 1]
-          ori_sample = torch.cat([fixed_imgs, mid_samples, samples], dim=0)
-          self.tf_logger.add_images(f'generated_epoch_{epoch}', ori_sample)
-      
-          if self.config['save_model_train'] and loss < best_loss:
-            best_loss = loss.item()
-            self.save_model()
+      best_loss = self.train_log_n_save(fixed_imgs, epoch, best_loss, epoch_loss)
 
-      pbar.set_postfix(loss=f'{running_loss/len(self.train_dataloader):.4f}')
+      pbar.set_postfix(loss=f'{epoch_loss:.4f}')
   
+  def train_reflow(self):
+    '''
+    Reflow (Rectified Flow) does self-distillation:
+    1) Start with a pretrained flow model
+    2) Sample data using this frozen model to obtain x1
+    3) Train a new model to match the same straight-line velocity field: v(xt, t) = x1 - x0
+    '''
+    self.reflow = copy.deepcopy(self.unet)
+    self.reflow.train()
+
+    best_loss = torch.inf
+
+    fixed_imgs = (torch.stack(self.get_real_samples_by_class()[:8]).to(self.device) + 1) / 2
+
+    n_classes = len(self.cifar_classes)
+    batch_size = self.config['batch_size']
+
+    pbar = tqdm(range(self.config['n_epochs_reflow']))
+    for epoch in pbar:
+      running_loss = 0.0
+      for _ in tqdm(range(self.config['n_steps_reflow']), leave=False):
+        class_labels = torch.arange(n_classes, device=self.device).repeat(batch_size // 10 + 1)[:batch_size].long()
+
+        samples = self.rk45_sampling(batch_size, n_steps=4, class_labels=class_labels)
+        x1 = samples[-1].detach()
+        
+        loss = self.flow_matching_loss(x1, class_labels=class_labels, reflow=True)
+
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+
+        running_loss += loss.item()
+
+      epoch_loss = running_loss / len(self.train_dataloader)
+
+      best_loss = self.train_log_n_save(fixed_imgs, epoch, best_loss, epoch_loss, reflow=True)
+
+      pbar.set_postfix(loss=f'{epoch_loss:.4f}')
+    
+    self.unet = self.reflow  # Replace the teacher with the student
+
   @torch.no_grad()
   def evaluate(self):
     pass
@@ -371,6 +435,9 @@ def get_args():
   parser.add_argument('--eval_model', '-em', action='store_true')
   parser.add_argument('--save_model', '-sm', action='store_true')
   parser.add_argument('--show_sample', '-ss', action='store_true')
+  parser.add_argument('--compare_nsteps', '-cn', action='store_true')
+  parser.add_argument('--train_reflow', '-tr', action='store_true')
+  parser.add_argument('--load_reflow', '-lr', action='store_true')
   parser.add_argument('--n_steps', '-ns', type=int, default=10, help='Number of denoising steps')
   parser.add_argument('--get_step', '-gs', type=int, default=5, help='Get intermediate states during sampling')
   parser.add_argument('--ode_solver', '-os', type=str, default='euler', choices=['euler', 'RK45'])
@@ -385,33 +452,42 @@ if __name__ == '__main__':
     run_all_experiments(trainers, args)
   else:
     trainer = trainers[args.trainer]()
+    n_params = trainer.n_trainable_params
+    trainer_name = trainers[args.trainer].__name__
 
     if args.load_model:
-      print(f'Loading model... ({trainers[args.trainer].__name__})')
-      trainer.load_model()
+      print(f'Loading model... ({trainer_name})')
+      trainer.load_model(load_reflow=args.load_reflow)
 
     if args.train_model:
-      print(f'Training model... ({trainers[args.trainer].__name__})({trainer.n_trainable_params=:,})')
+      print(f'Training model... ({trainer_name})({n_params=:,})')
       trainer.train()
     
+    if args.train_reflow:
+      print(f'Training ReFlow model (Flow model should have been trained first) ({trainer_name}) ({n_params=:,})')
+      trainer.load_model()  # Load the teacher
+      trainer.train_reflow()
+    
     if args.eval_model:
-      print(f'Evaluating model... ({trainers[args.trainer].__name__})')
+      print(f'Evaluating model... ({trainer_name})')
       trainer.evaluate()
     
     if args.show_sample:
-      print(f'Generating samples... ({trainers[args.trainer].__name__})')
-      trainer.load_model()
-      trainer.show_sample(n_steps=args.n_steps, get_step=args.get_step, solver=args.ode_solver)
+      print(f'Generating samples... ({trainer_name})')
+      trainer.load_model(load_reflow=args.load_reflow)
+      trainer.show_sample(n_steps=args.n_steps, get_step=args.get_step, solver=args.ode_solver,
+                          compare_n_steps=args.compare_nsteps, reflow=args.load_reflow)
     
     if args.save_model:
-      print(f'Saving model... ({trainers[args.trainer].__name__})')
+      print(f'Saving model... ({trainer_name})')
       trainer.save_model()
   
 # =============================================================================================== #
-# Papers to read on Flow Matching                                                                 #
+# Papers to read on Flow Matching:                                                                #
 # Guided Flows for Generative Modeling and Decision Making (https://arxiv.org/pdf/2311.13443v2)   #
 # FLOW GENERATOR MATCHING (https://arxiv.org/pdf/2410.19310)                                      #
 # Contrastive Flow Matching (https://arxiv.org/pdf/2506.05350)                                    #
 # Efficient Flow Matching using Latent Variables (https://arxiv.org/pdf/2505.04486)               #
 # https://rfangit.github.io/blog/2025/optimal_flow_matching/                                      #
+# https://drscotthawley.github.io/blog/posts/FlowModels.html                                      #
 # =============================================================================================== #
