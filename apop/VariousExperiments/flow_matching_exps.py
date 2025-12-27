@@ -9,7 +9,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from tqdm import tqdm
-from scipy.integrate import solve_ivp
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from torchvision import datasets, transforms, utils
@@ -185,8 +184,7 @@ class ClassConditionalFlowMatchingTrainer:
     if solver == 'euler':
       samples = self.euler_sampling(n, n_steps=n_steps, get_step=get_step, class_labels=class_labels[:n])
     else:
-      samples = self.ode_sampling(class_labels[:n].cpu().numpy(), n_steps=n_steps)
-      samples = [torch.from_numpy(samples).float().to(self.device)]
+      samples = self.rk45_sampling(n, n_steps=n_steps, get_step=get_step, class_labels=class_labels[:n])
 
     samples = [(s.clamp(-1, 1)+1)/2 for s in samples]  # denormalize [-1, 1] -> [0, 1]
     ori_sample = torch.cat([real_imgs[:n]] + samples, dim=0)
@@ -201,46 +199,80 @@ class ClassConditionalFlowMatchingTrainer:
     print(f'Images generated upload in tensorboard {show_sample_tag}')
 
   @torch.no_grad()
-  def euler_sampling(self, n_samples, n_steps=10, get_step=5, class_labels=None):
+  def euler_sampling(self, n_samples, n_steps=10, get_step=5, class_labels=None, clamp=True):
     self.unet.eval()
     samples = []
 
     # Start from pure Gaussian noise
-    xt = torch.randn(n_samples, 3, 32, 32).to(self.device)
+    x = torch.randn(n_samples, 3, 32, 32).to(self.device)
 
     # Euler integration from t=0 → t=1
     dt = 1.0 / n_steps
     for i, step in enumerate(range(n_steps)):
       t = torch.full((n_samples, 1), step * dt, device=self.device)
-      v = self.unet(xt, t, labels=class_labels)  # vector field
-      xt = xt + v * dt  # Euler update
-      xt = torch.clamp(xt, -3.0, 3.0)
+      v = self.unet(x, t, labels=class_labels)  # vector field
+      x = x + v * dt  # Euler update
+
+      if clamp:
+        x = torch.clamp(x, -3.0, 3.0)
 
       if i % get_step == 0:
-        samples.append(xt.clone())
+        samples.append(x.clone())
 
-    return samples + [xt]
+    return samples + [x]
   
   @torch.no_grad()
-  def ode_sampling(self, class_labels, n_steps=10):
-    self.unet.eval()
-    def ode_fn(t, x_flat):
-      x = torch.tensor(x_flat, dtype=torch.float32, device=self.device).reshape(1, 3, 32, 32)
-      t_tensor = torch.tensor([[t]], dtype=torch.float32, device=self.device)
-      c_tensor = torch.tensor([class_index], dtype=torch.long, device=self.device)
-      with torch.no_grad():
-        v = self.unet(x, t_tensor, c_tensor)
-      return v.cpu().numpy().flatten()
-    
-    generated = []
-    for class_index in class_labels:
-      x0 = torch.randn(1, 3, 32, 32).numpy().reshape(-1)
-      t_eval = np.linspace(0, 1, n_steps)
-      sol = solve_ivp(ode_fn, (0, 1), x0, t_eval=t_eval, method='RK45')
-      x1 = sol.y[:, -1].reshape(3, 32, 32)
-      generated.append(x1)
-    return np.array(generated)
+  def rk45_step(self, f, t, x, dt):
+    """
+    One Dormand–Prince RK45 step.
+    Args:
+        f : function f(t, x) -> dx/dt
+        t : scalar float tensor
+        x : tensor (B, C, H, W)
+        dt : step size (float)
+    """
+    k1 = f(t, x)
+    k2 = f(t + dt*1/5, x + dt*(1/5)*k1)
+    k3 = f(t + dt*3/10, x + dt*(3/40*k1 + 9/40*k2))
+    k4 = f(t + dt*4/5, x + dt*(44/45*k1 - 56/15*k2 + 32/9*k3))
+    k5 = f(t + dt*8/9, x + dt*(19372/6561*k1 - 25360/2187*k2 + 64448/6561*k3 - 212/729*k4))
+    k6 = f(t + dt, x + dt*(9017/3168*k1 - 355/33*k2 + 46732/5247*k3 + 49/176*k4 - 5103/18656*k5))
 
+    # 5th-order solution
+    x_next = x + dt * (
+        35/384*k1 + 500/1113*k3 + 125/192*k4
+        - 2187/6784*k5 + 11/84*k6
+    )
+
+    return x_next
+  
+  @torch.no_grad()
+  def rk45_sampling(self, n_samples, n_steps=10, get_step=5, class_labels=None, clamp=True):
+    self.unet.eval()
+
+    def ode_fn(t, x):
+      t_tensor = torch.full((x.shape[0], 1), t, device=self.device)
+      return self.unet(x, t_tensor, labels=class_labels)
+
+    # Initial noise
+    x = torch.randn(n_samples, 3, 32, 32, device=self.device)
+
+    t = 0.0
+    dt = 1.0 / n_steps
+
+    samples = []
+    for i in range(n_steps):
+      x = self.rk45_step(ode_fn, t, x, dt)
+      t += dt
+
+      if clamp:
+        x = torch.clamp(x, -3.0, 3.0)
+      
+      if i % get_step == 0:
+        samples.append(x.clone())
+
+    return samples + [x]
+  
   def flow_matching_loss(self, x1, class_labels=None):
     '''
     Training logic of flow model:
