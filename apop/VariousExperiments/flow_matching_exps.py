@@ -55,7 +55,7 @@ class ClassConditionalFlowUnet(nn.Module):
 
     self.init_conv = nn.Conv2d(img_chan + class_emb_dim + time_emb_dim, 64, 3, 1, 1)
 
-    self.down1 = cl.EnhancedResidualFullBlock(64, 128, batch_norm_first=True, pooling=True)
+    self.down1 = cl.EnhancedResidualFullBlock(64, 128, pooling=True)
     self.down2 = cl.EnhancedResidualFullBlock(128, 256, pooling=True)
     self.down3 = cl.EnhancedResidualFullBlock(256, 512, pooling=True)
 
@@ -96,7 +96,7 @@ class ClassConditionalFlowMatchingTrainer:
             'n_steps_reflow':    100,
             'data_dir':          'data/',
             'save_dir':          'cifar10_exps/',
-            'exp_name':          'cc_fm_sinemb',
+            'exp_name':          'cc_fm_sinemb_base',
             'log_dir':           'runs/',
             'save_model_train':  True,
             'use_tf_logger':     True,
@@ -155,20 +155,22 @@ class ClassConditionalFlowMatchingTrainer:
                                       num_workers=min(6, os.cpu_count()),
                                       pin_memory=True if torch.cuda.is_available() else False)
 
-  def set_optimizers_n_criterions(self):
-    self.optimizer = torch.optim.AdamW(self.unet.parameters(), lr=self.config['lr'],
-                                        weight_decay=1e-4, betas=(0.9, 0.999))
+  def set_optimizers_n_criterions(self, reflow=False):
+    model = self.reflow if reflow else self.unet
+    self.optimizer = torch.optim.AdamW(model.parameters(), lr=self.config['lr'],
+                                       weight_decay=1e-4, betas=(0.9, 0.999))
     self.criterion = nn.MSELoss()
     self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer,
                                                                 T_max=self.config['n_epochs'],
                                                                 eta_min=1e-6)
 
-  def save_model(self, save_as_reflow=False):
+  def save_model(self, reflow=False):
     save_dir = os.path.join(self.config['save_dir'], self.config['exp_name'])
     os.makedirs(save_dir, exist_ok=True)
-    reflow_suffix = '_reflow' if save_as_reflow else ''
+    reflow_suffix = '_reflow' if reflow else ''
     path = os.path.join(save_dir, f"{self.config['exp_name']}{reflow_suffix}.pt")
-    torch.save({'unet': self.unet.state_dict()}, path)
+    model = self.reflow if reflow else self.unet
+    torch.save({'unet': model.state_dict()}, path)
 
   def load_model(self, load_reflow=False):
     reflow_suffix = '_reflow' if load_reflow else ''
@@ -342,7 +344,7 @@ class ClassConditionalFlowMatchingTrainer:
     
         if self.config['save_model_train'] and loss < best_loss:
           best_loss = loss
-          self.save_model(save_as_reflow=reflow)
+          self.save_model(reflow=reflow)
     return best_loss
   
   def train(self):
@@ -383,6 +385,7 @@ class ClassConditionalFlowMatchingTrainer:
     3) Train a new model to match the same straight-line velocity field: v(xt, t) = x1 - x0
     '''
     self.reflow = copy.deepcopy(self.unet)
+    self.set_optimizers_n_criterions(reflow=True)
     self.reflow.train()
 
     best_loss = torch.inf
@@ -430,6 +433,7 @@ def get_args():
   parser = argparse.ArgumentParser(description='Flow matching experiments')
   parser.add_argument('--trainer', '-t', type=str, default='ccfm')
   parser.add_argument('--run_all_exps', '-rae', action='store_true')
+  parser.add_argument('--exp_name', '-en', type=str, default='cc_fm_sinemb_base')
   parser.add_argument('--load_model', '-lm', action='store_true')
   parser.add_argument('--train_model', '-tm', action='store_true')
   parser.add_argument('--eval_model', '-em', action='store_true')
@@ -451,7 +455,7 @@ if __name__ == '__main__':
   if args.run_all_exps:
     run_all_experiments(trainers, args)
   else:
-    trainer = trainers[args.trainer]()
+    trainer = trainers[args.trainer]({'exp_name': args.exp_name})
     n_params = trainer.n_trainable_params
     trainer_name = trainers[args.trainer].__name__
 
