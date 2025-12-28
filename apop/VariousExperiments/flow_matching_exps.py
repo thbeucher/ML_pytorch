@@ -47,41 +47,47 @@ class TimeEmbedding(nn.Module):
 
 
 class ClassConditionalFlowUnet(nn.Module):
-  def __init__(self, img_chan=3, time_emb_dim=64, n_classes=10, class_emb_dim=32):
+  def __init__(self, img_chan=3, time_emb_dim=64, n_classes=10, class_emb_dim=32, cond_to_all_layers=True):
     super().__init__()
     # self.time_emb = nn.Sequential(nn.Linear(1, time_emb_dim), nn.SiLU(), nn.Linear(time_emb_dim, time_emb_dim))
     self.time_emb = nn.Sequential(TimeEmbedding(time_emb_dim), nn.Linear(time_emb_dim, time_emb_dim), nn.SiLU())
     self.class_emb = nn.Sequential(nn.Embedding(n_classes, class_emb_dim), nn.Linear(class_emb_dim, class_emb_dim))
 
-    self.init_conv = nn.Conv2d(img_chan + class_emb_dim + time_emb_dim, 64, 3, 1, 1)
+    self.cond_to_all_layers = cond_to_all_layers
+    cond_dim = class_emb_dim + time_emb_dim
+    self.init_conv = nn.Conv2d(img_chan + cond_dim, 64, 3, 1, 1)
 
-    self.down1 = cl.EnhancedResidualFullBlock(64, 128, pooling=True)
-    self.down2 = cl.EnhancedResidualFullBlock(128, 256, pooling=True)
-    self.down3 = cl.EnhancedResidualFullBlock(256, 512, pooling=True)
+    self.down1 = cl.EnhancedResidualFullBlock(64, 128, pooling=True, cond_emb=cond_dim)
+    self.down2 = cl.EnhancedResidualFullBlock(128, 256, pooling=True, cond_emb=cond_dim)
+    self.down3 = cl.EnhancedResidualFullBlock(256, 512, pooling=True, cond_emb=cond_dim)
 
-    self.up1 = cl.EnhancedResidualFullBlock(512, 256, upscaling=True)
-    self.up2 = cl.EnhancedResidualFullBlock(256, 128, upscaling=True)
-    self.up3 = cl.EnhancedResidualFullBlock(128, 64, upscaling=True)
+    self.up1 = cl.EnhancedResidualFullBlock(512, 256, upscaling=True, cond_emb=cond_dim)
+    self.up2 = cl.EnhancedResidualFullBlock(256, 128, upscaling=True, cond_emb=cond_dim)
+    self.up3 = cl.EnhancedResidualFullBlock(128, 64, upscaling=True, cond_emb=cond_dim)
     
     self.final_conv = nn.Sequential(nn.Conv2d(64, 32, 3, 1, 1), nn.BatchNorm2d(32), nn.SiLU(),
                                     nn.Conv2d(32, img_chan, 3, 1, 1))
   
   def forward(self, x, t, labels):
     B, C, H, W = x.shape
-    c_embed = self.class_emb(labels)[:, :, None, None].expand(-1, -1, H, W)  # -> [B, c_dim, H, W]
-    # t_embed = self.time_emb(t)[:, :, None, None].expand(-1, -1, H, W)  # -> [B, t_dim, H, W]
-    t_embed = self.time_emb(t.squeeze(-1))[:, :, None, None].expand(-1, -1, H, W)  # when using sinusoidal embedding
+    c_embed = self.class_emb(labels)              # -> [B, c_dim]
+    # t_embed = self.time_emb(t)                  # -> [B, t_dim]
+    t_embed = self.time_emb(t.squeeze(-1))        # when using sinusoidal embedding
+    cond_embed = torch.cat([c_embed, t_embed], dim=1)
 
-    x = torch.cat([x, c_embed, t_embed], dim=1)   # -> [B, C + c_dim + (t_dim or 0), H, W]
+    x = torch.cat([x, cond_embed[:, :, None, None].expand(-1, -1, H, W)], dim=1)
     x = self.init_conv(x)                         # -> [B, 64, H, W]
 
-    d1 = self.down1(x)                            # -> [B, 128, H/2, W/2]
-    d2 = self.down2(d1)                           # -> [B, 256, H/4, W/4]
-    d3 = self.down3(d2)                           # -> [B, 512, H/8, W/8]
+    if not self.cond_to_all_layers:
+      cond_embed = None
 
-    u1 = self.up1(d3)                             # -> [B, 256, H/4, W/4]
-    u2 = self.up2(u1 + d2)                        # -> [B, 128, H/2, W/2]
-    u3 = self.up3(u2 + d1)                        # -> [B, 64, H, W]
+    d1 = self.down1(x, c=cond_embed)              # -> [B, 128, H/2, W/2]
+    d2 = self.down2(d1, c=cond_embed)             # -> [B, 256, H/4, W/4]
+    d3 = self.down3(d2, c=cond_embed)             # -> [B, 512, H/8, W/8]
+
+    u1 = self.up1(d3, c=cond_embed)               # -> [B, 256, H/4, W/4]
+    u2 = self.up2(u1 + d2, c=cond_embed)          # -> [B, 128, H/2, W/2]
+    u3 = self.up3(u2 + d1, c=cond_embed)          # -> [B, 64, H, W]
 
     velocity = self.final_conv(u3)                # -> [B, img_chan, H, W]
     return velocity
