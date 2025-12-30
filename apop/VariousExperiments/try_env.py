@@ -38,7 +38,7 @@ while running:
                 print(f"Action Taken: {action}, Reward: {reward:.4f}")
 
                 if terminated or truncated:
-                    obs, info = env.reset()  # Reset environment if episode ends
+                    obs, info = env.reset(options={'only_target': True})  # Reset environment if episode ends
 
 # Cleanup
 env.close()

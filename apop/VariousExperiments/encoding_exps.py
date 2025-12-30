@@ -162,8 +162,8 @@ class CNNAETrainer:
     np.random.seed(self.config['seed'])
     random.seed(self.config['seed'])
     if self.device.type == 'cuda':
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
+      torch.backends.cudnn.deterministic = True
+      torch.backends.cudnn.benchmark = False
 
   def instanciate_model(self):
     self.auto_encoder = CNNAE(self.config['model_config']).to(self.device)

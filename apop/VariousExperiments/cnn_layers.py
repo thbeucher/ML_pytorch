@@ -47,40 +47,28 @@ class CNNEncoder(nn.Module):
   def __init__(self, *args, add_noise=False, noise_p=0.5, noise_std=0.1, add_attn=False,
                norm_first=False, **kwargs):
     super().__init__()
-    self.add_noise = add_noise
-    self.add_attn = add_attn
-
     self.down1 = nn.Sequential(nn.Conv2d(3, 64, 4, 2, 1),
                                nn.BatchNorm2d(64) if norm_first else nn.Identity(),
                                nn.ReLU(True))
     self.down2 = nn.Sequential(nn.Conv2d(64, 128, 4, 2, 1), nn.BatchNorm2d(128), nn.ReLU(True))
     self.down3 = nn.Sequential(nn.Conv2d(128, 256, 4, 2, 1), nn.BatchNorm2d(256), nn.ReLU(True))
 
-    if add_noise:
-      self.noise_layer = NoiseLayer(p=noise_p, std=noise_std)
+    self.noise_layer = NoiseLayer(p=noise_p, std=noise_std) if add_noise else nn.Identity()
     
     if add_attn:
       self.attn1 = ViT(image_size=16, patch_size=4, dim=64, depth=2, heads=4, mlp_dim=128, dim_head=32, channels=64)
       self.attn2 = ViT(image_size=8, patch_size=4, dim=64, depth=2, heads=4, mlp_dim=128, dim_head=32, channels=128)
+    else:
+      self.attn1, self.attn2 = nn.Identity(), nn.Identity()
 
   def forward(self, x):
-    d1 = self.down1(x)  # [B, 3, 32, 32] -> [B, 64, 16, 16]
-    if self.add_noise:
-      d1 = self.noise_layer(d1)
+    d1 = self.noise_layer(self.down1(x))  # [B, 3, 32, 32] -> [B, 64, 16, 16]
+    d1 = self.attn1(d1)
     
-    if self.add_attn:
-      d1 = self.attn1(d1)
+    d2 = self.noise_layer(self.down2(d1))  #               -> [B, 128, 8, 8]
+    d2 = self.attn2(d2)
     
-    d2 = self.down2(d1)  #               -> [B, 128, 8, 8]
-    if self.add_noise:
-      d2 = self.noise_layer(d2)
-    
-    if self.add_attn:
-      d2 = self.attn2(d2)
-    
-    d3 = self.down3(d2)  #               -> [B, 256, 4, 4]
-    if self.add_noise:
-      d3 = self.noise_layer(d3)
+    d3 = self.noise_layer(self.down3(d2))  #               -> [B, 256, 4, 4]
     
     return d1, d2, d3
 
@@ -204,21 +192,22 @@ class CNNDecoder(nn.Module):
     self.up2 = nn.Sequential(nn.ConvTranspose2d(128, 64, 4, 2, 1), nn.BatchNorm2d(64), nn.ReLU(True))
     self.up3 = nn.Sequential(nn.ConvTranspose2d(64, 3, 4, 2, 1), nn.Sigmoid())
 
-    self.add_attn = add_attn
     if add_attn:
       self.attn1 = ViT(image_size=8, patch_size=4, dim=64, depth=2, heads=4, mlp_dim=128, dim_head=32, channels=128)
       self.attn2 = ViT(image_size=16, patch_size=4, dim=64, depth=2, heads=4, mlp_dim=128, dim_head=32, channels=64)
+    else:
+      self.attn1, self.attn2 = nn.Identity(), nn.Identity()
   
   def forward(self, d3, d2=None, d1=None, return_intermediate=False):
     u1 = self.up1(d3)   #                -> [B, 128, 8, 8]
-    if self.add_attn:
-      u1 = self.attn1(u1)
+    u1 = self.attn1(u1)
+
     if d2 is not None:  # skip connection
       u1 = u1 + d2
 
     u2 = self.up2(u1)   #                -> [B, 64, 16, 16]
-    if self.add_attn:
-      u2 = self.attn2(u2)
+    u2 = self.attn2(u2)
+
     if d1 is not None:  # skip connection
       u2 = u2 + d1
 
@@ -230,6 +219,8 @@ class CNNDecoder(nn.Module):
 
 
 class FiLM(nn.Module):
+  # FiLM: Visual Reasoning with a General Conditioning Layer
+  # https://arxiv.org/pdf/1709.07871
   def __init__(self, cond_dim, channels):
     super().__init__()
     self.mlp = nn.Sequential(nn.SiLU(), nn.Linear(cond_dim, 2 * channels))
@@ -256,39 +247,36 @@ class ResidualFullBlock(nn.Module):
                                nn.Conv2d(out_chan, out_chan, 3, 1, 1),
                                nn.BatchNorm2d(out_chan) if norm_first else nn.Identity())
     
-    self.cond_emb = cond_emb
-    if cond_emb is not None:
-      self.film = FiLM(cond_emb, out_chan)
+    self.film = FiLM(cond_emb, out_chan) if cond_emb is not None else nn.Identity()
     
     self.skip_connection = nn.Conv2d(in_chan, out_chan, 1) if in_chan != out_chan else nn.Identity()
     
-    self.use_attn = use_attn
-    if use_attn:
-      self.chan_attn = SEBlock(out_chan, ratio=attn_ratio)
+    self.chan_attn = SEBlock(out_chan, ratio=attn_ratio) if use_attn else nn.Identity()
     
     self.act = nn.SiLU()
     
-    self.pooling = pooling
     if pooling:
       self.pool = nn.Sequential(nn.Conv2d(out_chan, out_chan, 4, 2, 1), nn.BatchNorm2d(out_chan), nn.SiLU())\
         if pool_opt == 'cnn' else nn.AvgPool2d(2)
+    else:
+      self.pool = nn.Identity()
     
-    self.upscaling = upscaling
     if upscaling:
       self.upscale = nn.Sequential(nn.ConvTranspose2d(out_chan, out_chan, 4, 2, 1), nn.BatchNorm2d(out_chan), nn.SiLU())\
         if upscale_opt == 'cnn' else nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+    else:
+      self.upscale = nn.Identity()
   
   def forward(self, x, c=None):                        # x: [B, Ci, H, W] | t: [B, time_dim]
     out = self.conv(x)                                 # -> [B, Co, H, W]
-    if self.use_attn:
-      out = self.chan_attn(out)
-    if self.cond_emb is not None and c is not None:
+    out = self.chan_attn(out)
+
+    if c is not None:
       out = self.film(out, c)
     out = self.act(out + self.skip_connection(x))
-    if self.pooling:
-      out = self.pool(out)                             # -> [B, Co, H/2, W/2]
-    if self.upscaling:
-      out = self.upscale(out)                          # -> [B, Co, H*2, W*2]
+
+    out = self.pool(out)                               # -> [B, Co, H/2, W/2] if pooling
+    out = self.upscale(out)                            # -> [B, Co, H*2, W*2] if upscaling
     return out
 
 
@@ -311,7 +299,8 @@ class EnhancedResidualFullBlock(nn.Module):
 
 CNN_LAYERS = {'NoiseLayer': NoiseLayer, 'Critic': Critic, 'CNNEncoder': CNNEncoder, 'CNNDecoder': CNNDecoder,
               'BigCNNBlock':BigCNNBlock, 'BigCNNEncoder': BigCNNEncoder, 'ResDownBlock': ResDownBlock,
-              'ResEncoder': ResEncoder, 'SEBlock': SEBlock, 'SEGEncoder': SEGEncoder}
+              'ResEncoder': ResEncoder, 'SEBlock': SEBlock, 'SEGEncoder': SEGEncoder,
+              'EnhancedResidualFullBlock': EnhancedResidualFullBlock}
 
 
 if __name__ == '__main__':

@@ -47,15 +47,18 @@ class TimeEmbedding(nn.Module):
 
 
 class ClassConditionalFlowUnet(nn.Module):
-  def __init__(self, img_chan=3, time_emb_dim=64, n_classes=10, class_emb_dim=32, cond_to_all_layers=True):
+  def __init__(self, img_chan=3, time_emb_dim=64, n_classes=10, class_emb_dim=32, condition_all_layers=True):
     super().__init__()
     # self.time_emb = nn.Sequential(nn.Linear(1, time_emb_dim), nn.SiLU(), nn.Linear(time_emb_dim, time_emb_dim))
     self.time_emb = nn.Sequential(TimeEmbedding(time_emb_dim), nn.Linear(time_emb_dim, time_emb_dim), nn.SiLU())
     self.class_emb = nn.Sequential(nn.Embedding(n_classes, class_emb_dim), nn.Linear(class_emb_dim, class_emb_dim))
 
-    self.cond_to_all_layers = cond_to_all_layers
+    self.condition_all_layers = condition_all_layers
     cond_dim = class_emb_dim + time_emb_dim
     self.init_conv = nn.Conv2d(img_chan + cond_dim, 64, 3, 1, 1)
+
+    if not condition_all_layers:
+      cond_dim = None
 
     self.down1 = cl.EnhancedResidualFullBlock(64, 128, pooling=True, cond_emb=cond_dim)
     self.down2 = cl.EnhancedResidualFullBlock(128, 256, pooling=True, cond_emb=cond_dim)
@@ -78,7 +81,7 @@ class ClassConditionalFlowUnet(nn.Module):
     x = torch.cat([x, cond_embed[:, :, None, None].expand(-1, -1, H, W)], dim=1)
     x = self.init_conv(x)                         # -> [B, 64, H, W]
 
-    if not self.cond_to_all_layers:
+    if not self.condition_all_layers:
       cond_embed = None
 
     d1 = self.down1(x, c=cond_embed)              # -> [B, 128, H/2, W/2]
@@ -137,8 +140,8 @@ class ClassConditionalFlowMatchingTrainer:
     np.random.seed(self.config['seed'])
     random.seed(self.config['seed'])
     if self.device.type == 'cuda':
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
+      torch.backends.cudnn.deterministic = True
+      torch.backends.cudnn.benchmark = False
   
   def instanciate_model(self):
     self.unet = ClassConditionalFlowUnet().to(self.device)
