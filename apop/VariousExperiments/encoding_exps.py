@@ -95,11 +95,14 @@ class MixedAE(nn.Module):
     self.encoder = CvT()
     self.decoder = cl.CNNDecoder(add_attn=self.config['add_dec_attn'])
   
-  def forward(self, x):
+  def forward(self, x, return_latent=False):
     z1, z2, z3 = self.encoder(x)
-    return self.decoder(z3,
-                        z2 if self.config['skip_connection'] else None,
-                        z1 if self.config['skip_connection'] else None)
+    out = self.decoder(z3,
+                       z2 if self.config['skip_connection'] else None,
+                       z1 if self.config['skip_connection'] else None)
+    if return_latent:
+      return out, z3
+    return out
 
 
 class CNNAETrainer:
@@ -126,6 +129,7 @@ class CNNAETrainer:
                              'add_noise_encoder': False,
                              'add_enc_attn': False,
                              'add_dec_attn': True,
+                             'gdn_act': False,
                              'encoder_archi': 'CNNEncoder'}}
   def __init__(self, config={}):
     self.config = {**CNNAETrainer.CONFIG, **config}
