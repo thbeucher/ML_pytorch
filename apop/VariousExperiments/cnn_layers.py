@@ -2,6 +2,7 @@ import torch
 import random
 import torch.nn as nn
 
+from gdn import GDN
 from vision_transformer.vit import ViT
 
 
@@ -45,13 +46,17 @@ class Critic(nn.Module):
 
 class CNNEncoder(nn.Module):
   def __init__(self, *args, add_noise=False, noise_p=0.5, noise_std=0.1, add_attn=False,
-               norm_first=False, **kwargs):
+               norm_first=False, gdn_act=False, **kwargs):
     super().__init__()
     self.down1 = nn.Sequential(nn.Conv2d(3, 64, 4, 2, 1),
                                nn.BatchNorm2d(64) if norm_first else nn.Identity(),
-                               nn.ReLU(True))
-    self.down2 = nn.Sequential(nn.Conv2d(64, 128, 4, 2, 1), nn.BatchNorm2d(128), nn.ReLU(True))
-    self.down3 = nn.Sequential(nn.Conv2d(128, 256, 4, 2, 1), nn.BatchNorm2d(256), nn.ReLU(True))
+                               GDN(64) if gdn_act else nn.ReLU(True))
+    self.down2 = nn.Sequential(nn.Conv2d(64, 128, 4, 2, 1),
+                               nn.BatchNorm2d(128),
+                               GDN(128) if gdn_act else nn.ReLU(True))
+    self.down3 = nn.Sequential(nn.Conv2d(128, 256, 4, 2, 1),
+                               nn.BatchNorm2d(256),
+                               GDN(256) if gdn_act else nn.ReLU(True))
 
     self.noise_layer = NoiseLayer(p=noise_p, std=noise_std) if add_noise else nn.Identity()
     
@@ -165,13 +170,15 @@ class SEBlock(nn.Module):
   def forward(self, x):
     out = self.squeeze(x)    # [B, C, H, W] -> [B, C, 1, 1]
     excit = self.excit(out)  # [B, C, 1, 1] -> [B, C//ratio, 1, 1] -> [B, C, 1, 1]
-    return x * excit
+    return x * excit  # channel-wise reweighting
 
 
 class SEGEncoder(nn.Module):
-  def __init__(self, *args, groups=1, **kwargs):
+  def __init__(self, *args, groups=1, norm_first=False, **kwargs):
     super().__init__()
-    self.down1 = nn.Sequential(nn.Conv2d(3, 64, 4, 2, 1), nn.ReLU(True))
+    self.down1 = nn.Sequential(nn.Conv2d(3, 64, 4, 2, 1),
+                               nn.BatchNorm2d(64) if norm_first else nn.Identity(),
+                               nn.ReLU(True))
     self.down2 = nn.Sequential(nn.Conv2d(64, 128, 4, 2, 1, groups=groups), nn.BatchNorm2d(128), nn.ReLU(True))
     self.down3 = nn.Sequential(nn.Conv2d(128, 256, 4, 2, 1, groups=groups), nn.BatchNorm2d(256), nn.ReLU(True))
     self.se1 = SEBlock(64)
@@ -186,10 +193,14 @@ class SEGEncoder(nn.Module):
 
 
 class CNNDecoder(nn.Module):
-  def __init__(self, add_attn=True):
+  def __init__(self, add_attn=True, gdn_act=False):
     super().__init__()
-    self.up1 = nn.Sequential(nn.ConvTranspose2d(256, 128, 4, 2, 1), nn.BatchNorm2d(128), nn.ReLU(True))
-    self.up2 = nn.Sequential(nn.ConvTranspose2d(128, 64, 4, 2, 1), nn.BatchNorm2d(64), nn.ReLU(True))
+    self.up1 = nn.Sequential(nn.ConvTranspose2d(256, 128, 4, 2, 1),
+                             nn.BatchNorm2d(128),
+                             GDN(128) if gdn_act else nn.ReLU(True))
+    self.up2 = nn.Sequential(nn.ConvTranspose2d(128, 64, 4, 2, 1),
+                             nn.BatchNorm2d(64),
+                             GDN(64) if gdn_act else nn.ReLU(True))
     self.up3 = nn.Sequential(nn.ConvTranspose2d(64, 3, 4, 2, 1), nn.Sigmoid())
 
     if add_attn:
@@ -236,33 +247,35 @@ class FiLM(nn.Module):
 
 
 class ResidualFullBlock(nn.Module):
-  def __init__(self, in_chan, out_chan, norm_first=True, cond_emb=None,
+  def __init__(self, in_chan, out_chan, groups=1, norm_first=True, cond_emb=None,
                use_attn=True, attn_ratio=8,
                pooling=False, pool_opt='cnn',      # 'cnn' or 'avg'
                upscaling=False, upscale_opt='cnn'):  # 'cnn' or 'upsample'
     super().__init__()
-    self.conv = nn.Sequential(nn.Conv2d(in_chan, out_chan, 3, 1, 1),
+    self.conv = nn.Sequential(nn.Conv2d(in_chan, out_chan, 3, 1, 1, groups=groups),
                                nn.BatchNorm2d(out_chan) if norm_first else nn.Identity(),
                                nn.SiLU(),
-                               nn.Conv2d(out_chan, out_chan, 3, 1, 1),
+                               nn.Conv2d(out_chan, out_chan, 3, 1, 1, groups=groups),
                                nn.BatchNorm2d(out_chan) if norm_first else nn.Identity())
     
     self.film = FiLM(cond_emb, out_chan) if cond_emb is not None else nn.Identity()
     
-    self.skip_connection = nn.Conv2d(in_chan, out_chan, 1) if in_chan != out_chan else nn.Identity()
+    self.skip_connection = nn.Conv2d(in_chan, out_chan, 1, groups=groups) if in_chan != out_chan else nn.Identity()
     
     self.chan_attn = SEBlock(out_chan, ratio=attn_ratio) if use_attn else nn.Identity()
     
     self.act = nn.SiLU()
     
     if pooling:
-      self.pool = nn.Sequential(nn.Conv2d(out_chan, out_chan, 4, 2, 1), nn.BatchNorm2d(out_chan), nn.SiLU())\
+      self.pool = nn.Sequential(nn.Conv2d(out_chan, out_chan, 4, 2, 1, groups=groups),
+                                nn.BatchNorm2d(out_chan), nn.SiLU())\
         if pool_opt == 'cnn' else nn.AvgPool2d(2)
     else:
       self.pool = nn.Identity()
     
     if upscaling:
-      self.upscale = nn.Sequential(nn.ConvTranspose2d(out_chan, out_chan, 4, 2, 1), nn.BatchNorm2d(out_chan), nn.SiLU())\
+      self.upscale = nn.Sequential(nn.ConvTranspose2d(out_chan, out_chan, 4, 2, 1, groups=groups),
+                                   nn.BatchNorm2d(out_chan), nn.SiLU())\
         if upscale_opt == 'cnn' else nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
     else:
       self.upscale = nn.Identity()
@@ -281,16 +294,17 @@ class ResidualFullBlock(nn.Module):
 
 
 class EnhancedResidualFullBlock(nn.Module):
-  def __init__(self, in_chan, out_chan, norm_first=True, cond_emb=None,
+  def __init__(self, in_chan, out_chan, groups=1, norm_first=True, cond_emb=None,
                use_attn=True, attn_ratio=8,
                pooling=False, pool_opt='cnn',
                upscaling=False, upscale_opt='cnn'):
     super().__init__()
-    self.rfb = ResidualFullBlock(in_chan=in_chan, out_chan=out_chan, norm_first=norm_first, cond_emb=cond_emb,
+    self.rfb = ResidualFullBlock(in_chan=in_chan, out_chan=out_chan, groups=groups,
+                                 norm_first=norm_first, cond_emb=cond_emb,
                                  use_attn=use_attn, attn_ratio=attn_ratio,
                                  pooling=pooling, pool_opt=pool_opt,
                                  upscaling=upscaling, upscale_opt=upscale_opt)
-    self.refine = nn.Sequential(nn.Conv2d(out_chan, out_chan, 1), nn.BatchNorm2d(out_chan), nn.SiLU())
+    self.refine = nn.Sequential(nn.Conv2d(out_chan, out_chan, 1, groups=groups), nn.BatchNorm2d(out_chan), nn.SiLU())
 
   def forward(self, x, c=None):
     out = self.rfb(x, c=c)
