@@ -17,6 +17,112 @@ from torchvision import datasets, transforms, utils
 import cnn_layers as cl
 
 
+def flow_matching_loss(model, x1, x0=None, condition=None):
+  '''
+  Training logic of flow model:
+  1) Sample random points from our source and target distributions, and pair the points (x1 and x0)
+  2) Sample random times between 0 and 1
+  3) Calculate the locations where these points would be at those times
+      if they were moving at constant velocity from source to target locations (interpolation, xt)
+  4) Calculate what velocity they would have at those locations if they were moving at constant velocity (x1-x0)
+  5) Train the network to predict these velocities – which will end up “seeking the mean”
+      when the network has to do the same for many, many points.
+  '''
+  if x0 is None:
+    # ---- Sample Gaussian noise as x0 ----
+    x0 = torch.randn_like(x1)
+
+  # ---- Sample t uniformly ----
+  t = torch.rand(x1.size(0), 1, device=x1.device)
+  t_expand = t[:, :, None, None]
+
+  # ---- The target vector field (x1 - x0) ----
+  v_target = x1 - x0
+
+  # ---- Interpolate x_t = (1-t)x0 + t x1 ----
+  xt = (1 - t_expand) * x0 + t_expand * x1
+
+  # ---- Predict velocity and compute loss ----
+  v_pred = model(xt, t, condition)
+  return F.mse_loss(v_pred, v_target)
+
+
+@torch.no_grad()
+def euler_sampling(model, device, x=None, n_samples=8, n_steps=10, get_step=5, condition=None, clamp=True):
+  model.eval()
+  samples = []
+
+  if x is None:
+    # Start from pure Gaussian noise
+    x = torch.randn(n_samples, 3, 32, 32).to(device)
+
+  # Euler integration from t=0 → t=1
+  dt = 1.0 / n_steps
+  for i, step in enumerate(range(n_steps)):
+    t = torch.full((x.shape[0], 1), step * dt, device=device)
+    v = model(x, t, condition)  # vector field
+    x = x + v * dt  # Euler update
+
+    if clamp:
+      x = torch.clamp(x, -3.0, 3.0)
+
+    if i % get_step == 0 and n_steps > 1:
+      samples.append(x.clone())
+
+  return samples + [x]
+
+
+@torch.no_grad()
+def rk45_step(f, t, x, dt):
+  """
+  One Dormand–Prince RK45 step.
+  Args:
+      f : function f(t, x) -> dx/dt
+      t : scalar float tensor
+      x : tensor (B, C, H, W)
+      dt : step size (float)
+  """
+  k1 = f(t, x)
+  k2 = f(t + dt*1/5, x + dt*(1/5)*k1)
+  k3 = f(t + dt*3/10, x + dt*(3/40*k1 + 9/40*k2))
+  k4 = f(t + dt*4/5, x + dt*(44/45*k1 - 56/15*k2 + 32/9*k3))
+  k5 = f(t + dt*8/9, x + dt*(19372/6561*k1 - 25360/2187*k2 + 64448/6561*k3 - 212/729*k4))
+  k6 = f(t + dt, x + dt*(9017/3168*k1 - 355/33*k2 + 46732/5247*k3 + 49/176*k4 - 5103/18656*k5))
+
+  # 5th-order solution
+  x_next = x + dt * (35/384*k1 + 500/1113*k3 + 125/192*k4 - 2187/6784*k5 + 11/84*k6)
+  return x_next
+
+
+@torch.no_grad()
+def rk45_sampling(model, device, x=None, n_samples=8, n_steps=10, get_step=5, condition=None, clamp=True):
+  model.eval()
+
+  def ode_fn(t, x):
+    t_tensor = torch.full((x.shape[0], 1), t, device=device)
+    return model(x, t_tensor, condition)
+
+  if x is None:
+    # Initial noise
+    x = torch.randn(n_samples, 3, 32, 32, device=device)
+
+  t = 0.0
+  dt = 1.0 / n_steps
+
+  samples = []
+  for i in range(n_steps):
+    x = rk45_step(ode_fn, t, x, dt)
+    t += dt
+
+    if clamp:
+      x = torch.clamp(x, -3.0, 3.0)
+    
+    if i % get_step == 0 and n_steps > 1:
+      samples.append(x.clone())
+
+  return samples + [x]
+
+
 class TimeEmbedding(nn.Module):
   """
   Classical sinusoidal time embedding (like in diffusion/transformers).
@@ -46,15 +152,16 @@ class TimeEmbedding(nn.Module):
     return emb
 
 
-class ClassConditionalFlowUnet(nn.Module):
-  def __init__(self, img_chan=3, time_emb_dim=64, n_classes=10, class_emb_dim=32, condition_all_layers=True):
+class ConditionalFlowUnet(nn.Module):
+  def __init__(self, img_chan=3, time_dim=64, n_condition_values=10, condition_dim=32, condition_all_layers=False):
     super().__init__()
-    # self.time_emb = nn.Sequential(nn.Linear(1, time_emb_dim), nn.SiLU(), nn.Linear(time_emb_dim, time_emb_dim))
-    self.time_emb = nn.Sequential(TimeEmbedding(time_emb_dim), nn.Linear(time_emb_dim, time_emb_dim), nn.SiLU())
-    self.class_emb = nn.Sequential(nn.Embedding(n_classes, class_emb_dim), nn.Linear(class_emb_dim, class_emb_dim))
+    # self.time_emb = nn.Sequential(nn.Linear(1, time_dim), nn.SiLU(), nn.Linear(time_dim, time_dim))
+    self.time_emb = nn.Sequential(TimeEmbedding(time_dim), nn.Linear(time_dim, time_dim), nn.SiLU())
+    self.condition_emb = nn.Sequential(nn.Embedding(n_condition_values, condition_dim),
+                                       nn.Linear(condition_dim, condition_dim))
 
     self.condition_all_layers = condition_all_layers
-    cond_dim = class_emb_dim + time_emb_dim
+    cond_dim = condition_dim + time_dim
     self.init_conv = nn.Conv2d(img_chan + cond_dim, 64, 3, 1, 1)
 
     if not condition_all_layers:
@@ -62,42 +169,42 @@ class ClassConditionalFlowUnet(nn.Module):
 
     self.down1 = cl.EnhancedResidualFullBlock(64, 128, pooling=True, cond_emb=cond_dim)
     self.down2 = cl.EnhancedResidualFullBlock(128, 256, pooling=True, cond_emb=cond_dim)
-    self.down3 = cl.EnhancedResidualFullBlock(256, 512, pooling=True, cond_emb=cond_dim)
+    self.down3 = cl.EnhancedResidualFullBlock(256, 512, pooling=True, cond_emb=cond_dim, groups=1)
 
-    self.up1 = cl.EnhancedResidualFullBlock(512, 256, upscaling=True, cond_emb=cond_dim)
+    self.up1 = cl.EnhancedResidualFullBlock(512, 256, upscaling=True, cond_emb=cond_dim, groups=1)
     self.up2 = cl.EnhancedResidualFullBlock(256, 128, upscaling=True, cond_emb=cond_dim)
     self.up3 = cl.EnhancedResidualFullBlock(128, 64, upscaling=True, cond_emb=cond_dim)
     
     self.final_conv = nn.Sequential(nn.Conv2d(64, 32, 3, 1, 1), nn.BatchNorm2d(32), nn.SiLU(),
                                     nn.Conv2d(32, img_chan, 3, 1, 1))
   
-  def forward(self, x, t, labels):
+  def forward(self, x, t, condition):
     B, C, H, W = x.shape
-    c_embed = self.class_emb(labels)              # -> [B, c_dim]
-    # t_embed = self.time_emb(t)                  # -> [B, t_dim]
-    t_embed = self.time_emb(t.squeeze(-1))        # when using sinusoidal embedding
-    cond_embed = torch.cat([c_embed, t_embed], dim=1)
+    c_embed = self.condition_emb(condition)      # -> [B, c_dim]
+    # t_embed = self.time_emb(t)                   # -> [B, t_dim]
+    t_embed = self.time_emb(t.squeeze(-1))       # when using sinusoidal embedding
+    all_embed = torch.cat([c_embed, t_embed], dim=1)
 
-    x = torch.cat([x, cond_embed[:, :, None, None].expand(-1, -1, H, W)], dim=1)
-    x = self.init_conv(x)                         # -> [B, 64, H, W]
+    x = torch.cat([x, all_embed[:, :, None, None].expand(-1, -1, H, W)], dim=1)
+    x = self.init_conv(x)                        # -> [B, 64, H, W]
 
     if not self.condition_all_layers:
-      cond_embed = None
+      all_embed = None
 
-    d1 = self.down1(x, c=cond_embed)              # -> [B, 128, H/2, W/2]
-    d2 = self.down2(d1, c=cond_embed)             # -> [B, 256, H/4, W/4]
-    d3 = self.down3(d2, c=cond_embed)             # -> [B, 512, H/8, W/8]
+    d1 = self.down1(x, c=all_embed)              # -> [B, 128, H/2, W/2]
+    d2 = self.down2(d1, c=all_embed)             # -> [B, 256, H/4, W/4]
+    d3 = self.down3(d2, c=all_embed)             # -> [B, 512, H/8, W/8]
 
-    u1 = self.up1(d3, c=cond_embed)               # -> [B, 256, H/4, W/4]
-    u2 = self.up2(u1 + d2, c=cond_embed)          # -> [B, 128, H/2, W/2]
-    u3 = self.up3(u2 + d1, c=cond_embed)          # -> [B, 64, H, W]
+    u1 = self.up1(d3, c=all_embed)               # -> [B, 256, H/4, W/4]
+    u2 = self.up2(u1 + d2, c=all_embed)          # -> [B, 128, H/2, W/2]
+    u3 = self.up3(u2 + d1, c=all_embed)          # -> [B, 64, H, W]
 
     velocity = self.final_conv(u3)                # -> [B, img_chan, H, W]
     return velocity
 
 
 class ClassConditionalFlowMatchingTrainer:
-  CONFIG = {'n_epochs':          200,
+  CONFIG = {'n_epochs':          500,
             'sample_every':      10,
             'batch_size':        128,
             'lr':                2e-4,
@@ -123,7 +230,7 @@ class ClassConditionalFlowMatchingTrainer:
     self.set_seed()
     self.instanciate_model()
     self.set_dataloader()
-    self.set_optimizers_n_criterions()
+    self.set_training_utils()
     self.dump_config()
 
     self.cifar_classes = ['airplane', 'automobile', 'bird', 'cat', 'deer','dog', 'frog', 'horse', 'ship', 'truck']
@@ -144,7 +251,7 @@ class ClassConditionalFlowMatchingTrainer:
       torch.backends.cudnn.benchmark = False
   
   def instanciate_model(self):
-    self.unet = ClassConditionalFlowUnet().to(self.device)
+    self.unet = ConditionalFlowUnet().to(self.device)
     self.n_trainable_params = sum(p.numel() for p in self.unet.parameters() if p.requires_grad)
   
   def set_dataloader(self):
@@ -164,11 +271,10 @@ class ClassConditionalFlowMatchingTrainer:
                                       num_workers=min(6, os.cpu_count()),
                                       pin_memory=True if torch.cuda.is_available() else False)
 
-  def set_optimizers_n_criterions(self, reflow=False):
+  def set_training_utils(self, reflow=False):
     model = self.reflow if reflow else self.unet
     self.optimizer = torch.optim.AdamW(model.parameters(), lr=self.config['lr'],
                                        weight_decay=1e-4, betas=(0.9, 0.999))
-    self.criterion = nn.MSELoss()
     self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer,
                                                                 T_max=self.config['n_epochs'],
                                                                 eta_min=1e-6)
@@ -208,7 +314,7 @@ class ClassConditionalFlowMatchingTrainer:
   @torch.no_grad()
   def show_sample(self, n=8, n_steps=10, get_step=5, solver='euler', compare_n_steps=False, reflow=False):
     print(f'Generating Images using {solver} sampler...')
-    samplers = {'euler': self.euler_sampling, 'RK45': self.rk45_sampling}
+    samplers = {'euler': euler_sampling, 'RK45': rk45_sampling}
     sampler = samplers[solver]
     
     real_imgs, class_labels = next(iter(self.train_dataloader))
@@ -219,9 +325,11 @@ class ClassConditionalFlowMatchingTrainer:
       samples = []
       print('Comparing generation using those number of steps: [1, 2, 4, 6, 8, 10, 20]')
       for n_steps in [1, 2, 4, 6, 8, 10, 20]:
-        samples.append(sampler(n, n_steps=n_steps, get_step=30, class_labels=class_labels[:n])[-1])
+        samples.append(sampler(self.unet, self.device, n_samples=n, n_steps=n_steps, get_step=30,
+                               condition=class_labels[:n])[-1])
     else:
-      samples = sampler(n, n_steps=n_steps, get_step=get_step, class_labels=class_labels[:n])
+      samples = sampler(self.unet, self.device, n_samples=n, n_steps=n_steps, get_step=get_step,
+                        condition=class_labels[:n])
 
     samples = [(s.clamp(-1, 1)+1)/2 for s in samples]  # denormalize [-1, 1] -> [0, 1]
     ori_sample = torch.cat([real_imgs[:n]] + samples, dim=0)
@@ -236,117 +344,14 @@ class ClassConditionalFlowMatchingTrainer:
     utils.save_image(grid, os.path.join(path, f'{show_sample_tag}.png'))
     print(f'Images generated upload in tensorboard {show_sample_tag}')
 
-  @torch.no_grad()
-  def euler_sampling(self, n_samples, n_steps=10, get_step=5, class_labels=None, clamp=True):
-    self.unet.eval()
-    samples = []
-
-    # Start from pure Gaussian noise
-    x = torch.randn(n_samples, 3, 32, 32).to(self.device)
-
-    # Euler integration from t=0 → t=1
-    dt = 1.0 / n_steps
-    for i, step in enumerate(range(n_steps)):
-      t = torch.full((n_samples, 1), step * dt, device=self.device)
-      v = self.unet(x, t, labels=class_labels)  # vector field
-      x = x + v * dt  # Euler update
-
-      if clamp:
-        x = torch.clamp(x, -3.0, 3.0)
-
-      if i % get_step == 0 and n_steps > 1:
-        samples.append(x.clone())
-
-    return samples + [x]
-  
-  @torch.no_grad()
-  def rk45_step(self, f, t, x, dt):
-    """
-    One Dormand–Prince RK45 step.
-    Args:
-        f : function f(t, x) -> dx/dt
-        t : scalar float tensor
-        x : tensor (B, C, H, W)
-        dt : step size (float)
-    """
-    k1 = f(t, x)
-    k2 = f(t + dt*1/5, x + dt*(1/5)*k1)
-    k3 = f(t + dt*3/10, x + dt*(3/40*k1 + 9/40*k2))
-    k4 = f(t + dt*4/5, x + dt*(44/45*k1 - 56/15*k2 + 32/9*k3))
-    k5 = f(t + dt*8/9, x + dt*(19372/6561*k1 - 25360/2187*k2 + 64448/6561*k3 - 212/729*k4))
-    k6 = f(t + dt, x + dt*(9017/3168*k1 - 355/33*k2 + 46732/5247*k3 + 49/176*k4 - 5103/18656*k5))
-
-    # 5th-order solution
-    x_next = x + dt * (
-        35/384*k1 + 500/1113*k3 + 125/192*k4
-        - 2187/6784*k5 + 11/84*k6
-    )
-
-    return x_next
-  
-  @torch.no_grad()
-  def rk45_sampling(self, n_samples, n_steps=10, get_step=5, class_labels=None, clamp=True):
-    self.unet.eval()
-
-    def ode_fn(t, x):
-      t_tensor = torch.full((x.shape[0], 1), t, device=self.device)
-      return self.unet(x, t_tensor, labels=class_labels)
-
-    # Initial noise
-    x = torch.randn(n_samples, 3, 32, 32, device=self.device)
-
-    t = 0.0
-    dt = 1.0 / n_steps
-
-    samples = []
-    for i in range(n_steps):
-      x = self.rk45_step(ode_fn, t, x, dt)
-      t += dt
-
-      if clamp:
-        x = torch.clamp(x, -3.0, 3.0)
-      
-      if i % get_step == 0 and n_steps > 1:
-        samples.append(x.clone())
-
-    return samples + [x]
-  
-  def flow_matching_loss(self, x1, class_labels=None, reflow=False):
-    '''
-    Training logic of flow model:
-    1) Sample random points from our source and target distributions, and pair the points (x1 and x0)
-    2) Sample random times between 0 and 1
-    3) Calculate the locations where these points would be at those times
-       if they were moving at constant velocity from source to target locations (interpolation, xt)
-    4) Calculate what velocity they would have at those locations if they were moving at constant velocity (x1-x0)
-    5) Train the network to predict these velocities – which will end up “seeking the mean”
-       when the network has to do the same for many, many points.
-    '''
-    # ---- Sample Gaussian noise as x0 ----
-    x0 = torch.randn_like(x1)
-
-    # ---- Sample t uniformly ----
-    t = torch.rand(x1.size(0), 1, device=self.device)
-    t_expand = t[:, :, None, None]
-
-    # ---- The target vector field (x1 - x0) ----
-    v_target = x1 - x0
-
-    # ---- Interpolate x_t = (1-t)x0 + t x1 ----
-    xt = (1 - t_expand) * x0 + t_expand * x1
-
-    # ---- Predict velocity and compute loss ----
-    model = self.reflow if reflow else self.unet
-    v_pred = model(xt, t, labels=class_labels)
-    return self.criterion(v_pred, v_target)
-  
   def train_log_n_save(self, fixed_imgs, epoch, best_loss, loss, reflow=False):
     if self.tf_logger is not None:
       reflow_suffix = '_reflow' if reflow else ''
       self.tf_logger.add_scalar(f'fm_loss{reflow_suffix}', loss, epoch)
 
       if epoch % self.config['sample_every'] == 0 or epoch == (self.config['n_epochs'] - 1):
-        samples = self.euler_sampling(8, class_labels=torch.tensor(list(range(8)), dtype=torch.long, device=self.device))
+        samples = euler_sampling(self.unet, device=self.device,
+                                 condition=torch.tensor(list(range(8)), dtype=torch.long, device=self.device))
         samples = (samples[-1].clamp(-1, 1) + 1) / 2  # clamp and denormalize [-1, 1] -> [0, 1]
         ori_sample = torch.cat([fixed_imgs, samples], dim=0)
         self.tf_logger.add_images(f'generated_epoch_{epoch}{reflow_suffix}', ori_sample)
@@ -370,7 +375,7 @@ class ClassConditionalFlowMatchingTrainer:
         x1 = real_imgs.to(self.device)
         class_labels = class_labels.to(self.device)
         
-        loss = self.flow_matching_loss(x1, class_labels=class_labels)
+        loss = flow_matching_loss(self.unet, x1, condition=class_labels)
 
         self.optimizer.zero_grad()
         loss.backward()
@@ -394,7 +399,7 @@ class ClassConditionalFlowMatchingTrainer:
     3) Train a new model to match the same straight-line velocity field: v(xt, t) = x1 - x0
     '''
     self.reflow = copy.deepcopy(self.unet)
-    self.set_optimizers_n_criterions(reflow=True)
+    self.set_training_utils(reflow=True)
     self.reflow.train()
 
     best_loss = torch.inf
@@ -410,10 +415,10 @@ class ClassConditionalFlowMatchingTrainer:
       for _ in tqdm(range(self.config['n_steps_reflow']), leave=False):
         class_labels = torch.arange(n_classes, device=self.device).repeat(batch_size // 10 + 1)[:batch_size].long()
 
-        samples = self.rk45_sampling(batch_size, n_steps=4, class_labels=class_labels)
+        samples = rk45_sampling(self.unet, self.device, n_samples=batch_size, n_steps=4, condition=class_labels)
         x1 = samples[-1].detach()
         
-        loss = self.flow_matching_loss(x1, class_labels=class_labels, reflow=True)
+        loss = flow_matching_loss(self.reflow, x1, condition=class_labels)
 
         self.optimizer.zero_grad()
         loss.backward()
@@ -442,7 +447,7 @@ def get_args():
   parser = argparse.ArgumentParser(description='Flow matching experiments')
   parser.add_argument('--trainer', '-t', type=str, default='ccfm')
   parser.add_argument('--run_all_exps', '-rae', action='store_true')
-  parser.add_argument('--exp_name', '-en', type=str, default='cc_fm_sinemb_base')
+  parser.add_argument('--exp_name', '-en', type=str, default=None)
   parser.add_argument('--load_model', '-lm', action='store_true')
   parser.add_argument('--train_model', '-tm', action='store_true')
   parser.add_argument('--eval_model', '-em', action='store_true')
@@ -464,7 +469,7 @@ if __name__ == '__main__':
   if args.run_all_exps:
     run_all_experiments(trainers, args)
   else:
-    trainer = trainers[args.trainer]({'exp_name': args.exp_name})
+    trainer = trainers[args.trainer]({} if args.exp_name is None else {'exp_name': args.exp_name})
     n_params = trainer.n_trainable_params
     trainer_name = trainers[args.trainer].__name__
 
