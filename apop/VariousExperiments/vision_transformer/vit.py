@@ -159,6 +159,7 @@ class ViT(Module):
 
   def forward(self, img):
     x = self.patchify(img)  # [B, 3, 32, 32] -> [B, n_patchs, 3*8*8=channels*patch_height*patch_width]
+
     x = self.to_patch_embedding(x)  # -> [B, n_patchs, dim]
 
     x = x + self.pos_embedding.to(x.device, dtype=x.dtype)
@@ -175,7 +176,9 @@ class ViT(Module):
 
 
 if __name__ == '__main__':
-  vit = ViT(image_size=16, patch_size=4, dim=64, depth=2, heads=4, mlp_dim=128, dim_head=32, channels=64)
-  inp = torch.rand(2, 64, 16, 16)
+  vit = ViT(image_size=32, patch_size=4, dim=64, depth=2, heads=4, mlp_dim=128, dim_head=32, channels=3)
+  inp = torch.rand(2, 3, 32, 32)
   out = vit(inp)
   print(f'{out.shape=}')
+  print(f'{vit.to_patch_pixels.weight.shape}')
+  print(f'{sum(p.numel() for p in vit.parameters() if p.requires_grad):,}')
