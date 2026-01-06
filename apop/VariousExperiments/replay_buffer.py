@@ -1,5 +1,6 @@
 import torch
 from torchvision import transforms
+from torch.utils.data import Dataset
 
 
 class ReplayBuffer:
@@ -69,3 +70,22 @@ class ReplayBuffer:
 
   def __len__(self):
     return self.size
+
+
+class ReplayBufferDataset(Dataset):
+  def __init__(self, replay_buffer):
+    self.buffer = replay_buffer
+
+  def __len__(self):
+    return len(self.buffer)
+
+  def __getitem__(self, idx):
+    return {
+      "internal_state": self.buffer.internal_state[idx],
+      "action": self.buffer.action[idx],
+      "image": self.buffer.image[idx],
+      "reward": self.buffer.reward[idx],
+      "done": self.buffer.done[idx],
+      "next_internal_state": self.buffer.next_internal_state[idx],
+      "next_image": self.buffer.next_image[idx],
+    }
