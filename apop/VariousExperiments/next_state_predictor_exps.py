@@ -251,7 +251,7 @@ class NextStatePredictorTrainer:
           x1_pred = rk45_sampling(
             self.world_model,
             device=self.device,
-            x=torch.zeros_like(x0) if self.config['train_on_delta'] else x0,
+            x=torch.zeros_like(x0) if self.config['train_on_delta'] else batch['image'],
             # n_samples=x.shape[0],
             condition=condition,
             n_steps=10
@@ -259,14 +259,14 @@ class NextStatePredictorTrainer:
 
           x1_pred = x1_pred[-1]
           if self.config['train_on_delta']:
-            x1_pred = x0 + x1_pred
+            x1_pred = batch['image'] + x1_pred
             x1_pred = x1_pred.clamp(-1, 1)
 
           self.tf_logger.add_scalar('world_model_pred_loss',
                                     torch.nn.functional.mse_loss(x1_pred, x1),
                                     step // self.config['world_model_check_pred_loss_every'])
           
-          imagined_traj = [x0[:1]]
+          imagined_traj = [batch['image'][:1]]
           for action in torch.as_tensor([[[1]]]*12 + [[[3]]]*11, device=self.device, dtype=torch.long):
             x1_pred = rk45_sampling(
               self.world_model,
