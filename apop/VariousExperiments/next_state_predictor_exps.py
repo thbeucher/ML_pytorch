@@ -228,7 +228,7 @@ class NextStatePredictorTrainer:
         x1 = x1 - x0  # x1 = delta
         x1 = x1.clamp(-1, 1)
         x0 = torch.zeros_like(x1)  # start at zero delta
-        condition = (condition, x0)
+        condition = (condition, batch['image'])
 
       loss = flow_matching_loss(self.world_model, x1, x0=x0, condition=condition)
 
@@ -251,7 +251,7 @@ class NextStatePredictorTrainer:
           x1_pred = rk45_sampling(
             self.world_model,
             device=self.device,
-            x=torch.zeros_like(x0) if self.config['train_on_delta'] else batch['image'],
+            x=x0,
             # n_samples=x.shape[0],
             condition=condition,
             n_steps=10
@@ -260,7 +260,7 @@ class NextStatePredictorTrainer:
           x1_pred = x1_pred[-1]
           if self.config['train_on_delta']:
             x1_pred = batch['image'] + x1_pred
-            x1_pred = x1_pred.clamp(-1, 1)
+          x1_pred = x1_pred.clamp(-1, 1)
 
           self.tf_logger.add_scalar('world_model_pred_loss',
                                     torch.nn.functional.mse_loss(x1_pred, x1),
