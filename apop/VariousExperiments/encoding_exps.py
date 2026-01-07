@@ -173,19 +173,25 @@ class CNNAETrainer:
     self.auto_encoder = CNNAE(self.config['model_config']).to(self.device)
     self.n_trainable_params = sum(p.numel() for p in self.auto_encoder.parameters() if p.requires_grad)
 
-  def set_dataloader(self):
+  def set_dataloader(self, train_dataset=None, test_dataset=None, transform=None, num_workers=None):
     os.makedirs(self.config['data_dir'], exist_ok=True)
 
-    transform = transforms.Compose([transforms.ToTensor()])
+    if transform is None:
+      transform = transforms.Compose([transforms.ToTensor()])
 
-    train_dataset = datasets.CIFAR10(root=self.config['data_dir'], train=True, download=True, transform=transform)
-    test_dataset = datasets.CIFAR10(root=self.config['data_dir'], train=False, download=True, transform=transform)
+    if train_dataset is None:
+      train_dataset = datasets.CIFAR10(root=self.config['data_dir'], train=True, download=True, transform=transform)
+    if test_dataset is None:
+      test_dataset = datasets.CIFAR10(root=self.config['data_dir'], train=False, download=True, transform=transform)
+
+    if num_workers is None:
+      num_workers = min(6, os.cpu_count())
 
     self.train_dataloader = DataLoader(train_dataset, batch_size=self.config['batch_size'], shuffle=True,
-                                       num_workers=min(6, os.cpu_count()),
+                                       num_workers=num_workers,
                                        pin_memory=True if torch.cuda.is_available() else False)
     self.test_dataloader = DataLoader(test_dataset, batch_size=self.config['batch_size'], shuffle=True,
-                                      num_workers=min(6, os.cpu_count()),
+                                      num_workers=num_workers,
                                       pin_memory=True if torch.cuda.is_available() else False)
 
   def set_optimizers_n_criterions(self):

@@ -6,6 +6,7 @@ import pygame
 import random
 import warnings
 import argparse
+import torchvision
 import numpy as np
 import torch.nn as nn
 import gymnasium as gym
@@ -16,6 +17,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 sys.path.append('../../../robot/')
 
+from encoding_exps import CNNAETrainer
 from replay_buffer import ReplayBuffer
 from cnn_layers import EnhancedResidualFullBlock
 from flow_matching_exps import flow_matching_loss, euler_sampling, rk45_sampling, TimeEmbedding
@@ -24,12 +26,23 @@ warnings.filterwarnings("ignore")
 
 
 class WorldModelFlowUnet(nn.Module):
-  def __init__(self, img_chan=3, time_dim=64, n_actions=5, action_dim=8, x_start=False):
+  def __init__(self, img_chan=3, time_dim=64, x_start=False,
+               add_action=True, n_actions=5, action_dim=8,
+               add_is=False, is_n_values=36, is_dim=32):  # is = internal_state
     super().__init__()
     self.time_emb = nn.Sequential(TimeEmbedding(time_dim), nn.Linear(time_dim, time_dim), nn.SiLU())
-    self.action_emb = nn.Sequential(nn.Embedding(n_actions, action_dim), nn.Linear(action_dim, action_dim), nn.SiLU())
+    condition_dim = time_dim 
 
-    condition_dim = time_dim + action_dim
+    if add_action:
+      self.action_emb = nn.Sequential(nn.Embedding(n_actions, action_dim), nn.Linear(action_dim, action_dim), nn.SiLU())
+      condition_dim += action_dim
+
+    self.add_is = add_is
+    if add_is:
+      self.is_emb = nn.Sequential(nn.Embedding(is_n_values, is_dim), nn.Linear(is_dim, is_dim), nn.SiLU())
+      condition_dim += 2 * is_dim
+
+    self.x_start = x_start
     start_dim = 2*img_chan if x_start else img_chan
     self.init_conv = nn.Conv2d(start_dim + condition_dim, 64, 3, 1, 1)
 
@@ -44,22 +57,30 @@ class WorldModelFlowUnet(nn.Module):
     self.final_conv = nn.Sequential(nn.Conv2d(64, 32, 3, 1, 1), nn.BatchNorm2d(32), nn.SiLU(),
                                     nn.Conv2d(32, img_chan, 3, 1, 1))
   
-  def forward(self, x, t, action):  # image, time, action
-    if isinstance(action, tuple):
-      action, x_cond = action
-    else:
-      x_cond = None
-
+  def forward(self, x, t, condition={}):  # image, time, action
     B, C, H, W = x.shape
 
-    t_emb = self.time_emb(t.squeeze(-1))         # -> [B, time_dim]
-    a_emb = self.action_emb(action.squeeze(-1))  # -> [B, action_dim]
+    action = condition.get('action', None)
+    internal_state = condition.get('internal_state', None)  # [B, n_is=2]
+    x_cond = condition.get('x_cond', None)
 
-    all_embed = torch.cat([t_emb, a_emb], dim=1)  # -> [B, 104]
+    t_emb = self.time_emb(t.squeeze(-1))         # -> [B, time_dim]
+    all_embed = [t_emb]
+
+    if action is not None:
+      a_emb = self.action_emb(action.squeeze(-1))  # -> [B, action_dim]
+      all_embed += [a_emb]
+    
+    if internal_state is not None:
+      is_emb = self.is_emb(internal_state)  # [B, n_is=2, is_dim=32]
+      all_embed += [is_emb.flatten(1)]  # [B, 2*32]
+
+    all_embed = torch.cat(all_embed, dim=1)  # -> [B, 104]
 
     all_cond = [all_embed[:, :, None, None].expand(-1, -1, H, W)]
     if x_cond is not None:
       all_cond = [x_cond] + all_cond
+    
     x = torch.cat([x] + all_cond, dim=1)
 
     x = self.init_conv(x)                        # -> [B, 64, H, W]
@@ -94,11 +115,14 @@ class NextStatePredictorTrainer:
             'render_mode':                       'rgb_array',
             'seed':                              42,
             'use_tf_logger':                     True,
-            'world_model_max_train_steps':       5_000,
+            'world_model_max_train_steps':       10_000,
             'world_model_check_pred_loss_every': 100,
             'world_model_loss_history_size':     30,  # history size to check if loss still decrease
             'world_model_loss_history_eps':      5e-6,  # if loss fluctuate less than eps, stop training
             'train_on_delta':                    True,
+            'start_on_noise_delta':              False,
+            'weighted_time_sampling':            True,
+            'noise_scale':                       1.0,
             'save_dir':                          'NSP_experiments/',
             'log_dir':                           'runs/',
             'exp_name':                          'nsp_base'}
@@ -179,11 +203,13 @@ class NextStatePredictorTrainer:
     else:
       print(f'File {path} not found... No loaded model.')
 
-  def fill_memory(self, random_act=True):
+  def fill_memory(self, random_act=True, replay_buffer_size=None):
     print('Filling memory buffer...')
     obs, _ = self.env.reset()
     img = self.env.render()
-    for _ in tqdm(range(self.config['replay_buffer_size'])):
+    if replay_buffer_size is None:
+      replay_buffer_size = self.config['replay_buffer_size']
+    for _ in tqdm(range(replay_buffer_size)):
       action = random.randint(0, 4) if random_act else 0  #TODO use policy
       next_obs, reward, terminated, truncated, info = self.env.step(action)
       next_img = self.env.render()
@@ -222,15 +248,22 @@ class NextStatePredictorTrainer:
       batch = self.replay_buffer.sample(self.config['world_model_batch_size'])
       x0 = batch['image']  # use image as starting distribution instead of gaussian noise
       x1 = batch['next_image']  # target distribution is the image to predict
-      condition = batch['action']
+      condition = {'action': batch['action']}
 
       if self.config['train_on_delta']:
         x1 = x1 - x0  # x1 = delta
         x1 = x1.clamp(-1, 1)
-        x0 = torch.zeros_like(x1)  # start at zero delta
-        condition = (condition, batch['image'])
 
-      loss = flow_matching_loss(self.world_model, x1, x0=x0, condition=condition)
+        if self.config['start_on_noise_delta']:
+          x0 = torch.randn_like(x1) * self.config['noise_scale']
+        else:
+          x0 = torch.zeros_like(x1)
+
+        condition['x_cond'] = batch['image']
+
+      loss = flow_matching_loss(self.world_model, x1, x0=x0, condition=condition,
+                                weighted_time_sampling=self.config['weighted_time_sampling'],
+                                noise_scale=self.config['noise_scale'])
 
       self.wm_optimizer.zero_grad()
       loss.backward()
@@ -268,14 +301,21 @@ class NextStatePredictorTrainer:
           
           imagined_traj = [batch['image'][:1]]
           for action in torch.as_tensor([[[1]]]*12 + [[[3]]]*11, device=self.device, dtype=torch.long):
-            x1_pred = rk45_sampling(
-              self.world_model,
-              device=self.device,
-              x=torch.zeros_like(imagined_traj[-1]) if self.config['train_on_delta'] else imagined_traj[-1],
-              # n_samples=imagined_traj[-1].shape[0],
-              condition=(action, imagined_traj[-1]) if self.config['train_on_delta'] else action,
-              n_steps=10
-            )
+            if self.config['train_on_delta']:
+              if self.config['start_on_noise_delta']:
+                x = torch.randn_like(imagined_traj[-1]) * self.config['noise_scale']
+              else:
+                x = torch.zeros_like(imagined_traj[-1])
+            else:
+              x = imagined_traj[-1]
+
+            condition = {'action': action}
+            if self.config['train_on_delta']:
+              condition['x_cond'] = imagined_traj[-1]
+
+            x1_pred = rk45_sampling(self.world_model, device=self.device, x=x,
+                                    n_samples=imagined_traj[-1].shape[0],
+                                    condition=condition, n_steps=10)
 
             x1_pred = x1_pred[-1]
             if self.config['train_on_delta']:
@@ -306,6 +346,45 @@ class NextStatePredictorTrainer:
     pass
 
 
+class SimpleImageDataset(torch.utils.data.Dataset):
+  def __init__(self, dataset_size=10_000, resize_to=32):
+    super().__init__()
+    print('Filling SimpleImageDataset...')
+    transform = [torchvision.transforms.ToTensor(), torchvision.transforms.Resize(resize_to)]
+    self.transform = torchvision.transforms.Compose(transform)
+    env = gym.make("gymnasium_env:RobotArmEnv", render_mode='rgb_array', cropping=True)
+    obs, _ = env.reset()
+    img = env.render()
+    self.images, self.actions = [], []
+    for _ in tqdm(range(dataset_size)):
+      action = random.randint(0, 4)
+      self.images.append(self.transform(img))
+      self.actions.append(action)
+      next_obs, reward, terminated, truncated, info = env.step(action)
+      img = env.render()
+    env.close()
+  
+  def __len__(self):
+    return len(self.images)
+
+  def __getitem__(self, index):
+    return self.images[index], self.actions[index]
+
+
+class SimuCNNAETrainer(CNNAETrainer):
+  CONFIG = {'dataset_size': 1_000,
+            'exp_name':     'simu_ae_cnn',
+            'save_dir':     'NSP_experiments/',
+            'image_size':   32}
+  def __init__(self, config={}):
+    super().__init__(SimuCNNAETrainer.CONFIG)
+    self.config = {**self.config, **config}
+
+    train_dataset = SimpleImageDataset(self.config['dataset_size'])
+    test_dataset = SimpleImageDataset(self.config['dataset_size']//10)
+    self.set_dataloader(train_dataset=train_dataset, test_dataset=test_dataset, num_workers=0)
+
+
 def get_args():
   parser = argparse.ArgumentParser(description='Next state predictor experiments')
   parser.add_argument('--trainer', '-t', type=str, default='nsp')
@@ -322,7 +401,7 @@ def get_args():
 if __name__ == '__main__':
   # env.unwrapped.get_screen(crop=crop)
   # plt.imshow(np_to_tensor(image).permute(1, 2, 0));pkt.tight_layout();plt.show()
-  trainers = {'nsp': NextStatePredictorTrainer}
+  trainers = {'nsp': NextStatePredictorTrainer, 'simu_ae': SimuCNNAETrainer}
   args = get_args()
 
   config = {} if args.experiment_name is None else {'exp_name': args.experiment_name}

@@ -17,7 +17,13 @@ from torchvision import datasets, transforms, utils
 import cnn_layers as cl
 
 
-def flow_matching_loss(model, x1, x0=None, condition=None):
+def sample_time(batch_size, device):
+  u = torch.rand(batch_size, device=device)
+  t = 1 - u**2   # bias toward small t
+  return t[:, None]
+
+
+def flow_matching_loss(model, x1, x0=None, condition=None, weighted_time_sampling=False, noise_scale=1.0):
   '''
   Training logic of flow model:
   1) Sample random points from our source and target distributions, and pair the points (x1 and x0)
@@ -30,10 +36,13 @@ def flow_matching_loss(model, x1, x0=None, condition=None):
   '''
   if x0 is None:
     # ---- Sample Gaussian noise as x0 ----
-    x0 = torch.randn_like(x1)
+    x0 = torch.randn_like(x1) * noise_scale
 
-  # ---- Sample t uniformly ----
-  t = torch.rand(x1.size(0), 1, device=x1.device)
+  # ---- Sample t uniformly or weighted ----
+  if weighted_time_sampling:
+    t = sample_time(x1.size(0), x1.device)
+  else:
+    t = torch.rand(x1.size(0), 1, device=x1.device)
   t_expand = t[:, :, None, None]
 
   # ---- The target vector field (x1 - x0) ----
