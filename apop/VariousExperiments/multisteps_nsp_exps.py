@@ -1,3 +1,4 @@
+import math
 import torch
 import imageio
 import argparse
@@ -5,6 +6,7 @@ import torch.nn as nn
 import matplotlib.pyplot as plt
 
 from tqdm import tqdm
+from collections import deque
 from pytorch_msssim import SSIM
 from torchvision.utils import make_grid
 
@@ -27,7 +29,7 @@ def get_linear_net(input_dim, hidden_dim, output_dim):
                        nn.Linear(hidden_dim, output_dim))
 
 
-class GoalPolicy(nn.Module):
+class GoalPolicy(nn.Module):  # == SACActor
   def __init__(self, a_dim=5, is_dim=32, is_n_values=37, hidden=256):
     super().__init__()
     self.is_emb = get_embedding_block(is_n_values, is_dim)
@@ -38,6 +40,16 @@ class GoalPolicy(nn.Module):
     is_g_emb = self.is_emb(is_g).flatten(1)  # -> [B, 2, 32] -> [B, 64]
     x = torch.cat([is_c_emb, is_g_emb, is_g_emb - is_c_emb], dim=-1)  # [B, 192]
     return self.net(x)  # [B, 5]
+  
+  def sample(self, states, goals):
+    # ---- Policy forward pass π(a | s, g) ----
+    a_logits = self.forward(states, goals)
+    dist = torch.distributions.Categorical(logits=a_logits)
+    # Sample action (on-policy)
+    actions = dist.sample()
+    # Get log probs for RL learning
+    log_probs = dist.log_prob(actions)
+    return actions, log_probs, dist.entropy()
 
 
 class GoalValue(nn.Module):
@@ -50,6 +62,24 @@ class GoalValue(nn.Module):
     is_c_emb = self.is_emb(is_c).flatten(1)  # -> [B, 2, 32] -> [B, 64]
     is_g_emb = self.is_emb(is_g).flatten(1)  # -> [B, 2, 32] -> [B, 64]
     return self.net(torch.cat([is_c_emb, is_g_emb], dim=-1)).squeeze(-1)  # [B, 1] -> [B]
+
+
+class SACCritic(nn.Module):
+    def __init__(self, n_actions=5, action_dim=8, is_dim=32, is_n_values=37, hidden=256):
+        super().__init__()
+        self.is_emb = get_embedding_block(is_n_values, is_dim)
+        self.action_emb = get_embedding_block(n_actions, action_dim)
+
+        self.q1 = get_linear_net(2 * is_dim * 2 + hidden, hidden, 1)
+        self.q2 = get_linear_net(2 * is_dim * 2 + hidden, hidden, 1)
+
+    def forward(self, is_c, is_g, a):
+        is_c_emb = self.is_emb(is_c).flatten(1)
+        is_g_emb = self.is_emb(is_g).flatten(1)
+        a_emb = self.action_emb(a)
+
+        x = torch.cat([is_c_emb, is_g_emb, a_emb], dim=-1)
+        return self.q1(x).squeeze(-1), self.q2(x).squeeze(-1)
 
 
 class NISPredictor(nn.Module):
@@ -128,13 +158,13 @@ class NSPTrainer(NextStatePredictorTrainer):
   2)    IS   ---world_model------------> Ip
   3)    Ip   ---image_cleaner----------> I
   '''
-  CONFIG = {'exp_name':                             'threesteps_nsp',
+  CONFIG = {'exp_name':                             'multisteps_nsp',
             'replay_buffer_size':                   10_000,
             # INTERNAL STATE
             'internal_state_dim':                   2,
             'internal_state_n_values':              (90//5+1, 180//5+1),  # max_angle / angle_step
             'internal_state_emb':                   32,
-            'internal_world_model_max_train_steps': 50,  # 10_000
+            'internal_world_model_max_train_steps': 100,  # 10_000
             'internal_world_model_batch_size':      128,
             # IMAGE CLEANER
             'image_cleaner_max_train_steps':        5,  # 300
@@ -148,16 +178,18 @@ class NSPTrainer(NextStatePredictorTrainer):
             'isgp_batch_size':                      128,
             'isgp_max_horizon':                     50,
             'isgp_gamma':                           0.99,
-            'isgp_eval_every':                      100,
+            'isgp_eval_every':                      50,
             'isgp_lmbda':                           0.95,  # 0 = 1-step TD, 1 = Monte-Carlo
-            'isgp_entropy_coef':                    0.01,
             'isgp_entropy_coef_start':              0.01,
             'isgp_entropy_coef_end':                0.01 / 10,
-            'isgp_mean_success_rate_curriculum':    0.7,
+            'isgp_curriculum_start':                0.2,
+            'isgp_curriculum_end':                  0.8,
+            'isgp_her_prob':                        0.1,
+            'isgp_use_HER':                         False,  # Hindsight Experience Replay -> relabeling end goal
             }
   def __init__(self, config={}):
-    super().__init__(NSPTrainer.CONFIG)
-    self.config = {**self.config, **config}
+    self.config = {**NSPTrainer.CONFIG, **config}
+    super().__init__(self.config)
   
   def instanciate_model(self):
     self.world_model = WorldModelFlowUnet(img_chan=self.config['image_chan'],
@@ -191,7 +223,7 @@ class NSPTrainer(NextStatePredictorTrainer):
     self.ssim_criterion = SSIM(data_range=1, size_average=True, channel=3)
   
   @torch.no_grad()
-  def show_goal_policy(self):
+  def show_imagined_goal_policy(self):
     self.goal_policy.eval()
     self.internal_world_model.eval()
     self.world_model.eval()
@@ -269,6 +301,32 @@ class NSPTrainer(NextStatePredictorTrainer):
 
     returns = advantages + values
     return advantages, returns
+
+  def her_terminal_relabel(self, trajs):
+    """
+    Terminal-only HER for PPO stability.
+    """
+    T = len(trajs['states'])
+    B = trajs['states'][0].size(0)
+
+    # Decide which batch elements to relabel
+    her_mask = torch.rand(B, device=trajs['states'][0].device) < self.config['isgp_her_prob']
+    if not her_mask.any():
+      return trajs
+
+    # Final achieved internal state
+    final_state = trajs['states'][-1]  # s_T
+
+    # Replace goals everywhere (policy conditioning)
+    for t in range(T):
+      trajs['goals'][t][her_mask] = final_state[her_mask]
+
+    # Only final step gets success reward
+    reached = (final_state == final_state).all(dim=1)  # always true
+    trajs['rewards'][-1][reached] = 0.0
+    trajs['masks'][-1][reached] = 0.0
+
+    return trajs
 
   def reinforce_update_is_goal_networks(self, trajs, next_value, gamma, lmbda, entropy_coef):
     # Convert lists to tensors [T, B]
@@ -376,7 +434,30 @@ class NSPTrainer(NextStatePredictorTrainer):
 
     return policy_loss.item(), value_loss.item()
   
-  def collect_is_goal_rollout(self, batch, mean_success_rate, mean_success_rate_curriculum, max_horizon):
+  def long_goal_fraction(self, mean_success_rate, linear_ramp=False):
+    """
+    Maps success rate to fraction of batch that uses longer (obtain by permutation across batch) goals.
+    """
+    start = self.config['isgp_curriculum_start']   # e.g. 0.2
+    end   = self.config['isgp_curriculum_end']     # e.g. 0.8
+
+    if mean_success_rate <= start:
+        return 0.0
+    if mean_success_rate >= end:
+        return 1.0
+
+    goal_fraction = (mean_success_rate - start) / (end - start)
+
+    if linear_ramp:
+      # Linear ramp (can swap for sigmoid)
+      return goal_fraction
+    
+    # Exponential ramp
+    alpha = self.config.get('isgp_curriculum_exp_alpha', 2.0)
+    return float(1.0 - math.exp(-alpha * goal_fraction))
+    
+
+  def collect_is_goal_rollout(self, batch, mean_success_rate, max_horizon):
     """
     Collect an on-policy rollout using the current goal-conditioned policy.
 
@@ -386,30 +467,31 @@ class NSPTrainer(NextStatePredictorTrainer):
     """
     # Current internal state s_t
     is_c = batch['internal_state']  # internal_state_current [B, 2]
+    is_g = batch['next_internal_state'].clone()
 
-    # Current internal state goal g
-    if mean_success_rate > mean_success_rate_curriculum or self.long_goal:
-      perm = torch.randperm(is_c.size(0))
-      is_g = batch['next_internal_state'][perm]
-      self.long_goal = True
-    else:
-      is_g = batch['next_internal_state']  # internal_state_goal [B, 2]
+    # Fraction of long goals
+    p_long = self.long_goal_fraction(mean_success_rate)
+
+    if p_long > 0.0:
+      B = is_c.size(0)
+
+      # Which batch elements get long goals
+      long_mask = torch.rand(B, device=is_c.device) < p_long
+
+      if long_mask.any():
+        perm = torch.randperm(B, device=is_c.device)
+        is_g[long_mask] = is_g[perm][long_mask]
 
     # Buffers for trajectory
     trajs = {'states': [], 'goals': [], 'actions': [], 'log_probs': [], 'values': [],
-              'rewards': [], 'masks': [], 'entropies': []}
+             'rewards': [], 'masks': [], 'entropies': []}
 
     for t in range(max_horizon):
       # ---- Policy forward pass π(a | s, g) ----
-      a_logits = self.goal_policy(is_c, is_g)
-      dist = torch.distributions.Categorical(logits=a_logits)
-      # Sample action (on-policy)
-      a = dist.sample()
-      
-      log_p = dist.log_prob(a)
+      a, log_p, ent = self.goal_policy.sample(is_c, is_g)
+
       # Goal-conditioned value estimate V(s, g)
       val = self.goal_value(is_c, is_g).squeeze(-1)
-      ent = dist.entropy()
 
       # Internal World model is frozen and used only to simulate transitions
       with torch.no_grad():
@@ -458,10 +540,12 @@ class NSPTrainer(NextStatePredictorTrainer):
 
     # training loop
     self.long_goal = False
+    entropy_coef = self.config['isgp_entropy_coef_start']
     best_success_rate = -torch.inf
     mean_policy_loss = 0.0
     mean_value_loss = 0.0
     mean_success_rate = 0.0
+    mean_success_rate_window = deque(maxlen=100)
     pbar = tqdm(range(self.config['isgp_n_updates']))
     for step in pbar:
       batch = self.replay_buffer.sample(self.config['isgp_batch_size'])
@@ -469,7 +553,7 @@ class NSPTrainer(NextStatePredictorTrainer):
       # Collect ON-POLICY rollout
       trajs, final_val, reached = self.collect_is_goal_rollout(batch,
                                                                mean_success_rate,
-                                                               self.config['isgp_mean_success_rate_curriculum'],
+                                                              #  self.config['isgp_mean_success_rate_curriculum'],
                                                                self.config['isgp_max_horizon'])
       
       # --- 2. Update Networks ---
@@ -489,7 +573,9 @@ class NSPTrainer(NextStatePredictorTrainer):
 
       mean_policy_loss += (loss_policy - mean_policy_loss) / (step + 1)
       mean_value_loss += (loss_value - mean_value_loss) / (step + 1)
-      mean_success_rate += (reached.float().mean() - mean_success_rate) / (step + 1)
+      # mean_success_rate += (reached.float().mean() - mean_success_rate) / (step + 1)
+      mean_success_rate_window.append(reached.float().mean().item())
+      mean_success_rate = sum(mean_success_rate_window) / len(mean_success_rate_window)
     
       if mean_success_rate > best_success_rate:
         self.save_model(self.goal_policy, 'goal_policy')
@@ -720,7 +806,7 @@ class NSPTrainer(NextStatePredictorTrainer):
 
       imagined_traj.append(rec)
 
-    self.tf_logger.add_images('generated_traj_threesteps_nsp', torch.cat(imagined_traj, dim=0))
+    self.tf_logger.add_images('generated_traj_multisteps_nsp', torch.cat(imagined_traj, dim=0))
 
 
 def get_args():
@@ -768,4 +854,4 @@ if __name__ == '__main__':
     trainer.show_imagined_trajectory()
   
   if args.show_imagined_goal_trajectory:
-    trainer.show_goal_policy()
+    trainer.show_imagined_goal_policy()
