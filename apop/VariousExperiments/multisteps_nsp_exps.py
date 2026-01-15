@@ -13,19 +13,25 @@ from flow_matching_exps import flow_matching_loss, rk45_sampling
 from next_state_predictor_exps import NextStatePredictorTrainer, WorldModelFlowUnet
 
 
+def get_embedding_block(n_embeddings, embedding_dim):
+  return nn.Sequential(nn.Embedding(n_embeddings, embedding_dim),
+                       nn.Linear(embedding_dim, embedding_dim),
+                       nn.SiLU(True))
+
+
+def get_linear_net(input_dim, hidden_dim, output_dim):
+  return nn.Sequential(nn.Linear(input_dim, hidden_dim),
+                       nn.ReLU(True),
+                       nn.Linear(hidden_dim, hidden_dim),
+                       nn.ReLU(True),
+                       nn.Linear(hidden_dim, output_dim))
+
+
 class GoalPolicy(nn.Module):
   def __init__(self, a_dim=5, is_dim=32, is_n_values=37, hidden=256):
     super().__init__()
-    self.is_emb = nn.Sequential(nn.Embedding(is_n_values, is_dim),
-                                nn.Linear(is_dim, is_dim),
-                                nn.SiLU(True))
-    self.net = nn.Sequential(
-      nn.Linear(2 * is_dim * 3, hidden),
-      nn.ReLU(True),
-      nn.Linear(hidden, hidden),
-      nn.ReLU(True),
-      nn.Linear(hidden, a_dim)
-    )
+    self.is_emb = get_embedding_block(is_n_values, is_dim)
+    self.net = get_linear_net(2 * is_dim * 3, hidden, a_dim)
 
   def forward(self, is_c, is_g):  # [B, 2], [B, 2]
     is_c_emb = self.is_emb(is_c).flatten(1)  # -> [B, 2, 32] -> [B, 64]
@@ -37,16 +43,8 @@ class GoalPolicy(nn.Module):
 class GoalValue(nn.Module):
   def __init__(self, is_dim=32, is_n_values=37, hidden=256):
     super().__init__()
-    self.is_emb = nn.Sequential(nn.Embedding(is_n_values, is_dim),
-                                nn.Linear(is_dim, is_dim),
-                                nn.SiLU(True))
-    self.net = nn.Sequential(
-      nn.Linear(2 * is_dim * 2, hidden),
-      nn.ReLU(True),
-      nn.Linear(hidden, hidden),
-      nn.ReLU(True),
-      nn.Linear(hidden, 1)
-    )
+    self.is_emb = get_embedding_block(is_n_values, is_dim)
+    self.net = get_linear_net(2 * is_dim * 2, hidden, 1)
 
   def forward(self, is_c, is_g):
     is_c_emb = self.is_emb(is_c).flatten(1)  # -> [B, 2, 32] -> [B, 64]
@@ -57,12 +55,8 @@ class GoalValue(nn.Module):
 class NISPredictor(nn.Module):
   def __init__(self, n_actions=5, action_dim=8, is1_n_values=19, is2_n_values=37, is_dim=32, mlp_dim=64):
     super().__init__()
-    self.action_emb = nn.Sequential(nn.Embedding(n_actions, action_dim),
-                                    nn.Linear(action_dim, action_dim),
-                                    nn.SiLU(True))
-    self.is_emb = nn.Sequential(nn.Embedding(max(is1_n_values, is2_n_values), is_dim),
-                                nn.Linear(is_dim, is_dim),
-                                nn.SiLU(True))
+    self.action_emb = get_embedding_block(n_actions, action_dim)
+    self.is_emb = get_embedding_block(max(is1_n_values, is2_n_values), is_dim)
 
     self.main = nn.Sequential(nn.Linear(action_dim + 2*is_dim, mlp_dim), nn.SiLU(True),
                               nn.Linear(mlp_dim, mlp_dim), nn.SiLU(True))
@@ -147,7 +141,20 @@ class NSPTrainer(NextStatePredictorTrainer):
             'image_cleaner_batch_size':             128,
             'lambda_mse':                           0.8,
             'lambda_ssim':                          0.2,
-            'world_model_max_train_steps':          30,}  # 3_000
+            # WORLD MODEL (Some already setted in NextStatePredictorTrainer)
+            'world_model_max_train_steps':          30,  # 3_000
+            # INTERNAL STATE GOAL POLICY
+            'isgp_n_updates':                       2_000,  # 5_000
+            'isgp_batch_size':                      128,
+            'isgp_max_horizon':                     50,
+            'isgp_gamma':                           0.99,
+            'isgp_eval_every':                      100,
+            'isgp_lmbda':                           0.95,  # 0 = 1-step TD, 1 = Monte-Carlo
+            'isgp_entropy_coef':                    0.01,
+            'isgp_entropy_coef_start':              0.01,
+            'isgp_entropy_coef_end':                0.01 / 10,
+            'isgp_mean_success_rate_curriculum':    0.7,
+            }
   def __init__(self, config={}):
     super().__init__(NSPTrainer.CONFIG)
     self.config = {**self.config, **config}
@@ -177,6 +184,12 @@ class NSPTrainer(NextStatePredictorTrainer):
                                 is_n_values=sum(self.config['internal_state_n_values'])).to(self.device)
     print(f'Instanciate GoalPolicy (trainable parameters: {self.get_train_params(self.goal_policy):,})')
   
+  def set_training_utils(self):
+    super().set_training_utils()
+    self.mse_criterion = nn.MSELoss()
+    self.cross_entropy_criterion = nn.CrossEntropyLoss()
+    self.ssim_criterion = SSIM(data_range=1, size_average=True, channel=3)
+  
   @torch.no_grad()
   def show_goal_policy(self):
     self.goal_policy.eval()
@@ -200,7 +213,6 @@ class NSPTrainer(NextStatePredictorTrainer):
     for i in range(2, 24):
       # Get action
       a = self.goal_policy(is_c, is_g).argmax(-1)
-      print(f'action={a.item()}')
 
       # Get next internal_state
       is1_logits, is2_logits = self.internal_world_model(a, is_c)
@@ -238,6 +250,25 @@ class NSPTrainer(NextStatePredictorTrainer):
       for frame in traj
     ]
     imageio.mimsave("sequence.gif", frames, fps=10)
+  
+  def compute_gae(self, rewards, values, masks, next_value, gamma, lmbda):
+    T = rewards.size(0)
+
+    # ---- Generalized Advantage Estimation (GAE) ----
+    advantages = torch.zeros_like(rewards)
+    last_gae = 0.0
+
+    for t in reversed(range(T)):
+      # Bootstrap with V(s_{t+1}, g)
+      next_values = next_value if t == T - 1 else values[t + 1]
+      # TD error δ_t
+      delta = rewards[t] + gamma * next_values * masks[t] - values[t]
+      # GAE recursion
+      last_gae = delta + gamma * lmbda * masks[t] * last_gae
+      advantages[t] = last_gae
+
+    returns = advantages + values
+    return advantages, returns
 
   def reinforce_update_is_goal_networks(self, trajs, next_value, gamma, lmbda, entropy_coef):
     # Convert lists to tensors [T, B]
@@ -247,26 +278,7 @@ class NSPTrainer(NextStatePredictorTrainer):
     log_probs = torch.stack(trajs['log_probs'])
     entropies = torch.stack(trajs['entropies'])
 
-    T = rewards.size(0)
-    returns = torch.zeros_like(rewards)
-    advantages = torch.zeros_like(rewards)
-    last_gae_lam = 0
-
-    # --- GAE Calculation ---
-    for t in reversed(range(T)):
-      if t == T - 1:
-        next_non_terminal = masks[t]
-        next_values = next_value
-      else:
-        next_non_terminal = masks[t]
-        next_values = values[t + 1]
-      
-      # TD Error (delta)
-      delta = rewards[t] + gamma * next_values * next_non_terminal - values[t]
-      # GAE: Recursive smoothing of TD errors
-      advantages[t] = last_gae_lam = delta + gamma * lmbda * next_non_terminal * last_gae_lam
-    
-    returns = advantages + values.detach()
+    advantages, returns = self.compute_gae(rewards, values, masks, next_value, gamma, lmbda)
 
     # Normalize advantages for stability
     advantages = advantages.view(-1)
@@ -306,22 +318,7 @@ class NSPTrainer(NextStatePredictorTrainer):
     values = torch.stack(traj['values'])
     masks = torch.stack(traj['masks'])
 
-    T, B = rewards.shape
-
-    # ---- Generalized Advantage Estimation (GAE) ----
-    advantages = torch.zeros_like(rewards)
-    last_gae = 0.0
-
-    for t in reversed(range(T)):
-      # Bootstrap with V(s_{t+1}, g)
-      next_val = next_value if t == T - 1 else values[t + 1]
-      # TD error δ_t
-      delta = rewards[t] + gamma * next_val * masks[t] - values[t]
-      # GAE recursion
-      last_gae = delta + gamma * lmbda * masks[t] * last_gae
-      advantages[t] = last_gae
-
-    returns = advantages + values
+    advantages, returns = self.compute_gae(rewards, values, masks, next_value, gamma, lmbda)
 
     # ---- Flatten time and batch dimensions ----
     states = torch.cat(traj['states'])
@@ -379,7 +376,7 @@ class NSPTrainer(NextStatePredictorTrainer):
 
     return policy_loss.item(), value_loss.item()
   
-  def collect_is_goal_rollout(self, batch, mean_success_rate, mean_success_rate_curriculum, long_goal, max_horizon):
+  def collect_is_goal_rollout(self, batch, mean_success_rate, mean_success_rate_curriculum, max_horizon):
     """
     Collect an on-policy rollout using the current goal-conditioned policy.
 
@@ -391,10 +388,10 @@ class NSPTrainer(NextStatePredictorTrainer):
     is_c = batch['internal_state']  # internal_state_current [B, 2]
 
     # Current internal state goal g
-    if mean_success_rate > mean_success_rate_curriculum or long_goal:
+    if mean_success_rate > mean_success_rate_curriculum or self.long_goal:
       perm = torch.randperm(is_c.size(0))
       is_g = batch['next_internal_state'][perm]
-      long_goal = True
+      self.long_goal = True
     else:
       is_g = batch['next_internal_state']  # internal_state_goal [B, 2]
 
@@ -443,7 +440,7 @@ class NSPTrainer(NextStatePredictorTrainer):
     with torch.no_grad():
       final_val = self.goal_value(is_next, is_g).squeeze(-1).detach()
   
-    return trajs, final_val, reached, long_goal
+    return trajs, final_val, reached
   
   def train_is_goal_policy(self):
     print('Training Internal State Goal policy...')
@@ -459,53 +456,40 @@ class NSPTrainer(NextStatePredictorTrainer):
     self.opt_policy = torch.optim.Adam(self.goal_policy.parameters(), lr=1e-4)
     self.opt_value = torch.optim.Adam(self.goal_value.parameters(), lr=1e-4)
 
-    # training params
-    n_updates = 2_000  # 5_000
-    batch_size = 128
-    max_horizon = 50
-    gamma = 0.99
-    eval_every = 100
-    lmbda = 0.95  # 0 = 1-step TD, 1 = Monte-Carlo
-    entropy_coef = 0.01
-    entropy_coef_start = entropy_coef
-    entropy_coef_end = entropy_coef / 10
-    mean_success_rate_curriculum = 0.7
-    long_goal = False
-
     # training loop
+    self.long_goal = False
     best_success_rate = -torch.inf
     mean_policy_loss = 0.0
     mean_value_loss = 0.0
     mean_success_rate = 0.0
-    pbar = tqdm(range(n_updates))
+    pbar = tqdm(range(self.config['isgp_n_updates']))
     for step in pbar:
-      batch = self.replay_buffer.sample(batch_size)
+      batch = self.replay_buffer.sample(self.config['isgp_batch_size'])
 
       # Collect ON-POLICY rollout
-      trajs, final_val, reached, long_goal = self.collect_is_goal_rollout(batch,
-                                                                          mean_success_rate,
-                                                                          mean_success_rate_curriculum,
-                                                                          long_goal,
-                                                                          max_horizon)
+      trajs, final_val, reached = self.collect_is_goal_rollout(batch,
+                                                               mean_success_rate,
+                                                               self.config['isgp_mean_success_rate_curriculum'],
+                                                               self.config['isgp_max_horizon'])
       
       # --- 2. Update Networks ---
       # loss_policy, loss_value = self.update_is_goal_networks(trajs, final_val, gamma, lmbda, entropy_coef)
-      loss_policy, loss_value = self.ppo_update_is_goal_networks(
-        trajs,
-        final_val,
-        gamma=gamma,
-        lmbda=lmbda,
-        clip_eps=0.2,
-        value_coef=0.5,
-        entropy_coef=entropy_coef,
-        n_epochs=4,
-      )
+      loss_policy, loss_value = self.ppo_update_is_goal_networks(trajs,
+                                                                 final_val,
+                                                                 gamma=self.config['isgp_gamma'],
+                                                                 lmbda=self.config['isgp_lmbda'],
+                                                                 clip_eps=0.2,
+                                                                 value_coef=0.5,
+                                                                 entropy_coef=entropy_coef,
+                                                                 n_epochs=4)
 
-      entropy_coef = max(entropy_coef_end, entropy_coef_start * (1 - step / n_updates)) # Gradual decay
+      # Gradual decay
+      entropy_coef = max(self.config['isgp_entropy_coef_end'],
+                         self.config['isgp_entropy_coef_start'] * (1 - step / self.config['isgp_n_updates']))
 
       mean_policy_loss += (loss_policy - mean_policy_loss) / (step + 1)
       mean_value_loss += (loss_value - mean_value_loss) / (step + 1)
-      mean_success_rate += (reached.float().mean() - mean_success_rate) / (step//eval_every + 1)
+      mean_success_rate += (reached.float().mean() - mean_success_rate) / (step + 1)
     
       if mean_success_rate > best_success_rate:
         self.save_model(self.goal_policy, 'goal_policy')
@@ -531,8 +515,6 @@ class NSPTrainer(NextStatePredictorTrainer):
     self.world_model.eval()
 
     self.ic_opt = torch.optim.AdamW(self.image_cleaner.parameters(), lr=1e-3)
-    self.mse_criterion = nn.MSELoss()
-    self.ssim_criterion = SSIM(data_range=1, size_average=True, channel=3)
 
     best_loss = torch.inf
     mean_rec_loss = 0.0
@@ -647,7 +629,6 @@ class NSPTrainer(NextStatePredictorTrainer):
     self.internal_world_model.train()
 
     self.iwm_opt = torch.optim.AdamW(self.internal_world_model.parameters(), lr=1e-2)
-    self.iwm_criterion = nn.CrossEntropyLoss()
 
     best_loss = torch.inf
     mean_loss = 0.0
@@ -665,8 +646,8 @@ class NSPTrainer(NextStatePredictorTrainer):
       target = batch['next_internal_state']
       is1_target, is2_target = target[:, 0], target[:, 1]
 
-      loss1 = self.iwm_criterion(nis1_pred, is1_target)
-      loss2 = self.iwm_criterion(nis2_pred, is2_target)
+      loss1 = self.cross_entropy_criterion(nis1_pred, is1_target)
+      loss2 = self.cross_entropy_criterion(nis2_pred, is2_target)
       loss = loss1 + loss2
 
       self.iwm_opt.zero_grad()
