@@ -28,7 +28,9 @@ warnings.filterwarnings("ignore")
 class WorldModelFlowUnet(nn.Module):
   def __init__(self, img_chan=3, time_dim=64, x_start=False,
                add_action=True, n_actions=5, action_dim=8,
-               add_is=False, is_n_values=36, is_dim=32):  # is = internal_state
+               add_is=False, is_n_values=36, is_dim=32,  # is = internal_state
+               add_ds=False, ds_n_values=2, ds_dim=64,  # ds = done_signal
+               ):
     super().__init__()
     self.time_emb = nn.Sequential(TimeEmbedding(time_dim), nn.Linear(time_dim, time_dim), nn.SiLU())
     condition_dim = time_dim 
@@ -41,6 +43,11 @@ class WorldModelFlowUnet(nn.Module):
     if add_is:
       self.is_emb = nn.Sequential(nn.Embedding(is_n_values, is_dim), nn.Linear(is_dim, is_dim), nn.SiLU())
       condition_dim += 2 * is_dim
+    
+    self.add_ds = add_ds
+    if add_ds:
+      self.ds_emb = nn.Sequential(nn.Embedding(ds_n_values, ds_dim), nn.Linear(ds_dim, ds_dim), nn.SiLU())
+      condition_dim += ds_dim
 
     self.x_start = x_start
     start_dim = 2*img_chan if x_start else img_chan
@@ -63,6 +70,7 @@ class WorldModelFlowUnet(nn.Module):
     action = condition.get('action', None)
     internal_state = condition.get('internal_state', None)  # [B, n_is=2]
     x_cond = condition.get('x_cond', None)
+    done_signal = condition.get('done_signal', None)
 
     t_emb = self.time_emb(t.squeeze(-1))         # -> [B, time_dim]
     all_embed = [t_emb]
@@ -74,6 +82,10 @@ class WorldModelFlowUnet(nn.Module):
     if internal_state is not None:
       is_emb = self.is_emb(internal_state)  # [B, n_is=2, is_dim=32]
       all_embed += [is_emb.flatten(1)]  # [B, 2*32]
+    
+    if done_signal is not None:
+      ds_emb = self.ds_emb(done_signal.squeeze(-1))  # [B, ds_dim=64]
+      all_embed += [ds_emb]
 
     all_embed = torch.cat(all_embed, dim=1)  # -> [B, 104]
 
@@ -215,6 +227,10 @@ class NextStatePredictorTrainer:
       next_img = self.env.render()
       self.replay_buffer.add(obs//5, action, img, reward, terminated, next_obs//5, next_img)
       obs, img = next_obs, next_img
+
+      if terminated:
+        obs, _ = self.env.reset()
+        img = self.env.render()
   
   @torch.no_grad()
   def autoplay(self):

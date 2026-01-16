@@ -1,5 +1,6 @@
 import math
 import torch
+import pygame
 import imageio
 import argparse
 import torch.nn as nn
@@ -29,7 +30,7 @@ def get_linear_net(input_dim, hidden_dim, output_dim):
                        nn.Linear(hidden_dim, output_dim))
 
 
-class GoalPolicy(nn.Module):  # == SACActor
+class GoalPolicy(nn.Module):
   def __init__(self, a_dim=5, is_dim=32, is_n_values=37, hidden=256):
     super().__init__()
     self.is_emb = get_embedding_block(is_n_values, is_dim)
@@ -64,24 +65,6 @@ class GoalValue(nn.Module):
     return self.net(torch.cat([is_c_emb, is_g_emb], dim=-1)).squeeze(-1)  # [B, 1] -> [B]
 
 
-class SACCritic(nn.Module):
-    def __init__(self, n_actions=5, action_dim=8, is_dim=32, is_n_values=37, hidden=256):
-        super().__init__()
-        self.is_emb = get_embedding_block(is_n_values, is_dim)
-        self.action_emb = get_embedding_block(n_actions, action_dim)
-
-        self.q1 = get_linear_net(2 * is_dim * 2 + hidden, hidden, 1)
-        self.q2 = get_linear_net(2 * is_dim * 2 + hidden, hidden, 1)
-
-    def forward(self, is_c, is_g, a):
-        is_c_emb = self.is_emb(is_c).flatten(1)
-        is_g_emb = self.is_emb(is_g).flatten(1)
-        a_emb = self.action_emb(a)
-
-        x = torch.cat([is_c_emb, is_g_emb, a_emb], dim=-1)
-        return self.q1(x).squeeze(-1), self.q2(x).squeeze(-1)
-
-
 class NISPredictor(nn.Module):
   def __init__(self, n_actions=5, action_dim=8, is1_n_values=19, is2_n_values=37, is_dim=32, mlp_dim=64):
     super().__init__()
@@ -105,47 +88,86 @@ class NISPredictor(nn.Module):
     return is1, is2
 
 
-class ImageToIS(nn.Module):
-  def __init__(self, is1_n_values=18, is2_n_values=36, hidden_dim=512):
-      super().__init__()
+class ImageISGoalPredictor(nn.Module):
+  """
+  Predicts an internal_state_goal from:
+    - image: [B, 3, 32, 32]
+    - internal_state: [B, 2] (discrete)
 
-      self.encoder = nn.Sequential(
-          # [B, 3, 32, 32]
-          nn.Conv2d(3, 64, kernel_size=3, stride=2, padding=1),  # [B, 64, 16, 16]
-          nn.BatchNorm2d(64),
-          nn.SiLU(),
+  Outputs:
+    - goal logits for each internal dimension
+  """
+  def __init__(self, is1_n_values=18, is2_n_values=36, is_dim=32, hidden_dim=512, mlp_dim=256):
+    super().__init__()
+    # --------------------------------------------------
+    # Image encoder (same spirit as ImageToIS)
+    # --------------------------------------------------
+    self.image_encoder = nn.Sequential(
+      nn.Conv2d(3, 64, 3, stride=2, padding=1),   # [B, 64, 16, 16]
+      nn.BatchNorm2d(64),
+      nn.SiLU(),
 
-          nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),  # [B, 128, 8, 8]
-          nn.BatchNorm2d(128),
-          nn.SiLU(),
+      nn.Conv2d(64, 128, 3, stride=2, padding=1), # [B, 128, 8, 8]
+      nn.BatchNorm2d(128),
+      nn.SiLU(),
 
-          nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1),  # [B, 256, 4, 4]
-          nn.BatchNorm2d(256),
-          nn.SiLU(),
+      nn.Conv2d(128, 256, 3, stride=2, padding=1),# [B, 256, 4, 4]
+      nn.BatchNorm2d(256),
+      nn.SiLU(),
 
-          nn.Conv2d(256, hidden_dim, kernel_size=3, stride=1, padding=1),  # [B, 512, 4, 4]
-          nn.BatchNorm2d(hidden_dim),
-          nn.SiLU(),
-      )
+      nn.Conv2d(256, hidden_dim, 3, padding=1),  # [B, 512, 4, 4]
+      nn.BatchNorm2d(hidden_dim),
+      nn.SiLU(),
+    )
 
-      # Global Average Pooling → [B, hidden_dim]
-      self.pool = nn.AdaptiveAvgPool2d(1)
+    self.pool = nn.AdaptiveAvgPool2d(1)  # → [B, hidden_dim]
 
-      # Two prediction heads
-      self.head1 = nn.Linear(hidden_dim, is1_n_values)
-      self.head2 = nn.Linear(hidden_dim, is2_n_values)
+    # --------------------------------------------------
+    # Internal state embedding
+    # --------------------------------------------------
+    self.is_emb = get_embedding_block(
+      n_embeddings=max(is1_n_values, is2_n_values),
+      embedding_dim=is_dim,
+    )
 
-  def forward(self, x):
+    # --------------------------------------------------
+    # Fusion MLP
+    # --------------------------------------------------
+    fusion_dim = hidden_dim + 2 * is_dim
+
+    self.fusion = nn.Sequential(
+      nn.Linear(fusion_dim, mlp_dim),
+      nn.SiLU(),
+      nn.Linear(mlp_dim, mlp_dim),
+      nn.SiLU(),
+    )
+
+    # --------------------------------------------------
+    # Goal prediction heads
+    # --------------------------------------------------
+    self.goal1_head = nn.Linear(mlp_dim, is1_n_values)
+    self.goal2_head = nn.Linear(mlp_dim, is2_n_values)
+
+  def forward(self, image, internal_state):
     """
-    x: [B, 3, 32, 32]
+    image: [B, 3, 32, 32]
+    internal_state: [B, 2]
     """
-    h = self.encoder(x)
-    h = self.pool(h).flatten(1)
+    # ---- Image features ----
+    img_feat = self.image_encoder(image)
+    img_feat = self.pool(img_feat).flatten(1)  # [B, hidden_dim]
 
-    out1 = self.head1(h)  # [B, 18]
-    out2 = self.head2(h)  # [B, 36]
+    # ---- Internal state embedding ----
+    is_emb = self.is_emb(internal_state).flatten(1)  # [B, 2*is_dim]
 
-    return out1, out2
+    # ---- Fuse ----
+    h = self.fusion(torch.cat([img_feat, is_emb], dim=1))
+
+    # ---- Predict goal ----
+    g1_logits = self.goal1_head(h)  # [B, is1_n_values]
+    g2_logits = self.goal2_head(h)  # [B, is2_n_values]
+
+    return g1_logits, g2_logits
 
 
 class NSPTrainer(NextStatePredictorTrainer):
@@ -174,7 +196,7 @@ class NSPTrainer(NextStatePredictorTrainer):
             # WORLD MODEL (Some already setted in NextStatePredictorTrainer)
             'world_model_max_train_steps':          30,  # 3_000
             # INTERNAL STATE GOAL POLICY
-            'isgp_n_updates':                       2_000,  # 5_000
+            'isgp_n_updates':                       500,  # 5_000
             'isgp_batch_size':                      128,
             'isgp_max_horizon':                     50,
             'isgp_gamma':                           0.99,
@@ -184,8 +206,10 @@ class NSPTrainer(NextStatePredictorTrainer):
             'isgp_entropy_coef_end':                0.01 / 10,
             'isgp_curriculum_start':                0.2,
             'isgp_curriculum_end':                  0.8,
-            'isgp_her_prob':                        0.1,
+            'isgp_her_prob':                        0.2,
             'isgp_use_HER':                         False,  # Hindsight Experience Replay -> relabeling end goal
+            # INTERNAL STATE GOAL PREDICTOR
+            'internal_state_goal_predictor_max_train_steps': 1_000,
             }
   def __init__(self, config={}):
     self.config = {**NSPTrainer.CONFIG, **config}
@@ -196,6 +220,7 @@ class NSPTrainer(NextStatePredictorTrainer):
                                           time_dim=self.config['time_dim'],
                                           add_action=False,
                                           add_is=True,
+                                          add_ds=True,
                                           is_n_values=max(self.config['internal_state_n_values']),
                                           is_dim=self.config['internal_state_emb']).to(self.device)
     print(f'Instanciate Worl_Model (trainable parameters: {self.get_train_params(self.world_model):,})')
@@ -215,6 +240,8 @@ class NSPTrainer(NextStatePredictorTrainer):
     self.goal_value = GoalValue(is_dim=self.config['internal_state_emb'],
                                 is_n_values=sum(self.config['internal_state_n_values'])).to(self.device)
     print(f'Instanciate GoalPolicy (trainable parameters: {self.get_train_params(self.goal_policy):,})')
+    self.is_goal_predictor = ImageISGoalPredictor().to(self.device)
+    print(f'Instanciate IS_Goal_Predictor (trainable parameters: {self.get_train_params(self.is_goal_predictor):,})')
   
   def set_training_utils(self):
     super().set_training_utils()
@@ -252,6 +279,7 @@ class NSPTrainer(NextStatePredictorTrainer):
 
       # Get predicted world image
       condition = {'internal_state': is_next}
+      condition['done_signal'] = batch['done'][:1]
       x1_pred = rk45_sampling(
         self.world_model,
         device=self.device,
@@ -301,32 +329,6 @@ class NSPTrainer(NextStatePredictorTrainer):
 
     returns = advantages + values
     return advantages, returns
-
-  def her_terminal_relabel(self, trajs):
-    """
-    Terminal-only HER for PPO stability.
-    """
-    T = len(trajs['states'])
-    B = trajs['states'][0].size(0)
-
-    # Decide which batch elements to relabel
-    her_mask = torch.rand(B, device=trajs['states'][0].device) < self.config['isgp_her_prob']
-    if not her_mask.any():
-      return trajs
-
-    # Final achieved internal state
-    final_state = trajs['states'][-1]  # s_T
-
-    # Replace goals everywhere (policy conditioning)
-    for t in range(T):
-      trajs['goals'][t][her_mask] = final_state[her_mask]
-
-    # Only final step gets success reward
-    reached = (final_state == final_state).all(dim=1)  # always true
-    trajs['rewards'][-1][reached] = 0.0
-    trajs['masks'][-1][reached] = 0.0
-
-    return trajs
 
   def reinforce_update_is_goal_networks(self, trajs, next_value, gamma, lmbda, entropy_coef):
     # Convert lists to tensors [T, B]
@@ -456,7 +458,6 @@ class NSPTrainer(NextStatePredictorTrainer):
     alpha = self.config.get('isgp_curriculum_exp_alpha', 2.0)
     return float(1.0 - math.exp(-alpha * goal_fraction))
     
-
   def collect_is_goal_rollout(self, batch, mean_success_rate, max_horizon):
     """
     Collect an on-policy rollout using the current goal-conditioned policy.
@@ -594,7 +595,7 @@ class NSPTrainer(NextStatePredictorTrainer):
       
       descr = f"P_Loss: {loss_policy:.3f} | V_Loss: {loss_value:.3f} | SuccessRate: {mean_success_rate:.2f}"
       pbar.set_description(descr)
-
+  
   def train_image_cleaner(self):
     print('Training ImageCleaner...')
     self.image_cleaner.train()
@@ -615,6 +616,7 @@ class NSPTrainer(NextStatePredictorTrainer):
       # --------------------------------------------------------------------------- #
       with torch.no_grad():
         condition = {'internal_state': batch['internal_state']}
+        condition['done_signal'] = batch['done']
         x1_pred = rk45_sampling(
           self.world_model,
           device=self.device,
@@ -669,6 +671,7 @@ class NSPTrainer(NextStatePredictorTrainer):
       batch = self.replay_buffer.sample(self.config['world_model_batch_size'])
       x1 = batch['image']  # target distribution is the image to predict
       condition = {'internal_state': batch['internal_state']}
+      condition['done_signal'] = batch['done']
 
       # ------------------------------------------------------------------------------------------ #
       # STEP1: Train the world_model to produce a corresponding image with provided internal_state #
@@ -758,14 +761,62 @@ class NSPTrainer(NextStatePredictorTrainer):
         self.tf_logger.add_scalar('iwm_accuracy1', mean_acc1, step)
         self.tf_logger.add_scalar('iwm_accuracy2', mean_acc2, step)
       
-      pbar.set_description(f'Loss: {mean_loss:.6f}')
+      pbar.set_description(f'Loss: {mean_loss:.6f} | Mean_acc: {(mean_acc1+mean_acc2)/2:.2f}')
   
+  def train_is_goal_predictor(self):
+    self.is_goal_predictor.train()
+    self.isgp_opt = torch.optim.AdamW(self.is_goal_predictor.parameters(), lr=3e-4)
+
+    best_loss = torch.inf
+    mean_loss = 0.0
+    mean_acc1, mean_acc2 = 0.0, 0.0
+
+    pbar = tqdm(range(self.config['internal_state_goal_predictor_max_train_steps']))
+    for step in pbar:
+      batch = self.replay_buffer.sample_image_is_goal_batch(self.config.get('isgpred_batch_size', 128))
+
+      image = batch["image"]
+      is_c = batch["internal_state"]
+      is_g = batch["goal_internal_state"]
+
+      g1_logits, g2_logits = self.is_goal_predictor(image, is_c)
+
+      loss = (
+        self.cross_entropy_criterion(g1_logits, is_g[:, 0]) +
+        self.cross_entropy_criterion(g2_logits, is_g[:, 1])
+      )
+
+      self.isgp_opt.zero_grad()
+      loss.backward()
+      self.isgp_opt.step()
+
+      mean_loss += (loss.item() - mean_loss) / (step + 1)
+      # Accuracies
+      pred1 = g1_logits.argmax(dim=1)  # [B]
+      pred2 = g2_logits.argmax(dim=1)  # [B]
+      acc1 = (pred1 == is_g[:, 0]).float().mean()
+      acc2 = (pred2 == is_g[:, 1]).float().mean()
+      mean_acc1 += (acc1.item() - mean_acc1) / (step + 1)
+      mean_acc2 += (acc2.item() - mean_acc2) / (step + 1)
+
+      if mean_loss < best_loss:
+        self.save_model(self.is_goal_predictor, 'is_goal_predictor')
+        best_loss = mean_loss
+      
+      if self.tf_logger:
+        self.tf_logger.add_scalar('isgpred_loss', mean_loss, step)
+        self.tf_logger.add_scalar('isgpred_accuracy1', mean_acc1, step)
+        self.tf_logger.add_scalar('isgpred_accuracy2', mean_acc2, step)
+      
+      pbar.set_description(f'Loss: {mean_loss:.6f} | Mean_acc: {(mean_acc1+mean_acc2)/2:.2f}')
+
   def train(self):
     self.fill_memory()
     self.train_internal_world_model()
     self.train_world_model()
     self.train_image_cleaner()
     self.train_is_goal_policy()
+    self.train_is_goal_predictor()
   
   @torch.no_grad()
   def show_imagined_trajectory(self):
@@ -794,7 +845,7 @@ class NSPTrainer(NextStatePredictorTrainer):
         self.world_model,
         device=self.device,
         n_samples=internal_state.shape[0],
-        condition={'internal_state': internal_state},
+        condition={'internal_state': internal_state, 'done_signal': batch['done']},
         n_steps=10
       )
       x1_pred = self.clamp_denorm_fn(x1_pred[-1])
@@ -807,6 +858,64 @@ class NSPTrainer(NextStatePredictorTrainer):
       imagined_traj.append(rec)
 
     self.tf_logger.add_images('generated_traj_multisteps_nsp', torch.cat(imagined_traj, dim=0))
+  
+  @torch.no_grad()
+  def autoplay(self):
+    self.is_goal_predictor.eval()
+
+    pygame.init()  # Initialize pygame for keyboard input
+
+    running = True
+    force_reset = False
+
+    obs, _ = self.env.reset()
+    img = self.env.render()
+
+    def format_data(obs, img):
+      obs, _, img, *_ = self.replay_buffer.prepare_data(obs//5, None, img, None, None, None, None)
+      obs, img = obs.unsqueeze(0).to(self.device), img.unsqueeze(0).to(self.device)
+      return obs, img  # [1, 2], [1, 3, 32, 32]
+
+    def find_goal(img, obs):
+      g1_logits, g2_logits = self.is_goal_predictor(img, obs)
+      goal = torch.stack([g1_logits.argmax(-1), g2_logits.argmax(-1)], dim=1)  # [1, 2]
+      return goal
+
+    # --- Agent goal prediction ---
+    obs, img = format_data(obs, img)
+    goal = find_goal(img, obs)
+
+    while running:
+      # Capture keyboard events
+      for event in pygame.event.get():
+        if event.type == pygame.QUIT:  # Close window
+          running = False
+        elif event.type == pygame.KEYDOWN:
+          if event.key == pygame.K_q:  # Quit when 'Q' is pressed
+            running = False
+          elif event.key == pygame.K_r:
+            force_reset = True
+
+      # --- Agent action ---
+      action, *_ = self.goal_policy.sample(obs, goal)
+      # --- Perform action ---
+      obs, reward, terminated, truncated, info = self.env.step(action)
+      img = self.env.render()
+      # --- Format data ---
+      obs, img = format_data(obs, img)
+
+      print(f'{terminated=} | {obs=} | {goal=}')
+      if terminated or truncated or force_reset:
+        force_reset = False
+        print('RESET ENV!')
+        obs, _ = self.env.reset(options={'only_target': True})
+        img = self.env.render()
+        obs, img = format_data(obs, img)
+        # --- Agent goal prediction ---
+        goal = find_goal(img, obs)
+
+    self.env.close()
+    pygame.quit()
 
 
 def get_args():
@@ -840,10 +949,7 @@ if __name__ == '__main__':
     trainer.load_model(trainer.image_cleaner, 'image_cleaner')
     trainer.load_model(trainer.goal_policy, 'goal_policy')
     trainer.load_model(trainer.goal_value, 'goal_value')
-
-  if args.play_model:
-    print('Start autoplay...')
-    trainer.autoplay()
+    trainer.load_model(trainer.is_goal_predictor, 'is_goal_predictor')
   
   if args.train_model:
     print('Start training...')
@@ -855,3 +961,7 @@ if __name__ == '__main__':
   
   if args.show_imagined_goal_trajectory:
     trainer.show_imagined_goal_policy()
+  
+  if args.play_model:
+    print('Start autoplay...')
+    trainer.autoplay()
