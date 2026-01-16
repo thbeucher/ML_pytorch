@@ -106,7 +106,8 @@ class ReplayBuffer:
     states = self.internal_state[idxs]
     eps_ids = self.episode_id[idxs]
 
-    goals = []
+    is_goals = []
+    image_goals = []
 
     for eid in eps_ids:
       # ---- terminal state for that episode ----
@@ -116,12 +117,14 @@ class ReplayBuffer:
 
       # should be exactly one, but safe anyway
       goal_idx = terminal_idxs[-1]
-      goals.append(self.internal_state[goal_idx])
+      is_goals.append(self.internal_state[goal_idx])
+      image_goals.append(self.image[goal_idx])
 
     batch = {
       "image": images.to(self.target_device),
       "internal_state": states.to(self.target_device),
-      "goal_internal_state": torch.stack(goals).to(self.target_device),
+      "goal_internal_state": torch.stack(is_goals).to(self.target_device),
+      'goal_image': torch.stack(image_goals).to(self.target_device),
     }
 
     return batch

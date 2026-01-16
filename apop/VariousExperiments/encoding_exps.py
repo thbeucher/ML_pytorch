@@ -44,6 +44,7 @@ def cosine_schedule(epoch, n_epochs, start, end):
 
 
 class CNNAE(nn.Module):
+  '''AutoEncoder that take an image and try to reconstruct it'''
   CONFIG = {'skip_connection': True,
             'linear_bottleneck': False,
             'add_noise_bottleneck': False,
