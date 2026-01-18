@@ -215,22 +215,25 @@ class NextStatePredictorTrainer:
     else:
       print(f'File {path} not found... No loaded model.')
 
-  def fill_memory(self, random_act=True, replay_buffer_size=None):
+  def fill_memory(self, random_act=True, replay_buffer_size=None, max_episode_steps=50):
     print('Filling memory buffer...')
     obs, _ = self.env.reset()
     img = self.env.render()
     if replay_buffer_size is None:
       replay_buffer_size = self.config['replay_buffer_size']
+    episode_step = 0
     for _ in tqdm(range(replay_buffer_size)):
       action = random.randint(0, 4) if random_act else 0  #TODO use policy
       next_obs, reward, terminated, truncated, info = self.env.step(action)
       next_img = self.env.render()
       self.replay_buffer.add(obs//5, action, img, reward, terminated, next_obs//5, next_img)
       obs, img = next_obs, next_img
+      episode_step += 1
 
-      if terminated:
+      if terminated or episode_step > max_episode_steps:
         obs, _ = self.env.reset()
         img = self.env.render()
+        episode_step = 0
   
   @torch.no_grad()
   def autoplay(self):

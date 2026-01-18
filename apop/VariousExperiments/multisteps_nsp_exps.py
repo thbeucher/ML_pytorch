@@ -97,7 +97,7 @@ class ImageISPredictor(nn.Module):
   Outputs:
     - internal_state logits for each internal dimension
   """
-  def __init__(self, is1_n_values=18, is2_n_values=36, hidden_dim=512):
+  def __init__(self, is1_n_values=19, is2_n_values=37, hidden_dim=512):
     super().__init__()
     # --------------------------------------------------
     # Image encoder
@@ -135,6 +135,87 @@ class ImageISPredictor(nn.Module):
 
     g1_logits = self.goal1_head(img_feat)  # [B, is1_n_values]
     g2_logits = self.goal2_head(img_feat)  # [B, is2_n_values]
+
+    return g1_logits, g2_logits
+
+
+class ImageISGoalPredictor(nn.Module):
+  """
+  Predicts an internal_state_goal from:
+    - image: [B, 3, 32, 32]
+    - internal_state: [B, 2] (discrete)
+  Outputs:
+    - goal logits for each internal dimension
+  """
+  def __init__(self, is1_n_values=19, is2_n_values=37, is_dim=32, hidden_dim=512, mlp_dim=256):
+    super().__init__()
+    # --------------------------------------------------
+    # Image encoder (same spirit as ImageToIS)
+    # --------------------------------------------------
+    self.image_encoder = nn.Sequential(
+      nn.Conv2d(3, 64, 3, stride=2, padding=1),   # [B, 64, 16, 16]
+      nn.BatchNorm2d(64),
+      nn.SiLU(),
+
+      nn.Conv2d(64, 128, 3, stride=2, padding=1), # [B, 128, 8, 8]
+      nn.BatchNorm2d(128),
+      nn.SiLU(),
+
+      nn.Conv2d(128, 256, 3, stride=2, padding=1),# [B, 256, 4, 4]
+      nn.BatchNorm2d(256),
+      nn.SiLU(),
+
+      nn.Conv2d(256, hidden_dim, 3, padding=1),  # [B, 512, 4, 4]
+      nn.BatchNorm2d(hidden_dim),
+      nn.SiLU(),
+    )
+
+    self.pool = nn.AdaptiveAvgPool2d(1)  # → [B, hidden_dim]
+
+    # --------------------------------------------------
+    # Internal state embedding
+    # --------------------------------------------------
+    self.is_emb = get_embedding_block(
+      n_embeddings=max(is1_n_values, is2_n_values),
+      embedding_dim=is_dim,
+    )
+
+    # --------------------------------------------------
+    # Fusion MLP
+    # --------------------------------------------------
+    fusion_dim = hidden_dim + 2 * is_dim
+
+    self.fusion = nn.Sequential(
+      nn.Linear(fusion_dim, mlp_dim),
+      nn.SiLU(),
+      nn.Linear(mlp_dim, mlp_dim),
+      nn.SiLU(),
+    )
+
+    # --------------------------------------------------
+    # Goal prediction heads
+    # --------------------------------------------------
+    self.goal1_head = nn.Linear(mlp_dim, is1_n_values)
+    self.goal2_head = nn.Linear(mlp_dim, is2_n_values)
+  
+  def forward(self, image, internal_state):
+    """
+    image: [B, 3, 32, 32]
+    internal_state: [B, 2]
+    """
+    # ---- Image features ----
+    img_feat = self.image_encoder(image)
+    img_feat = self.pool(img_feat).flatten(1)  # [B, hidden_dim]
+
+    # ---- Internal state embedding ----
+    is_emb = self.is_emb(internal_state).flatten(1)  # [B, 2*is_dim]
+
+    # ---- Fuse ----
+    h = self.fusion(torch.cat([img_feat, is_emb], dim=1))
+
+    # ---- Predict goal ----
+    g1_logits = self.goal1_head(h)  # [B, is1_n_values]
+    g2_logits = self.goal2_head(h)  # [B, is2_n_values]
 
     return g1_logits, g2_logits
 
@@ -181,6 +262,7 @@ class NSPTrainer(NextStatePredictorTrainer):
             'image_goal_predictor_max_train_steps':     200,
             # INTERNAL STATE PREDICTOR
             'internal_state_predictor_max_train_steps': 1_000,
+            # 'isgpred_max_train_steps':                  1_000,
             }
   def __init__(self, config={}):
     self.config = {**NSPTrainer.CONFIG, **config}
@@ -215,6 +297,8 @@ class NSPTrainer(NextStatePredictorTrainer):
     print(f'Instanciate ISPredictor (trainable parameters: {self.get_train_params(self.is_predictor):,})')
     self.img_goal_predictor = CNNAE({'encoder_archi': 'BigCNNEncoder'}).to(self.device)
     print(f'Instanciate ImgGoalPredictor (trainable parameters: {self.get_train_params(self.img_goal_predictor):,})')
+    # self.is_goal_predictor = ImageISGoalPredictor().to(self.device)
+    # print(f'Instanciate IS_Goal_Predictor (trainable parameters: {self.get_train_params(self.is_goal_predictor):,})')
   
   def set_training_utils(self):
     super().set_training_utils()
@@ -817,12 +901,60 @@ class NSPTrainer(NextStatePredictorTrainer):
       
       pbar.set_description(f'Loss: {mean_loss:.6f}')
 
+  def train_is_goal_predictor(self):
+    self.is_goal_predictor.train()
+    self.isgp_opt = torch.optim.AdamW(self.is_goal_predictor.parameters(), lr=3e-4)
+
+    best_loss = torch.inf
+    mean_loss = 0.0
+    mean_acc1, mean_acc2 = 0.0, 0.0
+
+    pbar = tqdm(range(self.config['isgpred_max_train_steps']))
+    for step in pbar:
+      batch = self.replay_buffer.sample_image_is_goal_batch(self.config.get('isgpred_batch_size', 128))
+
+      image = batch["image"]
+      is_c = batch["internal_state"]
+      is_g = batch["goal_internal_state"]
+
+      g1_logits, g2_logits = self.is_goal_predictor(image, is_c)
+
+      loss = (
+        self.cross_entropy_criterion(g1_logits, is_g[:, 0]) +
+        self.cross_entropy_criterion(g2_logits, is_g[:, 1])
+      )
+
+      self.isgp_opt.zero_grad()
+      loss.backward()
+      self.isgp_opt.step()
+
+      mean_loss += (loss.item() - mean_loss) / (step + 1)
+      # Accuracies
+      pred1 = g1_logits.argmax(dim=1)  # [B]
+      pred2 = g2_logits.argmax(dim=1)  # [B]
+      acc1 = (pred1 == is_g[:, 0]).float().mean()
+      acc2 = (pred2 == is_g[:, 1]).float().mean()
+      mean_acc1 += (acc1.item() - mean_acc1) / (step + 1)
+      mean_acc2 += (acc2.item() - mean_acc2) / (step + 1)
+
+      if mean_loss < best_loss:
+        self.save_model(self.is_goal_predictor, 'is_goal_predictor')
+        best_loss = mean_loss
+      
+      if self.tf_logger:
+        self.tf_logger.add_scalar('isgpred_loss', mean_loss, step)
+        self.tf_logger.add_scalar('isgpred_accuracy1', mean_acc1, step)
+        self.tf_logger.add_scalar('isgpred_accuracy2', mean_acc2, step)
+      
+      pbar.set_description(f'Loss: {mean_loss:.6f} | Mean_acc: {(mean_acc1+mean_acc2)/2:.2f}')
+
   def train(self):
     self.fill_memory()
     self.train_internal_world_model()
     self.train_world_model()
     self.train_image_cleaner()
     self.train_is_goal_policy()
+    # self.train_is_goal_predictor()
     self.train_is_predictor()
     self.train_image_goal_predictor()
   
