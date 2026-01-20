@@ -90,7 +90,7 @@ class AlteredPredictor(nn.Module):
     
         patch = self.transformer(patch)
 
-        patchs_wo_action = patch[:, :-1]  # remove action token [B, n_patchs, dim]
+        patchs_wo_action = patch[:, :-action.shape[-1]]  # remove action token [B, n_patchs, dim]
         preds = self.find_changed_patch(patchs_wo_action)  # -> [B, n_patchs, 1]
     
         return preds
@@ -106,16 +106,16 @@ class AlterationPredictor(nn.Module):
     self.action_embedder = nn.Sequential(nn.Embedding(n_actions, action_dim), nn.Linear(action_dim, dim), nn.SiLU())
     self.pos_embedding = posemb_sincos_2d(h=8, w=8, dim=dim) 
     self.main = Transformer(dim=dim, depth=depth, heads=heads, dim_head=dim_head, mlp_dim=mlp_dim, dropout=dropout)
-    self.to_patch_pixels = nn.Sequential(nn.Linear(dim, patch_dim), nn.Tanh())
+    self.to_patch_pixels = nn.Sequential(nn.Linear(dim, patch_dim))#, nn.Tanh())
   
-  def forward(self, patch, pos_emb, action):  # [B, M<=n_patchs, N=48], [B, M, dim], [B, 1]
+  def forward(self, patch, pos_emb, action):  # [B, M<=n_patchs, N=48], [B, M, dim], [B, n_a]
     patch_emb = self.patch_embedder(patch) + pos_emb
     action_emb = self.action_embedder(action)
-    patch = torch.cat([patch_emb, action_emb], dim=1)  # [B, M+1, dim]
+    patch = torch.cat([patch_emb, action_emb], dim=-2)  # [B, M+n_a, dim]
 
-    patch = self.main(patch)
+    patch = self.main(patch)  # [B, M+n_a, dim]
 
-    patch_wo_action = patch[:, :-1]  # remove action token [B, M, dim]
+    patch_wo_action = patch[:, :-action.shape[-1]]  # remove action token [B, M, dim]
     patch = self.to_patch_pixels(patch_wo_action)
     # [B, M, N=channels*patch_height*patch_width=3*4*4=48]
     return patch
@@ -135,13 +135,14 @@ class NSPTrainer:  # NextStatePredictor
             'replay_buffer_size':                10_000,
             'replay_buffer_device':              'cpu',
             'render_mode':                       'rgb_array',
-            'n_epochs':                          500,
+            'n_epochs':                          100,
             'batch_size':                        128,
             'use_tf_logger':                     True,
             'save_dir':                          'NSP_experiments/',
             'log_dir':                           'runs/',
-            'exp_name':                          'nsp_twosteps_big2',
+            'exp_name':                          'nsp_twosteps_big_rollout_onlyaction',
             'seed':                              42,
+            'rollout_size':                      30,
             }
   def __init__(self, config={}):
     self.config = {**NSPTrainer.CONFIG, **config}
@@ -214,7 +215,7 @@ class NSPTrainer:  # NextStatePredictor
                                                     dim_head=64,
                                                     mlp_dim=1024,
                                                     dropout=0.0).to(self.device)
-    print(f'Instanciate altered_predictor with {self.get_train_params(self.alteration_predictor):,} params')
+    print(f'Instanciate alteration_predictor with {self.get_train_params(self.alteration_predictor):,} params')
   
   def set_trainer_utils(self):
     resize_img = True if self.config['resize_to'] != self.config['image_size'] else False
@@ -233,44 +234,47 @@ class NSPTrainer:  # NextStatePredictor
     self.bce_criterion = nn.BCELoss()
     self.mse_criterion = nn.MSELoss()
     
-  def fill_memory(self, random_act=True):
+  def fill_memory(self, random_act=True, max_episode_steps=50):
     print('Filling memory buffer...')
     obs, _ = self.env.reset()
     img = self.env.render()
+    episode_step = 0
     for _ in tqdm(range(self.config['replay_buffer_size'])):
       action = random.randint(0, 4) if random_act else 0  #TODO use policy
       next_obs, reward, terminated, truncated, info = self.env.step(action)
       next_img = self.env.render()
-      self.replay_buffer.add(obs//5, action, img, reward, terminated, next_obs//5, next_img)
+      episode_step += 1
+      self.replay_buffer.add(obs//5,action, img, reward, terminated or episode_step > max_episode_steps,
+                             next_obs//5, next_img)
       obs, img = next_obs, next_img
+
+      if terminated or episode_step > max_episode_steps:
+        obs, _ = self.env.reset()
+        img = self.env.render()
+        episode_step = 0
     
-  def get_patch(self, patch, patch_mask):
+  def get_patch(self, patch, mask):
     """
     patch: [B, Np, N]
-    patch_mask: [B, Np] (bool)
+    mask:  [B, Np] (bool)
 
     returns:
-        patch_selected: [B, M, N]
-        counts: [B]  (number of selected patches per batch)
+        padded: [B, M, N]
+        counts: [B] (number of selected patches per batch)
     """
     B, Np, N = patch.shape
 
-    counts = patch_mask.sum(dim=1)                  # [B]
-    M = counts.max()
+    counts = mask.sum(dim=1)           # [B]
+    M = counts.max().item()
 
-    # indices 0..(count-1) per batch
-    idx = (torch.cumsum(patch_mask, dim=1) - 1).clamp(min=0)  # [B, Np]
+    padded = patch.new_zeros((B, M, N))
 
-    patch_selected = torch.zeros((B, M, N), device=patch.device, dtype=patch.dtype)
+    for b in range(B):
+        idx = mask[b].nonzero(as_tuple=False).squeeze(1)
+        padded[b, :idx.numel()] = patch[b, idx]
 
-    patch_selected.scatter_(
-      dim=1,
-      index=idx.unsqueeze(-1).expand(-1, -1, N),
-      src=patch * patch_mask.unsqueeze(-1)
-    )
-
-    return patch_selected, counts
-
+    return padded, counts
+  
   def get_next_image(self, patch, patch_predicted, patch_mask):
     """
     patch:           [B, Np, N]      original patches
@@ -280,30 +284,17 @@ class NSPTrainer:  # NextStatePredictor
     returns:
         patch_next:  [B, Np, N]
     """
-    B, Np, N = patch.shape
-
-    # Start from original patches
     patch_next = patch.clone()
 
-    # Compute index of each selected patch (same logic as get_patch)
-    idx = (torch.cumsum(patch_mask, dim=1) - 1)  # [B, Np]
-    idx = idx.clamp(min=0)
-
-    # Mask out invalid positions
-    valid = patch_mask.unsqueeze(-1)  # [B, Np, 1]
-
-    # Gather predicted patches corresponding to each masked position
-    predicted_full = torch.gather(
-        patch_predicted,
-        dim=1,
-        index=idx.unsqueeze(-1).expand(-1, -1, N)
-    )
-
-    # Replace only masked patches
-    patch_next = torch.where(valid, predicted_full, patch_next)
+    B = patch.size(0)
+    for b in range(B):
+        idx = patch_mask[b].nonzero(as_tuple=False).squeeze(1)
+        if idx.numel() == 0:
+            continue
+        patch_next[b, idx] = patch_predicted[b, :idx.numel()]
 
     return patch_next
-
+  
   def add_highlight(self, mask, img):
     # --- Convert patch mask → pixel mask --- #
     # M: [B, 64, 1] → [B, 64]
@@ -312,8 +303,8 @@ class NSPTrainer:  # NextStatePredictor
     grid_height, grid_width = self.altered_predictor.grid
     patch_mask = patch_mask.view(-1, grid_height, grid_width)  # [B, 8, 8]
     # expand each patch to pixels
-    pixel_mask = patch_mask.repeat_interleave(self.alter_predictor.patch_size, dim=1)\
-                            .repeat_interleave(self.alter_predictor.patch_size, dim=2)
+    pixel_mask = patch_mask.repeat_interleave(self.altered_predictor.patch_height, dim=1)\
+                            .repeat_interleave(self.altered_predictor.patch_width, dim=2)
     # pixel_mask: [B, 32, 32]
 
     # --- Create green overlay --- #
@@ -339,68 +330,80 @@ class NSPTrainer:  # NextStatePredictor
     # self.dataloader = DataLoader(dataset, batch_size=self.config['batch_size'],
     #                              shuffle=True, num_workers=4, pin_memory=False)
 
-    mean_accuracy = 0.0
-    mean_altered_loss = 0.0
-    mean_alteration_loss = 0.0
-    mean_n_patch_to_modify = 0.0
     best_loss = torch.inf
 
     pbar = tqdm(range(self.config['n_epochs']))
     for epoch in pbar:
-      for i in tqdm(range(len(self.replay_buffer)), leave=False):
-        batch = self.replay_buffer.sample(self.config['batch_size'])
+      mean_accuracy = 0.0
+      mean_altered_loss = 0.0
+      mean_alteration_loss = 0.0
+      mean_n_patch_to_modify = 0.0
+      for i in tqdm(range(10), leave=False):
+      # for i in tqdm(range(len(self.replay_buffer)), leave=False):
+        # batch = self.replay_buffer.sample(self.config['batch_size'])
+        episode = self.replay_buffer.sample_episode_batch(self.config['batch_size'], self.config['rollout_size'])
 
-        patch = self.altered_predictor.patchify(batch['image'])  # [B, n_patchs=64, N=48]
-        patch_next_image = self.altered_predictor.patchify(batch['next_image'])  # [B, n_patchs, N]
+        image = episode['image'][:, 0]
+        for t in torch.randint(1, self.config['rollout_size'], (5,)).tolist():
+        # for t in range(self.config['rollout_size']):
+          next_image = episode['next_image'][:, t-1]
+          action = episode['action'][:, :t].flatten(1)
 
-        ###################################
-        # --- TRAIN altered predictor --- #
-        ###################################
-        # Predicting patchs that will effectively change
-        patch_change_pred = self.altered_predictor(patch, batch['action'])  # [B, n_patchs, 1]
-        patch_change_pred_mask = (patch_change_pred > 0.5)  # [B, n_patchs, 1]
+          patch = self.altered_predictor.patchify(image)  # [B, n_patchs=64, N=48]
+          patch_next_image = self.altered_predictor.patchify(next_image)  # [B, n_patchs, N]
 
-        # Construct changed patch target
-        patch_diff = patch != patch_next_image # [B, n_patchs, N]
-        altered_patch_target = patch_diff.sum(dim=2, keepdim=True) > 0  # [B, n_patchs, 1]
+          ###################################
+          # --- Altered predictor       --- #
+          ###################################
+          # Predicting patchs that will effectively change
+          patch_change_pred = self.altered_predictor(patch, action)  # [B, n_patchs, 1]
+          patch_change_pred_mask = (patch_change_pred > 0.5)  # [B, n_patchs, 1]
 
-        altered_loss = self.bce_criterion(patch_change_pred, altered_patch_target)
+          # Construct changed patch target
+          patch_diff = patch != patch_next_image # [B, n_patchs, N]
+          altered_patch_target = patch_diff.sum(dim=2, keepdim=True) > 0  # [B, n_patchs, 1]
 
-        self.altered_opt.zero_grad()
-        altered_loss.backward()
-        self.altered_opt.step()
+          altered_loss = self.bce_criterion(patch_change_pred, altered_patch_target)
 
-        ######################################
-        # --- TRAIN alteration predictor --- #
-        ######################################
-        patch_change_gt_mask = altered_patch_target.squeeze(-1)
-        # Get patchs to predict based on selected patchs by the altered network
-        patch_to_pred, counts = self.get_patch(patch, patch_change_gt_mask)  # [B, M, N], M
-        pos_emb = self.alteration_predictor.pos_embedding.to(patch.device, dtype=patch.dtype)  # [n_patchs, dim]
-        patch_to_pred_pos_emb, _ = self.get_patch(pos_emb.unsqueeze(0).repeat(patch.shape[0], 1, 1),
-                                                  patch_change_gt_mask)
-        # -> [B, M, dim]
+          ######################################
+          # --- Alteration Predictor       --- #
+          ######################################
+          patch_change_gt_mask = altered_patch_target.squeeze(-1)
+          # Get patchs to predict based on selected patchs by the altered network
+          patch_to_pred, counts = self.get_patch(patch, patch_change_gt_mask)  # [B, M, N], M
+          pos_emb = self.alteration_predictor.pos_embedding.to(patch.device, dtype=patch.dtype)  # [n_patchs, dim]
+          patch_to_pred_pos_emb, _ = self.get_patch(pos_emb.unsqueeze(0).repeat(patch.shape[0], 1, 1),
+                                                    patch_change_gt_mask)
+          # -> [B, M, dim]
 
-        if counts.max() > 0:  # if there is some patch to change
-          patch_predicted = self.alteration_predictor(patch_to_pred.detach(),
-                                                      patch_to_pred_pos_emb.detach(),
-                                                      batch['action'].detach())
-          patch_next_image_predicted = self.get_next_image(patch,
-                                                           patch_predicted,
-                                                           patch_change_gt_mask)
-          # -> [B, n_patchs, N]
+          if counts.max() > 0:  # if there is some patch to change
+            patch_predicted = self.alteration_predictor(patch_to_pred.detach(),
+                                                        patch_to_pred_pos_emb.detach(),
+                                                        action.detach())
+            patch_next_image_predicted = self.get_next_image(patch,
+                                                             patch_predicted,
+                                                             patch_change_gt_mask)
+            # -> [B, n_patchs, N]
 
-          # Get patch to reconstruct
-          patch_target, _ = self.get_patch(patch_next_image, patch_change_gt_mask)
+            # Get patch to reconstruct
+            patch_target, _ = self.get_patch(patch_next_image, patch_change_gt_mask)
 
-          alteration_loss = self.mse_criterion(patch_predicted, patch_target)
+            # remove padded time to match patch_target
+            alteration_loss = self.mse_criterion(patch_predicted[:, :patch_target.size(1)], patch_target)
+          else:
+            patch_next_image_predicted = patch
+            alteration_loss = 0.0
 
+          # --- TRAIN altered predictor --- #
+          self.altered_opt.zero_grad()
+          altered_loss.backward()
+          self.altered_opt.step()
+
+          # --- TRAIN alteration predictor --- #
+          # if alteration_loss is not None:
           self.alteration_opt.zero_grad()
           alteration_loss.backward()
           self.alteration_opt.step()
-        else:
-          patch_next_image_predicted = patch
-          alteration_loss = None
 
         # --- Compute metrics --- #
         altered_accuracy = (patch_change_pred_mask == altered_patch_target).float().mean()
@@ -417,7 +420,20 @@ class NSPTrainer:  # NextStatePredictor
       self.tf_logger.add_scalar('alteration_loss', mean_alteration_loss, epoch)
       self.tf_logger.add_scalar('altered_accuracy', mean_accuracy, epoch)
       self.tf_logger.add_scalar('mean_n_patch_to_modify', int(mean_n_patch_to_modify), epoch)
-      pbar.set_postfix(mean_accuracy=f'{mean_accuracy:.3f}')
+      pbar.set_description(f'Mean_acc: {mean_accuracy:.3f}')
+
+      self.tf_logger.add_images(
+        'alterationNet_reconstructed_image',
+        # torch.cat([self.altered_predictor.unpatchify(patch[:8]),
+        #            self.add_highlight(patch_change_pred_mask[:8], self.altered_predictor.unpatchify(patch[:8])),
+        #            self.add_highlight(patch_change_gt_mask[:8], self.altered_predictor.unpatchify(patch[:8])),
+        #            self.altered_predictor.unpatchify(patch_next_image[:8]),
+        #            self.altered_predictor.unpatchify(patch_next_image_predicted[:8])], dim=0),
+        torch.cat([image[:8],
+                   next_image[:8],
+                   self.altered_predictor.unpatchify(patch_next_image_predicted[:8])], dim=0),
+        global_step=epoch
+        )
 
       if mean_alteration_loss < best_loss:
         self.save_model(self.altered_predictor, 'altered_predictor')
@@ -428,31 +444,50 @@ class NSPTrainer:  # NextStatePredictor
       self.altered_predictor.eval()
       self.alteration_predictor.eval()
       with torch.no_grad():
-        imagined_traj = [patch[:1]]
-        for action in torch.as_tensor([[[1]]]*12 + [[[3]]]*11, device=self.device, dtype=torch.long):
+        imagined_traj = [image[:1]]
+        start_img_idx, current_history = 0, 0
+        next_restart = random.randint(0, self.config['rollout_size']-1)
+        fake_actions = []
+        for fake_action in torch.as_tensor([[[1]]]*12 + [[[3]]]*11, device=self.device, dtype=torch.long):
+          # patch = self.altered_predictor.patchify(imagined_traj[-1])
+          fake_actions.append(fake_action)
+          if current_history > next_restart:#self.config['rollout_size']:
+            start_img_idx += next_restart#self.config['rollout_size']
+            current_history = 0
+            next_restart = random.randint(0, self.config['rollout_size']-1)
+            fake_actions = [fake_action]
+          current_history += 1
+          fake_action = torch.cat(fake_actions, dim=-1)
+
+          patch = self.altered_predictor.patchify(imagined_traj[start_img_idx])
+
           # get patchs that are expected to change
-          patch_change_pred = self.altered_predictor(imagined_traj[-1], action)
+          patch_change_pred = self.altered_predictor(patch, fake_action)
+
           # get mask to select only predicted changed patchs
           patch_change_pred_mask = (patch_change_pred > 0.5).squeeze(-1)
+
           # select only predicted changed patchs
-          patch_to_pred, counts = self.get_patch(imagined_traj[-1], patch_change_pred_mask)
+          patch_to_pred, counts = self.get_patch(patch, patch_change_pred_mask)
           pos_emb = self.alteration_predictor.pos_embedding.to(patch.device, dtype=patch.dtype)
           patch_to_pred_pos_emb, _ = self.get_patch(pos_emb.unsqueeze(0), patch_change_pred_mask)
+
           # make prediction on next patchs if there is some to predict
           if counts.max() > 0:  # if there is some patch to change
             patch_predicted = self.alteration_predictor(patch_to_pred,
                                                         patch_to_pred_pos_emb,
-                                                        action)
-            patch_next_image_predicted = self.get_next_image(imagined_traj[-1],
+                                                        fake_action)
+            patch_next_image_predicted = self.get_next_image(patch,
                                                              patch_predicted,
                                                              patch_change_pred_mask)
           else:  # if no patchs to change, next image is the original one
-            patch_next_image_predicted = imagined_traj[-1]
-          imagined_traj.append(patch_next_image_predicted)
-        # unpatchify image
-        predicted_traj = [self.altered_predictor.unpatchify(p) for p in imagined_traj]
+            patch_next_image_predicted = patch
+          # Clean the predicted image
+          cleaned_img = self.altered_predictor.unpatchify(patch_next_image_predicted)
+          imagined_traj.append(cleaned_img)
+
       self.tf_logger.add_images('generated_world_model_prediction',
-                                torch.cat(predicted_traj, dim=0),
+                                torch.cat(imagined_traj, dim=0),
                                 global_step=epoch)
       self.altered_predictor.train()
       self.alteration_predictor.train()

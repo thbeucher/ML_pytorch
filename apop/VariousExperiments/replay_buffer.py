@@ -68,7 +68,6 @@ class ReplayBuffer:
     self.next_image[self.ptr].copy_(next_image.to(self.device))
 
     self.episode_id[self.ptr] = self.current_episode_id
-    # ---- advance episode counter ----
     if done:
       self.current_episode_id += 1
 
@@ -87,45 +86,162 @@ class ReplayBuffer:
       "next_image": self.next_image[idxs].to(self.target_device),
     }
     return batch
-
-  def sample_image_is_goal_batch(self, batch_size):
+  
+  def sample_image_is_goal_batch(self, batch_size, n_fake_goals=4, success_reward=10):
     """
-    Sample (image_t, internal_state_t) -> internal_state_goal
-    Goal is the terminal state of the same episode.
+    Sample (image_t, internal_state_t) -> goal
+    Goal is the final state of episodes whose LAST reward == success_reward.
+    Only such episodes are sampled.
     """
     assert self.size > 0
 
-    # ---- sample random transitions ----
-    done_mask = self.done[:self.size].squeeze(-1) == 1
-    done_idxs = torch.where(done_mask)[0]
-    # Only sample transitions BEFORE the last done
-    max_idx = done_idxs[-1].item() + 1  # include terminal state
-    idxs = torch.randint(0, max_idx, (batch_size,), device=self.device)
+    B = batch_size
 
-    images = self.image[idxs]
-    states = self.internal_state[idxs]
-    eps_ids = self.episode_id[idxs]
+    images = torch.zeros((B, *self.image.shape[1:]), device=self.target_device)
+    states = torch.zeros((B, self.internal_state.shape[-1]), device=self.target_device)
+    goal_states = torch.zeros_like(states)
+    goal_images = torch.zeros_like(images)
+    fake_goal_states = torch.zeros((B, n_fake_goals, self.internal_state.shape[-1]),
+                                    device=self.target_device)
 
-    is_goals = []
-    image_goals = []
+    # ---- find episodes whose final transition has reward == success_reward ----
+    valid_episode_ids = []
 
-    for eid in eps_ids:
-      # ---- terminal state for that episode ----
+    for eid in range(self.current_episode_id):
       ep_mask = (self.episode_id[:self.size] == eid)
-      done_mask = self.done[:self.size].squeeze(-1) == 1
-      terminal_idxs = torch.where(ep_mask & done_mask)[0]
+      ep_idxs = torch.where(ep_mask)[0]
+      if len(ep_idxs) == 0:
+        continue
 
-      # should be exactly one, but safe anyway
-      goal_idx = terminal_idxs[-1]
-      is_goals.append(self.internal_state[goal_idx])
-      image_goals.append(self.image[goal_idx])
+      last_idx = ep_idxs[-1]
+      if self.reward[last_idx].item() == success_reward:
+        valid_episode_ids.append(eid)
+
+    self.n_finished_episode = len(valid_episode_ids)
+    assert len(valid_episode_ids) > 0, "No episodes with final reward == success_reward found!"
+
+    valid_episode_ids = torch.tensor(valid_episode_ids, device=self.device)
+
+    # ---- sample only valid episodes ----
+    sampled_eids = valid_episode_ids[
+      torch.randint(0, len(valid_episode_ids), (B,), device=self.device)
+    ]
+
+    for b, eid in enumerate(sampled_eids):
+      ep_mask = (self.episode_id[:self.size] == eid)
+      ep_idxs = torch.where(ep_mask)[0]
+
+      if len(ep_idxs) == 0:
+        continue
+
+      # ---- goal is final state of the episode ----
+      goal_idx = ep_idxs[-1]
+
+      # ---- sample a random timestep from the episode ----
+      t_idx = ep_idxs[torch.randint(0, len(ep_idxs), (1,), device=self.device).item()]
+
+      # ---- fill sample ----
+      images[b] = self.image[t_idx].to(self.target_device)
+      states[b] = self.internal_state[t_idx].to(self.target_device)
+
+      goal_states[b] = self.internal_state[goal_idx].to(self.target_device)
+      goal_images[b] = self.image[goal_idx].to(self.target_device)
+
+      # ---- fake goals: any non-final state from same episode ----
+      non_final_idxs = ep_idxs[:-1]
+
+      if len(non_final_idxs) == 0:
+        fake_idxs = goal_idx.repeat(n_fake_goals)
+      else:
+        rand_idxs = torch.randint(0, len(non_final_idxs), (n_fake_goals,), device=self.device)
+        fake_idxs = non_final_idxs[rand_idxs]
+
+      fake_goal_states[b] = self.internal_state[fake_idxs].to(self.target_device)
 
     batch = {
-      "image": images.to(self.target_device),
-      "internal_state": states.to(self.target_device),
-      "goal_internal_state": torch.stack(is_goals).to(self.target_device),
-      'goal_image': torch.stack(image_goals).to(self.target_device),
+      "image": images,
+      "internal_state": states,
+      "goal_internal_state": goal_states,
+      "goal_image": goal_images,
+      "fake_goal_internal_state": fake_goal_states,  # [B, K, D]
     }
+
+    return batch
+  
+  def sample_episode_batch(self, batch_size, episode_length):
+    B, T = batch_size, episode_length
+
+    batch = {
+      "internal_state": torch.zeros(
+        (B, T, self.internal_state.shape[-1]), device=self.target_device, dtype=self.internal_state.dtype
+      ),
+      "action": torch.zeros(
+        (B, T, self.action.shape[-1]), device=self.target_device, dtype=self.action.dtype
+      ),
+      "image": torch.zeros(
+        (B, T, *self.image.shape[1:]), device=self.target_device, dtype=self.image.dtype
+      ),
+      "reward": torch.zeros(
+        (B, T, 1), device=self.target_device, dtype=self.reward.dtype
+      ),
+      "done": torch.zeros(
+        (B, T, 1), device=self.target_device, dtype=self.done.dtype
+      ),
+      "next_internal_state": torch.zeros(
+        (B, T, self.next_internal_state.shape[-1]),
+        device=self.target_device,
+        dtype=self.next_internal_state.dtype,
+      ),
+      "next_image": torch.zeros(
+        (B, T, *self.next_image.shape[1:]),
+        device=self.target_device,
+        dtype=self.next_image.dtype,
+      ),
+    }
+
+    # ---- sample episode ids ----
+    episode_ids = torch.randint(0, self.current_episode_id, (batch_size,), device=self.device)
+
+    for b, eid in enumerate(episode_ids):
+      ep_mask = (self.episode_id[:self.size] == eid)
+      ep_idxs = torch.where(ep_mask)[0]
+
+      if len(ep_idxs) == 0:
+        continue
+
+      ep_len = len(ep_idxs)
+
+      # ---- choose random window ----
+      if ep_len >= T:
+        start = torch.randint(0, ep_len - T + 1, (1,)).item()
+        window_idxs = ep_idxs[start:start + T]
+        L = T
+      else:
+        # take whole episode and pad later
+        window_idxs = ep_idxs
+        L = ep_len
+
+      # ---- copy real data ----
+      batch["internal_state"][b, :L] = self.internal_state[window_idxs].to(self.target_device)
+      batch["action"][b, :L] = self.action[window_idxs].to(self.target_device)
+      batch["image"][b, :L] = self.image[window_idxs].to(self.target_device)
+      batch["reward"][b, :L] = self.reward[window_idxs].to(self.target_device)
+      batch["done"][b, :L] = self.done[window_idxs].to(self.target_device)
+      batch["next_internal_state"][b, :L] = self.next_internal_state[window_idxs].to(self.target_device)
+      batch["next_image"][b, :L] = self.next_image[window_idxs].to(self.target_device)
+
+      # ---- pad if shorter ----
+      if L < T:
+        last_is = batch["internal_state"][b, L - 1]
+        last_img = batch["image"][b, L - 1]
+        last_next_is = batch["next_internal_state"][b, L - 1]
+        last_next_img = batch["next_image"][b, L - 1]
+
+        batch["internal_state"][b, L:] = last_is.unsqueeze(0).expand(T - L, -1)
+        batch["image"][b, L:] = last_img.unsqueeze(0).expand(T - L, -1, -1, -1)
+        batch["next_internal_state"][b, L:] = last_next_is.unsqueeze(0).expand(T - L, -1)
+        batch["next_image"][b, L:] = last_next_img.unsqueeze(0).expand(T - L, -1, -1, -1)
+        # action/reward/done already zero
 
     return batch
 

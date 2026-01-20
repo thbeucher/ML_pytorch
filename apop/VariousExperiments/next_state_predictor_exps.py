@@ -226,9 +226,10 @@ class NextStatePredictorTrainer:
       action = random.randint(0, 4) if random_act else 0  #TODO use policy
       next_obs, reward, terminated, truncated, info = self.env.step(action)
       next_img = self.env.render()
-      self.replay_buffer.add(obs//5, action, img, reward, terminated, next_obs//5, next_img)
-      obs, img = next_obs, next_img
       episode_step += 1
+      self.replay_buffer.add(obs//5,action, img, reward, terminated or episode_step > max_episode_steps,
+                             next_obs//5, next_img)
+      obs, img = next_obs, next_img
 
       if terminated or episode_step > max_episode_steps:
         obs, _ = self.env.reset()
