@@ -9,7 +9,7 @@ from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 
 from replay_buffer import ReplayBuffer
-from trainers_zoo import GANGoalImagePredictor
+from trainers_zoo import GANGoalImagePredictor, FlowGoalImagePredictor
 
 sys.path.append('../../../robot/')
 warnings.filterwarnings("ignore")
@@ -44,7 +44,8 @@ class MultiStepsNSPOrchestrator:
     self.tf_logger = SummaryWriter(save_dir_run) if self.config['use_tf_logger'] else None
 
   def instanciate_trainers(self):
-    self.goal_image_trainer = GANGoalImagePredictor()
+    self.gan_goal_image_trainer = GANGoalImagePredictor()
+    self.flow_goal_image_trainer = FlowGoalImagePredictor()
   
   def instanciate_utils(self):
     self.train_replay_buffer = ReplayBuffer(self.config['internal_state_dim'],
@@ -99,12 +100,23 @@ class MultiStepsNSPOrchestrator:
     self.fill_memory(self.train_replay_buffer, n_episodes=self.config['n_train_episodes'])
     self.fill_memory(self.test_replay_buffer, n_episodes=self.config['n_test_episodes'], act='best')
 
-    self.goal_image_trainer.load()
-    losses = self.goal_image_trainer.train(lambda x: self.train_replay_buffer.sample_image_is_goal_batch(x),
-                                           tf_logger=self.tf_logger)
-    rec_loss = self.goal_image_trainer.evaluate(lambda x: self.test_replay_buffer.sample_image_is_goal_batch(x),
-                                                tf_logger=self.tf_logger)
-    self.goal_image_trainer.save()
+    # --- Goal Image prediction experiment using GAN --- #
+    # self.gan_goal_image_trainer.load()
+    # losses = self.gan_goal_image_trainer.train(lambda x: self.train_replay_buffer.sample_image_is_goal_batch(x),
+    #                                            tf_logger=self.tf_logger)
+    # rec_loss = self.gan_goal_image_trainer.evaluate(lambda x: self.test_replay_buffer.sample_image_is_goal_batch(x),
+    #                                                 tf_logger=self.tf_logger)
+    # self.gan_goal_image_trainer.save()
+    # -------------------------------------------------- #
+
+    # --- Goal Image prediction experiment using FLOW --- #
+    self.flow_goal_image_trainer.load()
+    loss = self.flow_goal_image_trainer.train(lambda x: self.train_replay_buffer.sample_image_is_goal_batch(x),
+                                              tf_logger=self.tf_logger)
+    rec_loss = self.flow_goal_image_trainer.evaluate(lambda x: self.test_replay_buffer.sample_image_is_goal_batch(x),
+                                                     tf_logger=self.tf_logger)
+    self.flow_goal_image_trainer.save()
+    # --------------------------------------------------- #
 
 
 if __name__ == '__main__':
