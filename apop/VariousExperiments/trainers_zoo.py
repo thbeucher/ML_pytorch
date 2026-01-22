@@ -307,7 +307,7 @@ class FlowGoalImagePredictor(BaseTrainer):
                                     add_ds=False,
                                     x_start=True).to(self.device)
   
-  def train(self, get_data_fn, n_max_steps=500, batch_size=128, tf_logger=None,
+  def train(self, get_data_fn, n_max_steps=1_000, batch_size=128, tf_logger=None,
             img_cleaner=None, img_normalizer=None,
             goal_img_key='goal_image', start_img_key='image'):
     '''Generator creates goal image starting from start_image and gaussian noise'''
@@ -395,7 +395,7 @@ class FlowGoalImagePredictor(BaseTrainer):
         img_comparison = torch.cat([batch[start_img_key][:8], x1[:8], x1_pred[:8]], dim=0)
 
       if tf_logger:
-        tf_logger.add_images('generated_gan_goal_image_train', img_comparison, global_step=1)
+        tf_logger.add_images('generated_gan_goal_image_test', img_comparison, global_step=1)
     return F.mse_loss(x1_pred, x1)
 
 if __name__ == '__main__':
