@@ -35,6 +35,7 @@ class WorldModelFlowUnet(nn.Module):
     self.time_emb = nn.Sequential(TimeEmbedding(time_dim), nn.Linear(time_dim, time_dim), nn.SiLU())
     condition_dim = time_dim 
 
+    self.add_action = add_action
     if add_action:
       self.action_emb = nn.Sequential(nn.Embedding(n_actions, action_dim), nn.Linear(action_dim, action_dim), nn.SiLU())
       condition_dim += action_dim
@@ -67,31 +68,26 @@ class WorldModelFlowUnet(nn.Module):
   def forward(self, x, t, condition={}):  # image, time, action
     B, C, H, W = x.shape
 
-    action = condition.get('action', None)
-    internal_state = condition.get('internal_state', None)  # [B, n_is=2]
-    x_cond = condition.get('x_cond', None)
-    done_signal = condition.get('done_signal', None)
-
     t_emb = self.time_emb(t.squeeze(-1))         # -> [B, time_dim]
     all_embed = [t_emb]
 
-    if action is not None:
-      a_emb = self.action_emb(action.squeeze(-1))  # -> [B, action_dim]
+    if self.add_action:
+      a_emb = self.action_emb(condition['action'].squeeze(-1))  # -> [B, action_dim]
       all_embed += [a_emb]
     
-    if internal_state is not None:
-      is_emb = self.is_emb(internal_state)  # [B, n_is=2, is_dim=32]
+    if self.add_is:
+      is_emb = self.is_emb(condition['internal_state'])  # [B, n_is=2] -> [B, n_is=2, is_dim=32]
       all_embed += [is_emb.flatten(1)]  # [B, 2*32]
     
-    if done_signal is not None:
-      ds_emb = self.ds_emb(done_signal.squeeze(-1))  # [B, ds_dim=64]
+    if self.add_ds:
+      ds_emb = self.ds_emb(condition['done_signal'].squeeze(-1))  # [B, ds_dim=64]
       all_embed += [ds_emb]
 
     all_embed = torch.cat(all_embed, dim=1)  # -> [B, 104]
 
     all_cond = [all_embed[:, :, None, None].expand(-1, -1, H, W)]
-    if x_cond is not None:
-      all_cond = [x_cond] + all_cond
+    if self.x_start:
+      all_cond = [condition['x_cond']] + all_cond
     
     x = torch.cat([x] + all_cond, dim=1)
 
@@ -150,7 +146,7 @@ class NextStatePredictorTrainer:
       self.clamp_denorm_fn = lambda x: (x.clamp(-1, 1) + 1) / 2
     self.get_train_params = lambda m: sum(p.numel() for p in m.parameters() if p.requires_grad)
 
-    self.set_seed()
+    # self.set_seed()
 
     self.env = gym.make("gymnasium_env:RobotArmEnv", render_mode=self.config['render_mode'], cropping=True)
     # self.env_config = self.env.unwrapped.config

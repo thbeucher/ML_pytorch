@@ -1,9 +1,10 @@
-import copy
 import math
 import torch
 import pygame
+import random
 import imageio
 import argparse
+import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
@@ -98,7 +99,8 @@ class ImageISPredictor(nn.Module):
   Outputs:
     - internal_state logits for each internal dimension
   """
-  def __init__(self, is1_n_values=19, is2_n_values=37, hidden_dim=512):
+  def __init__(self, is1_n_values=19, is2_n_values=37, is_dim=32, hidden_dim=512, done_info=False,
+               rnn_goal_prediction=False, rnn_hidden=256, num_layers=2, is_rnn=True):
     super().__init__()
     # --------------------------------------------------
     # Image encoder
@@ -124,20 +126,74 @@ class ImageISPredictor(nn.Module):
     self.pool = nn.AdaptiveAvgPool2d(1)  # → [B, hidden_dim]
 
     # --------------------------------------------------
+    # LSTM for temporal goal prediction
+    # --------------------------------------------------
+    self.rnn_goal_predictor = None
+    if rnn_goal_prediction:
+      self.rnn_goal_predictor = nn.LSTM(
+        input_size=hidden_dim + 2*is_dim,
+        hidden_size=rnn_hidden,
+        num_layers=num_layers,
+        batch_first=True,
+        bidirectional=True,
+      )
+      # --------------------------------------------------
+      # Internal state embedding
+      # --------------------------------------------------
+      self.is_rnn = is_rnn
+      if is_rnn:
+        self.is_emb = get_embedding_block(
+          n_embeddings=max(is1_n_values, is2_n_values),
+          embedding_dim=is_dim,
+        )
+
+    # --------------------------------------------------
     # Goal prediction heads
     # --------------------------------------------------
-    self.goal1_head = nn.Linear(hidden_dim, is1_n_values)
-    self.goal2_head = nn.Linear(hidden_dim, is2_n_values)
+    self.is1_head = nn.Linear(hidden_dim, is1_n_values)
+    self.is2_head = nn.Linear(hidden_dim, is2_n_values)
 
-  def forward(self, image):
-    """image: [B, 3, 32, 32]"""
+    self.done_info = done_info
+    if self.done_info:
+      self.goal1_head = nn.Sequential(nn.Linear(hidden_dim, hidden_dim//2),
+                                      nn.SiLU(True),
+                                      nn.Dropout(p=0.7),
+                                      nn.Linear(hidden_dim//2, hidden_dim))
+      self.goal2_head = nn.Sequential(nn.Linear(hidden_dim, hidden_dim//2),
+                                      nn.SiLU(True),
+                                      nn.Dropout(p=0.7),
+                                      nn.Linear(hidden_dim//2, hidden_dim))
+
+  def forward(self, image, condition={}):
+    """image: [B, 3, 32, 32] or [B, T, 3, 32, 32]"""
+    if self.rnn_goal_predictor:
+      assert len(image.shape) == 5, 'ImageISPredictor in RNN mode but no temporal dimension found in given image'
+      B, T, C, H, W = image.shape
+      image = image.view(B*T, C, H, W)
+
     img_feat = self.image_encoder(image)
-    img_feat = self.pool(img_feat).flatten(1)  # [B, hidden_dim]
+    img_feat = self.pool(img_feat).flatten(1)         # [B, hidden_dim]
 
-    g1_logits = self.goal1_head(img_feat)  # [B, is1_n_values]
-    g2_logits = self.goal2_head(img_feat)  # [B, is2_n_values]
+    if self.rnn_goal_predictor:
+      img_feat = img_feat.view(B, T, -1)  # Restore time dimension
 
-    return g1_logits, g2_logits
+      if self.is_rnn:
+        is_emb = self.is_emb(condition['internal_state']).flatten(-2)  # [B, T, 2*32]
+        img_feat = torch.cat([img_feat, is_emb], dim=-1)
+
+      rnn_out, _ = self.rnn_goal_predictor(img_feat)  # [B, T, rnn_hidden]
+      img_feat = rnn_out
+      # img_feat = rnn_out[:, -1, :]                    # [B, rnn_hidden]
+
+    is1_logits = self.is1_head(img_feat)             # [B, is1_n_values]
+    is2_logits = self.is2_head(img_feat)             # [B, is2_n_values]
+
+    if self.done_info:
+      isg1_logits = self.goal1_head(img_feat)
+      isg2_logits = self.goal2_head(img_feat)
+      return is1_logits, is2_logits, isg1_logits, isg2_logits
+
+    return is1_logits, is2_logits
 
 
 class ImageISGoalPredictor(nn.Module):
@@ -244,7 +300,7 @@ class NSPTrainer(NextStatePredictorTrainer):
             # WORLD MODEL (Some already setted in NextStatePredictorTrainer)
             'world_model_max_train_steps':              30,  # 3_000
             # INTERNAL STATE GOAL POLICY
-            'isgp_n_updates':                           500,  # 5_000
+            'isgp_n_updates':                           300,  # 5_000
             'isgp_batch_size':                          128,
             'isgp_max_horizon':                         50,
             'isgp_gamma':                               0.99,
@@ -293,8 +349,10 @@ class NSPTrainer(NextStatePredictorTrainer):
     print(f'Instanciate GoalPolicy (trainable parameters: {self.get_train_params(self.goal_policy):,})')
     self.is_predictor = ImageISPredictor().to(self.device)
     print(f'Instanciate ISPredictor (trainable parameters: {self.get_train_params(self.is_predictor):,})')
-    self.img_goal_predictor = CNNAE({'encoder_archi': 'BigCNNEncoder'}).to(self.device)
-    print(f'Instanciate ImgGoalPredictor (trainable parameters: {self.get_train_params(self.img_goal_predictor):,})')
+    # self.goal_is_predictor = ImageISPredictor(done_info=True).to(self.device)
+    # print(f'Instanciate GoalISPredictor (trainable parameters: {self.get_train_params(self.goal_is_predictor):,})')
+    # self.img_goal_predictor = CNNAE({'encoder_archi': 'BigCNNEncoder'}).to(self.device)
+    # print(f'Instanciate ImgGoalPredictor (trainable parameters: {self.get_train_params(self.img_goal_predictor):,})')
     # self.is_goal_scorer = ImageISGoalPredictor().to(self.device)
     # print(f'Instanciate ISGoalScorer (trainable parameters: {self.get_train_params(self.is_goal_scorer):,})')
     self.goal_image_predictor = WorldModelFlowUnet(img_chan=self.config['image_chan'],
@@ -305,13 +363,15 @@ class NSPTrainer(NextStatePredictorTrainer):
                                                    x_start=True).to(self.device)
     print(f'Instanciate GoalImagePredictor (trainable parameters: {self.get_train_params(
       self.goal_image_predictor):,})')
+    # self.rnn_gisp = ImageISPredictor(rnn_goal_prediction=True).to(self.device)
+    # print(f'Instanciate RNNGoalImagePredictor (trainable parameters: {self.get_train_params(self.rnn_gisp):,})')
   
   def set_training_utils(self):
     super().set_training_utils()
     self.mse_criterion = nn.MSELoss()
     self.cross_entropy_criterion = nn.CrossEntropyLoss()
     self.ssim_criterion = SSIM(data_range=1, size_average=True, channel=3)
-  
+      
   @torch.no_grad()
   def show_imagined_goal_policy(self):
     self.goal_policy.eval()
@@ -659,10 +719,10 @@ class NSPTrainer(NextStatePredictorTrainer):
       descr = f"P_Loss: {loss_policy:.3f} | V_Loss: {loss_value:.3f} | SuccessRate: {mean_success_rate:.2f}"
       pbar.set_description(descr)
   
-  def train_image_cleaner(self):
+  def train_image_cleaner(self, image_generator):
     print('Training ImageCleaner...')
     self.image_cleaner.train()
-    self.world_model.eval()
+    image_generator.eval()
 
     self.ic_opt = torch.optim.AdamW(self.image_cleaner.parameters(), lr=1e-3)
 
@@ -678,10 +738,11 @@ class NSPTrainer(NextStatePredictorTrainer):
       # STEP1: retrieves the predicted image of the world model from internal state #
       # --------------------------------------------------------------------------- #
       with torch.no_grad():
-        condition = {'internal_state': batch['internal_state']}
-        condition['done_signal'] = batch['done']
+        condition = {'internal_state': batch['internal_state'],
+                     'done_signal': batch['done'],
+                     'x_cond': batch['image']}
         x1_pred = rk45_sampling(
-          self.world_model,
+          image_generator,
           device=self.device,
           n_samples=batch['image'].shape[0],
           condition=condition,
@@ -733,8 +794,8 @@ class NSPTrainer(NextStatePredictorTrainer):
     for step in pbar:
       batch = self.replay_buffer.sample(self.config['world_model_batch_size'])
       x1 = batch['image']  # target distribution is the image to predict
-      condition = {'internal_state': batch['internal_state']}
-      condition['done_signal'] = batch['done']
+      condition = {'internal_state': batch['internal_state'],
+                   'done_signal': batch['done']}
 
       # ------------------------------------------------------------------------------------------ #
       # STEP1: Train the world_model to produce a corresponding image with provided internal_state #
@@ -826,26 +887,54 @@ class NSPTrainer(NextStatePredictorTrainer):
       
       pbar.set_description(f'Loss: {mean_loss:.6f} | Mean_acc: {(mean_acc1+mean_acc2)/2:.2f}')
   
-  def train_is_predictor(self):
+  def train_is_predictor(self, add_gip=True):
     print('Training Internal State Predictor')
     self.is_predictor.train()
     self.is_predictor_opt = torch.optim.AdamW(self.is_predictor.parameters(), lr=3e-4)
 
+    self.goal_image_predictor.eval()
+
     best_loss = torch.inf
     mean_loss = 0.0
     mean_acc1, mean_acc2 = 0.0, 0.0
+    mean_goal_acc1, mean_goal_acc2 = 0.0, 0.0
 
     pbar = tqdm(range(self.config['internal_state_predictor_max_train_steps']))
     for step in pbar:
-      batch = self.replay_buffer.sample(self.config.get('isp_batch_size', 128))
-      image = self.clamp_denorm_fn(batch['image'])
+      batch = self.replay_buffer.sample(self.config['image_cleaner_batch_size'])
+      goal_batch = self.replay_buffer.sample_image_is_goal_batch(self.config.get('isp_batch_size', 128))
 
-      g1_logits, g2_logits = self.is_predictor(image)
+      # Infer internal_state from replay_buffer images
+      g1_logits, g2_logits = self.is_predictor(self.clamp_denorm_fn(batch['image']))
 
       loss = (
         self.cross_entropy_criterion(g1_logits, batch['internal_state'][:, 0]) +
         self.cross_entropy_criterion(g2_logits, batch['internal_state'][:, 1])
       )
+
+      # Infer internal_state from reconstructed goal image
+      loss_gip = None
+      if add_gip:
+        condition = {'x_cond': goal_batch['image']}
+        x1_pred = rk45_sampling(
+          self.goal_image_predictor,
+          device=self.device,
+          n_samples=goal_batch['image'].shape[0],
+          condition=condition,
+          n_steps=2
+          )
+        with torch.no_grad():
+          goal_img = self.image_cleaner(self.clamp_denorm_fn(x1_pred[-1]))
+        self.tf_logger.add_images('goal_image', torch.cat([goal_batch['image'][:8],
+                                                           goal_batch['goal_image'][:8],
+                                                           goal_img[:8]], dim=0), global_step=step)
+        pg1_logits, pg2_logits = self.is_predictor(goal_img.detach())
+        loss_gip = (
+          self.cross_entropy_criterion(pg1_logits, goal_batch['goal_internal_state'][:, 0]) +
+          self.cross_entropy_criterion(pg2_logits, goal_batch['goal_internal_state'][:, 1])
+        )
+      if loss_gip is not None:
+        loss = 0.2 * loss + 0.8 * loss_gip
 
       self.is_predictor_opt.zero_grad()
       loss.backward()
@@ -853,12 +942,15 @@ class NSPTrainer(NextStatePredictorTrainer):
 
       mean_loss += (loss.item() - mean_loss) / (step + 1)
       # Accuracies
-      pred1 = g1_logits.argmax(dim=1)  # [B]
-      pred2 = g2_logits.argmax(dim=1)  # [B]
-      acc1 = (pred1 == batch['internal_state'][:, 0]).float().mean()
-      acc2 = (pred2 == batch['internal_state'][:, 1]).float().mean()
-      mean_acc1 += (acc1.item() - mean_acc1) / (step + 1)
-      mean_acc2 += (acc2.item() - mean_acc2) / (step + 1)
+      acc1 = (g1_logits.argmax(dim=1) == batch['internal_state'][:, 0]).float().mean().item()
+      acc2 = (g2_logits.argmax(dim=1) == batch['internal_state'][:, 1]).float().mean().item()
+      mean_acc1 += (acc1 - mean_acc1) / (step + 1)
+      mean_acc2 += (acc2 - mean_acc2) / (step + 1)
+
+      goal_acc1 = (pg1_logits.argmax(dim=1) == goal_batch['goal_internal_state'][:, 0]).float().mean().item()
+      goal_accg2 = (pg2_logits.argmax(dim=1) == goal_batch['goal_internal_state'][:, 1]).float().mean().item()
+      mean_goal_acc1 += (goal_acc1 - mean_goal_acc1) / (step + 1)
+      mean_goal_acc2 += (goal_accg2 - mean_goal_acc2) / (step + 1)
 
       if mean_loss < best_loss:
         self.save_model(self.is_predictor, 'is_predictor')
@@ -869,9 +961,78 @@ class NSPTrainer(NextStatePredictorTrainer):
         self.tf_logger.add_scalar('isp_accuracy1', mean_acc1, step)
         self.tf_logger.add_scalar('isp_accuracy2', mean_acc2, step)
       
-      pbar.set_description(f'Loss: {mean_loss:.6f} | Mean_acc: {(mean_acc1+mean_acc2)/2:.2f}')
+      mean_acc = (mean_acc1 + mean_acc2) / 2
+      mean_goal_acc = (mean_goal_acc1 + mean_goal_acc2) / 2
+      pbar.set_description(f'Loss: {mean_loss:.6f} | Mean_acc: {mean_acc:.2f} | Mean_goal_acc: {mean_goal_acc:.2f}')
 
-  def train_image_goal_predictor(self):
+  def train_goal_is_predictor(self):
+    print('Training Goal Internal State Predictor')
+    self.goal_is_predictor.train()
+    self.gis_predictor_opt = torch.optim.AdamW(self.goal_is_predictor.parameters(), lr=3e-4)
+
+    best_loss = torch.inf
+    mean_loss = 0.0
+    mean_acc1, mean_acc2 = 0.0, 0.0
+    mean_goal_acc1, mean_goal_acc2 = 0.0, 0.0
+
+    B = self.config.get('gisp_batch_size', 128)
+    pbar = tqdm(range(self.config.get('gisp_max_train_steps', 100)))
+    for step in pbar:
+      batch = self.replay_buffer.sample_image_is_goal_batch(B)
+
+      if step == 0:
+        n_valid_ep = self.replay_buffer.n_finished_episode
+        n_ep = self.replay_buffer.current_episode_id
+        print(f'Number of episode with a reached target end: {n_valid_ep}/{n_ep}')  
+
+      is1_logits, is2_logits, isg1_logits, isg2_logits = self.goal_is_predictor(batch['image'])
+
+      # --- Current internal_state from image ---
+      loss = (
+        self.cross_entropy_criterion(is1_logits, batch['internal_state'][:, 0]) +
+        self.cross_entropy_criterion(is2_logits, batch['internal_state'][:, 1])
+      )
+
+      # --- Goal internal_state ---
+      goal_loss = (
+        self.cross_entropy_criterion(isg1_logits, batch['goal_internal_state'][:, 0]) +
+        self.cross_entropy_criterion(isg2_logits, batch['goal_internal_state'][:, 1])
+      )
+
+      loss = loss + goal_loss
+
+      self.gis_predictor_opt.zero_grad()
+      loss.backward()
+      self.gis_predictor_opt.step()
+
+      mean_loss += (loss.item() - mean_loss) / (step + 1)
+      # Accuracies
+      acc1 = (is1_logits.argmax(-1) == batch['internal_state'][:, 0]).float().mean().item()
+      acc2 = (is2_logits.argmax(-1) == batch['internal_state'][:, 1]).float().mean().item()
+      mean_acc1 += (acc1 - mean_acc1) / (step + 1)
+      mean_acc2 += (acc2 - mean_acc2) / (step + 1)
+
+      goal_acc1 = (isg1_logits.argmax(-1) == batch['goal_internal_state'][:, 0]).float().mean().item()
+      goal_acc2 = (isg2_logits.argmax(-1) == batch['goal_internal_state'][:, 1]).float().mean().item()
+      mean_goal_acc1 += (goal_acc1 - mean_goal_acc1) / (step + 1)
+      mean_goal_acc2 += (goal_acc2 - mean_goal_acc2) / (step + 1)
+
+      if mean_loss < best_loss:
+        self.save_model(self.goal_is_predictor, 'goal_is_predictor')
+        best_loss = mean_loss
+      
+      if self.tf_logger:
+        self.tf_logger.add_scalar('gisp_loss', mean_loss, step)
+        self.tf_logger.add_scalar('gisp_accuracy1', mean_acc1, step)
+        self.tf_logger.add_scalar('gisp_accuracy2', mean_acc2, step)
+        self.tf_logger.add_scalar('gisp_goal_accuracy1', mean_goal_acc1, step)
+        self.tf_logger.add_scalar('gisp_goal_accuracy2', mean_goal_acc2, step)
+      
+      mean_acc = (mean_acc1 + mean_acc2) / 2
+      mean_goal_acc = (mean_goal_acc1 + mean_goal_acc2) / 2
+      pbar.set_description(f'Loss: {mean_loss:.6f} | Mean_acc: {mean_acc:.2f} | Mean_goal_acc: {mean_goal_acc:.2f}')
+
+  def train_image_goal_predictor(self):  # Currently overfit
     print('Training Image Goal Predictor...')
     self.img_goal_predictor.train()
     self.img_goal_opt = torch.optim.AdamW(self.img_goal_predictor.parameters(), lr=3e-4)
@@ -913,7 +1074,7 @@ class NSPTrainer(NextStatePredictorTrainer):
       
       pbar.set_description(f'Loss: {mean_loss:.6f}')
 
-  def train_is_goal_scorer(self):
+  def train_is_goal_scorer(self):  # Currently underfit ~30% accuracy
     print('Training IS Goal Predictor...')
     self.is_goal_scorer.train()
     self.isgp_opt = torch.optim.AdamW(self.is_goal_scorer.parameters(), lr=1e-4)
@@ -944,6 +1105,12 @@ class NSPTrainer(NextStatePredictorTrainer):
 
       image_rep = image.unsqueeze(1).repeat(1, K, 1, 1, 1).view(B*K, 3, 32, 32)
       is_c_rep = is_c.unsqueeze(1).repeat(1, K, 1).view(B*K, 2)
+
+      # Use K/2 from same episode and K/2 from other episode
+      # fg_from_ep = batch['fake_goal_internal_state'][:, :K//2]
+      # perm = torch.randperm(B, device=self.device)
+      # fg_from_other_ep = batch['fake_goal_internal_state'][:, K//2:][perm]
+      # fake_goals = torch.cat([fg_from_ep, fg_from_other_ep], dim=1).view(B*K, 2)
       fake_goals = batch["fake_goal_internal_state"].view(B*K, 2)
 
       s_neg = self.is_goal_scorer(image_rep, is_c_rep, fake_goals)
@@ -951,8 +1118,13 @@ class NSPTrainer(NextStatePredictorTrainer):
 
       # Constrastive loss
       # loss = -torch.log(torch.sigmoid(1.0 * (s_pos - s_neg))).mean()
-      loss = -torch.log(torch.sigmoid(1.0 * (s_pos.unsqueeze(1) - s_neg))).mean()
-
+      # loss = -torch.log(torch.sigmoid(1.0 * (s_pos.unsqueeze(1) - s_neg))).mean()
+      # loss = F.relu(1.0 - (s_pos.unsqueeze(1) - s_neg)).mean()
+      loss = torch.nn.functional.softplus(-(s_pos.unsqueeze(1) - s_neg)/0.1).mean()
+      # temperature = 1.0
+      # logits = torch.cat([s_pos.unsqueeze(1), s_neg], dim=1)
+      # labels = torch.zeros(B, dtype=torch.long, device=logits.device)
+      # loss = F.cross_entropy(logits / temperature, labels)
 
       self.isgp_opt.zero_grad()
       loss.backward()
@@ -962,11 +1134,18 @@ class NSPTrainer(NextStatePredictorTrainer):
 
       # Find best goal based on learned scorer
       if step % 100 == 0:
-        pred_goal, score = self.infer_best_goal_discrete(image, is_c, self.all_goals)
-        acc1 = (pred_goal[:, 0] == is_g_pos[:, 0]).float().mean()
-        acc2 = (pred_goal[:, 1] == is_g_pos[:, 1]).float().mean()
-        mean_acc1 += (acc1.item() - mean_acc1) / (step//100 + 1)
-        mean_acc2 += (acc2.item() - mean_acc2) / (step//100 + 1)
+        # pred_goal, score = self.infer_best_goal_discrete(image, is_c, self.all_goals)
+        # acc1 = (pred_goal[:, 0] == is_g_pos[:, 0]).float().mean().item()
+        # acc2 = (pred_goal[:, 1] == is_g_pos[:, 1]).float().mean().item()
+        acc_joint, acc1, acc2 = self.compute_topk_goal_accuracy(
+            image=image,
+            is_c=is_c,
+            is_g_true=is_g_pos,
+            all_goals=self.all_goals,
+            k=30
+        )
+        mean_acc1 += (acc1 - mean_acc1) / (step//100 + 1)
+        mean_acc2 += (acc2 - mean_acc2) / (step//100 + 1)
 
       if mean_loss < best_loss:
         self.save_model(self.is_goal_scorer, 'is_goal_scorer')
@@ -980,10 +1159,73 @@ class NSPTrainer(NextStatePredictorTrainer):
 
       pbar.set_description(f'Loss: {mean_loss:.6f} | Mean_acc: {(mean_acc1+mean_acc2)/2:.2f}')
 
-  def train_goal_image_predictor(self):  # Flow
+  def train_rnn_goal_is_predictor(self):
+    print('Training IS Goal Predictor (RNN)...')
+    self.rnn_gisp.train()
+    self.rnngisp_opt = torch.optim.AdamW(self.rnn_gisp.parameters(), lr=1e-4)
+
+    best_loss = torch.inf
+    mean_loss = 0.0
+    mean_acc1, mean_acc2 = 0.0, 0.0
+
+    pbar = tqdm(range(self.config.get('rnngisp_max_train_steps', 500)))
+    for step in pbar:
+      # ---- sample episode batch ----
+      episode_length = random.randint(1, self.config.get('rnngisp_max_episode_length', 50))
+      batch = self.replay_buffer.sample_episode_batch(self.config.get('rnngisp_batch_size', 32),
+                                                      episode_length,
+                                                      random_window=False, success_reward=10)
+
+      image_seq = batch['image']                     # [B, T, 3, 32, 32]
+      internal_state_seq = batch['internal_state']   # [B, T, 2]
+      condition = {'internal_state': internal_state_seq}
+
+      # ---- forward ----
+      g1_logits, g2_logits = self.rnn_gisp(image_seq, condition=condition)  # [B, T, 19or37]
+
+      # ---- target goal: final internal state ----
+      B, T, *_ = image_seq.shape
+      goal = internal_state_seq[:, -1]               # [B, 2]
+      goal1 = goal[:, 0].long()
+      goal2 = goal[:, 1].long()
+      goal1 = goal1.unsqueeze(1).expand(B, T)  # [B, T]
+      goal2 = goal2.unsqueeze(1).expand(B, T)  # [B, T]
+
+      # ---- classification loss ----
+      loss1 = F.cross_entropy(g1_logits.reshape(B*T, -1), goal1.flatten())
+      loss2 = F.cross_entropy(g2_logits.reshape(B*T, -1), goal2.flatten())
+      loss = loss1 + loss2
+
+      # ---- optimize ----
+      self.rnngisp_opt.zero_grad()
+      loss.backward()
+      self.rnngisp_opt.step()
+
+      mean_loss += (loss.item() - mean_loss) / (step + 1)
+
+      # ---- accuracy ----
+      acc1 = (g1_logits.argmax(dim=-1) == goal1).float().mean()
+      acc2 = (g2_logits.argmax(dim=-1) == goal2).float().mean()
+      mean_acc1 += (acc1.item() - mean_acc1) / (step + 1)
+      mean_acc2 += (acc2.item() - mean_acc2) / (step + 1)
+
+      # ---- save best ----
+      if mean_loss < best_loss:
+        self.save_model(self.rnn_gisp, 'rnn_gisp')
+        best_loss = mean_loss
+
+      # ---- logging ----
+      if self.tf_logger:
+        self.tf_logger.add_scalar('rnngisp_loss', mean_loss, step)
+        self.tf_logger.add_scalar('rnngisp_accuracy1', mean_acc1, step)
+        self.tf_logger.add_scalar('rnngisp_accuracy2', mean_acc2, step)
+
+      pbar.set_description(f'Loss: {mean_loss:.6f} | Mean_acc: {(mean_acc1+mean_acc2)/2:.2f}')
+
+  def train_goal_image_predictor(self):  # Flow | CURRENTLY OVERFIT
     print('Training Goal Image Predictor...')
     self.goal_image_predictor.train()
-    self.gip_opt = torch.optim.AdamW(self.goal_image_predictor.parameters(), lr=1e-5)
+    self.gip_opt = torch.optim.AdamW(self.goal_image_predictor.parameters(), lr=1e-4, weight_decay=0.1)
 
     best_loss = torch.inf
     mean_loss = 0.0
@@ -1020,15 +1262,15 @@ class NSPTrainer(NextStatePredictorTrainer):
       if self.tf_logger:
         self.tf_logger.add_scalar('goal_image_predictor_fm_loss', mean_loss, step)
         
-        if step % self.config.get('gip_check_pred_loss_every', 100) == 0:
+        if step % self.config.get('gip_check_pred_loss_every', 20) == 0:
           x1_pred = rk45_sampling(
             self.goal_image_predictor,
             device=self.device,
             n_samples=x1.shape[0],
             condition=condition,
-            n_steps=4
+            n_steps=2
           )
-          x1_pred = x1_pred[-1].clamp(-1, 1)
+          x1_pred = x1_pred[-1]
           with torch.no_grad():
             x1_pred_cleaned = self.image_cleaner(self.clamp_denorm_fn(x1_pred))
 
@@ -1046,14 +1288,19 @@ class NSPTrainer(NextStatePredictorTrainer):
 
   def train(self):
     self.fill_memory()
-    # self.train_internal_world_model()
-    # self.train_world_model()
-    # self.train_image_cleaner()
-    # self.train_is_goal_policy()
+    self.train_internal_world_model()
+    self.train_world_model()
+    self.train_image_cleaner(self.world_model)
+    self.train_is_goal_policy()
+
+    # self.train_goal_is_predictor()
     # self.train_is_goal_scorer()
-    self.train_is_predictor()
     # self.train_image_goal_predictor()
+
     self.train_goal_image_predictor()
+    self.train_image_cleaner(self.goal_image_predictor)
+    self.train_is_predictor()
+    # self.train_rnn_goal_is_predictor()
   
   @torch.no_grad()
   def show_imagined_trajectory(self):
@@ -1127,16 +1374,67 @@ class NSPTrainer(NextStatePredictorTrainer):
     return best_goals, max_scores_vals
 
   @torch.no_grad()
+  def compute_topk_goal_accuracy(self, image, is_c, is_g_true, all_goals, k=5):
+    """
+    image:      [B, 3, 32, 32]
+    is_c:       [B, 2]
+    is_g_true:  [B, 2]
+    all_goals:  [N, 2]   (703 goals)
+    k:          top-k
+
+    Returns:
+        acc_joint:  fraction where true goal is in top-k (both dims correct jointly)
+        acc1:       top-k accuracy for dim1
+        acc2:       top-k accuracy for dim2
+    """
+    B = image.shape[0]
+    N = all_goals.shape[0]
+
+    # Expand for scoring all goals
+    img_expanded = image.repeat_interleave(N, dim=0)     # [B*N, 3, 32, 32]
+    is_c_expanded = is_c.repeat_interleave(N, dim=0)    # [B*N, 2]
+    goals_expanded = all_goals.repeat(B, 1)             # [B*N, 2]
+
+    # Score all candidate goals
+    scores = self.is_goal_scorer(img_expanded, is_c_expanded, goals_expanded)
+    scores = scores.view(B, N)
+
+    # Top-k indices per sample
+    topk_scores, topk_idx = torch.topk(scores, k=k, dim=1)   # [B, k]
+    topk_goals = all_goals[topk_idx]                         # [B, k, 2]
+
+    # ---- Joint top-k accuracy (exact goal in top-k set) ----
+    is_g_true_exp = is_g_true.unsqueeze(1)                   # [B, 1, 2]
+    match = (topk_goals == is_g_true_exp).all(dim=-1)        # [B, k]
+    acc_joint = match.any(dim=1).float().mean().item()
+
+    # ---- Per-dimension top-k accuracy ----
+    # dim 1
+    acc1 = (topk_goals[..., 0] == is_g_true[:, 0].unsqueeze(1)).any(dim=1).float().mean().item()
+    # dim 2
+    acc2 = (topk_goals[..., 1] == is_g_true[:, 1].unsqueeze(1)).any(dim=1).float().mean().item()
+
+    return acc_joint, acc1, acc2
+
+  @torch.no_grad()
   def autoplay(self):
     # self.img_goal_predictor.eval()
     self.goal_image_predictor.eval()
     self.is_predictor.eval()
     self.goal_policy.eval()
+    # self.rnn_gisp.eval()
+    # self.goal_is_predictor.eval()
+    self.image_cleaner.eval()
 
     pygame.init()  # Initialize pygame for keyboard input
+    plt.ion()   # interactive mode (non-blocking)
 
-    goal_window = pygame.display.set_mode((128, 128))
-    pygame.display.set_caption("Predicted Goal Image")
+    fig, ax = plt.subplots(figsize=(3, 3))
+    goal_im = ax.imshow(np.zeros((32, 32, 3), dtype=np.uint8))
+    ax.set_title("Predicted Goal Image")
+    ax.axis("off")
+    fig.canvas.draw()
+    fig.show()
 
     running = True
     force_reset = False
@@ -1144,13 +1442,15 @@ class NSPTrainer(NextStatePredictorTrainer):
     obs, _ = self.env.reset()
     img = self.env.render()
 
-    def show_goal_image(img_goal):
-      img = img_goal.squeeze(0).permute(1, 2, 0).detach().cpu().numpy()
-      img = (img * 255).astype('uint8')  # if normalized
-      surface = pygame.surfarray.make_surface(img.swapaxes(0, 1))
-      surface = pygame.transform.scale(surface, (128, 128))
-      goal_window.blit(surface, (0, 0))
-      pygame.display.flip()
+    def tensor_to_uint8(img):
+      img = img.squeeze(0).permute(1, 2, 0).detach().cpu().numpy()
+
+      if img.min() < 0:
+          img = (img + 1) / 2
+
+      img = np.clip(img, 0, 1)
+      img = (img * 255).astype(np.uint8)
+      return img
 
     def format_data(obs, img):
       obs, _, img, *_ = self.replay_buffer.prepare_data(obs//5, None, img, None, None, None, None)
@@ -1158,7 +1458,12 @@ class NSPTrainer(NextStatePredictorTrainer):
       return obs, img  # [1, 2], [1, 3, 32, 32]
 
     def find_goal(img, obs):
+      # --- From GoalInternalStatePredictor --- #
+      # _, _, g1_logits, g2_logits  = self.goal_is_predictor(img)
+      # img_goal = None
+      # --------------------------------------- #
       # img_goal = self.img_goal_predictor(img)
+      # --- From GoalImagePredictor --- #
       condition = {'x_cond': img}
       img_goal = rk45_sampling(
         self.goal_image_predictor,
@@ -1169,13 +1474,26 @@ class NSPTrainer(NextStatePredictorTrainer):
       )
       img_goal = self.image_cleaner(self.clamp_denorm_fn(img_goal[-1]))
       g1_logits, g2_logits = self.is_predictor(img_goal)
+      # ------------------------------- #
       goal = torch.stack([g1_logits.argmax(-1), g2_logits.argmax(-1)], dim=1)  # [1, 2]
+      # --- From RNN IS Goal Predictor --- #
+      # g1_logits, g2_logits = self.rnn_gisp(img, condition={'internal_state': obs})
+      # g1_logits, g2_logits = g1_logits.argmax(-1)[:, -1], g2_logits.argmax(-1)[:, -1]
+      # goal = torch.stack([g1_logits, g2_logits], dim=1)
+      # img_goal = None
+      # ---------------------------------- #
       return goal, img_goal
 
     # --- Agent goal prediction ---
     obs, img = format_data(obs, img)
+
+    # image_history = deque([img], maxlen=self.config.get('rnngisp_max_episode_length', 50))
+    # obs_history = deque([obs], maxlen=self.config.get('rnngisp_max_episode_length', 50))
+
+    # img = torch.stack(list(image_history), dim=1)  # [1, T, 3, 32, 32]
+    # obs = torch.stack(list(obs_history), dim=1)  # [1, T, 2]
+
     goal, img_goal = find_goal(img, obs)
-    show_goal_image(img_goal)
 
     while running:
       # Capture keyboard events
@@ -1190,22 +1508,51 @@ class NSPTrainer(NextStatePredictorTrainer):
 
       # --- Agent action ---
       action, *_ = self.goal_policy.sample(obs, goal)
+      # action, *_ = self.goal_policy.sample(obs[:, -1], goal)
+
       # --- Perform action ---
       obs, reward, terminated, truncated, info = self.env.step(action)
       img = self.env.render()
+
       # --- Format data ---
       obs, img = format_data(obs, img)
+
+      # image_history.append(img)
+      # obs_history.append(obs)
+      # img = torch.stack(list(image_history), dim=1)
+      # obs = torch.stack(list(obs_history), dim=1)
+
+      # goal, img_goal = find_goal(img, obs)
 
       print(f'{terminated=} | {obs=} | {goal=}')
       if terminated or truncated or force_reset:
         force_reset = False
         print('RESET ENV!')
+        # image_history.clear()
+        # obs_history.clear()
+
         obs, _ = self.env.reset(options={'only_target': True})
         img = self.env.render()
         obs, img = format_data(obs, img)
+
+        # image_history.append(img)
+        # img = torch.stack(list(image_history), dim=1)
+
+        # obs_history.append(obs)
+        # obs = torch.stack(list(obs_history), dim=1)
+
         # --- Agent goal prediction ---
         goal, img_goal = find_goal(img, obs)
-      show_goal_image(img_goal)
+
+      if img_goal is not None:
+        goal_np = tensor_to_uint8(img_goal)
+
+        goal_im.set_data(goal_np)
+        ax.draw_artist(ax.patch)
+        ax.draw_artist(goal_im)
+
+        fig.canvas.blit(ax.bbox)
+        fig.canvas.flush_events()
 
     self.env.close()
     pygame.quit()
@@ -1253,9 +1600,11 @@ if __name__ == '__main__':
     trainer.load_model(trainer.goal_policy, 'goal_policy')
     trainer.load_model(trainer.goal_value, 'goal_value')
     trainer.load_model(trainer.is_predictor, 'is_predictor')
-    trainer.load_model(trainer.img_goal_predictor, 'img_goal_predictor')
+    # trainer.load_model(trainer.goal_is_predictor, 'goal_is_predictor')
+    # trainer.load_model(trainer.img_goal_predictor, 'img_goal_predictor')
     # trainer.load_model(trainer.is_goal_scorer, 'is_goal_scorer')
     trainer.load_model(trainer.goal_image_predictor, 'goal_image_predictor')
+    # trainer.load_model(trainer.rnn_gisp, 'rnn_gisp')
   
   if args.train_model:
     print('Start training...')
