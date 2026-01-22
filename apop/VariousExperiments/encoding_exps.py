@@ -22,70 +22,10 @@ from torchvision import datasets, transforms, utils
 from torch.utils.tensorboard import SummaryWriter
 
 import cnn_layers as cl
+from models_zoo import CNNAE
+from helpers_zoo import exponential_schedule
 from vision_transformer.cvt import CvT
 from vision_transformer.mae import MaskedAutoencoderViT
-
-
-def exponential_schedule(epoch, n_epochs_decay, start=0.1, end=0.75):
-  if end == 0.0:
-    end = 1e-6
-  op_check = min if end > start else max
-  return round(op_check(end, start * (end / start) ** (epoch / (n_epochs_decay - 1))), 2)
-
-
-def linear_schedule(epoch, n_epochs, start, end):
-    t = min(epoch / (n_epochs - 1), 1.0)
-    return round(start + t * (end - start), 2)
-
-
-def cosine_schedule(epoch, n_epochs, start, end):
-    t = min(epoch / (n_epochs - 1), 1.0)
-    return round(end + (start - end) * 0.5 * (1 + math.cos(math.pi * t)), 2)
-
-
-class CNNAE(nn.Module):
-  '''AutoEncoder that take an image and try to reconstruct it'''
-  CONFIG = {'skip_connection': True,
-            'linear_bottleneck': False,
-            'add_noise_bottleneck': False,
-            'add_noise_encoder': False,
-            'add_enc_attn': False,
-            'add_dec_attn': True,
-            'noise_prob': 0.5,
-            'noise_std': 0.1,
-            'latent_dim': 128,
-            'encoder_archi': 'CNNEncoder'}
-  def __init__(self, config={}):
-    super().__init__()
-    self.config = {**CNNAE.CONFIG, **config}
-
-    self.down = cl.CNN_LAYERS[self.config['encoder_archi']](**self.config)
-
-    if self.config['linear_bottleneck']:
-      self.embedder = nn.Linear(256*4*4, self.config['latent_dim'])      # H=32,W=32 for cifar10
-      self.fc_dec = nn.Linear(self.config['latent_dim'], 256*4*4)
-
-    self.up = cl.CNNDecoder(add_attn=self.config['add_dec_attn'])
-
-    if self.config['add_noise_encoder'] or self.config['add_noise_bottleneck']:
-      self.noise_layer = cl.NoiseLayer(p=self.config['noise_prob'], std=self.config['noise_std'])
-  
-  def forward(self, x, return_latent=False):
-    d1, d2, d3 = self.down(x)
-
-    if self.config['linear_bottleneck']:
-      d3 = self.fc_dec(self.embedder(d3.flatten(1))).view(d3.shape)
-    
-    if self.config['add_noise_bottleneck']:
-      d3 = self.noise_layer(d3)
-
-    u3 = self.up(d3,
-                 d2 if self.config['skip_connection'] else None,
-                 d1 if self.config['skip_connection'] else None)
-
-    if return_latent:
-      return u3, d3
-    return u3
 
 
 class MixedAE(nn.Module):

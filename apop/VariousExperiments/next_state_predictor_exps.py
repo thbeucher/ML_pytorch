@@ -19,90 +19,10 @@ sys.path.append('../../../robot/')
 
 from encoding_exps import CNNAETrainer
 from replay_buffer import ReplayBuffer
-from cnn_layers import EnhancedResidualFullBlock
-from flow_matching_exps import flow_matching_loss, euler_sampling, rk45_sampling, TimeEmbedding
+from models_zoo import WorldModelFlowUnet
+from flow_matching_exps import flow_matching_loss, rk45_sampling
 
 warnings.filterwarnings("ignore")
-
-
-class WorldModelFlowUnet(nn.Module):
-  def __init__(self, img_chan=3, time_dim=64, x_start=False,
-               add_action=True, n_actions=5, action_dim=8,
-               add_is=False, is_n_values=36, is_dim=32,  # is = internal_state
-               add_ds=False, ds_n_values=2, ds_dim=64,  # ds = done_signal
-               ):
-    super().__init__()
-    self.time_emb = nn.Sequential(TimeEmbedding(time_dim), nn.Linear(time_dim, time_dim), nn.SiLU())
-    condition_dim = time_dim 
-
-    self.add_action = add_action
-    if add_action:
-      self.action_emb = nn.Sequential(nn.Embedding(n_actions, action_dim), nn.Linear(action_dim, action_dim), nn.SiLU())
-      condition_dim += action_dim
-
-    self.add_is = add_is
-    if add_is:
-      self.is_emb = nn.Sequential(nn.Embedding(is_n_values, is_dim), nn.Linear(is_dim, is_dim), nn.SiLU())
-      condition_dim += 2 * is_dim
-    
-    self.add_ds = add_ds
-    if add_ds:
-      self.ds_emb = nn.Sequential(nn.Embedding(ds_n_values, ds_dim), nn.Linear(ds_dim, ds_dim), nn.SiLU())
-      condition_dim += ds_dim
-
-    self.x_start = x_start
-    start_dim = 2*img_chan if x_start else img_chan
-    self.init_conv = nn.Conv2d(start_dim + condition_dim, 64, 3, 1, 1)
-
-    self.down1 = EnhancedResidualFullBlock(64, 128, pooling=True, cond_emb=condition_dim)
-    self.down2 = EnhancedResidualFullBlock(128, 256, pooling=True, cond_emb=condition_dim)
-    self.down3 = EnhancedResidualFullBlock(256, 512, pooling=True, cond_emb=condition_dim, groups=1)
-
-    self.up1 = EnhancedResidualFullBlock(512, 256, upscaling=True, cond_emb=condition_dim, groups=1)
-    self.up2 = EnhancedResidualFullBlock(256, 128, upscaling=True, cond_emb=condition_dim)
-    self.up3 = EnhancedResidualFullBlock(128, 64, upscaling=True, cond_emb=condition_dim)
-    
-    self.final_conv = nn.Sequential(nn.Conv2d(64, 32, 3, 1, 1), nn.BatchNorm2d(32), nn.SiLU(),
-                                    nn.Conv2d(32, img_chan, 3, 1, 1))
-  
-  def forward(self, x, t, condition={}):  # image, time, action
-    B, C, H, W = x.shape
-
-    t_emb = self.time_emb(t.squeeze(-1))         # -> [B, time_dim]
-    all_embed = [t_emb]
-
-    if self.add_action:
-      a_emb = self.action_emb(condition['action'].squeeze(-1))  # -> [B, action_dim]
-      all_embed += [a_emb]
-    
-    if self.add_is:
-      is_emb = self.is_emb(condition['internal_state'])  # [B, n_is=2] -> [B, n_is=2, is_dim=32]
-      all_embed += [is_emb.flatten(1)]  # [B, 2*32]
-    
-    if self.add_ds:
-      ds_emb = self.ds_emb(condition['done_signal'].squeeze(-1))  # [B, ds_dim=64]
-      all_embed += [ds_emb]
-
-    all_embed = torch.cat(all_embed, dim=1)  # -> [B, 104]
-
-    all_cond = [all_embed[:, :, None, None].expand(-1, -1, H, W)]
-    if self.x_start:
-      all_cond = [condition['x_cond']] + all_cond
-    
-    x = torch.cat([x] + all_cond, dim=1)
-
-    x = self.init_conv(x)                        # -> [B, 64, H, W]
-
-    d1 = self.down1(x, c=all_embed)              # -> [B, 128, H/2, W/2]
-    d2 = self.down2(d1, c=all_embed)             # -> [B, 256, H/4, W/4]
-    d3 = self.down3(d2, c=all_embed)             # -> [B, 512, H/8, W/8]
-
-    u1 = self.up1(d3, c=all_embed)               # -> [B, 256, H/4, W/4]
-    u2 = self.up2(u1 + d2, c=all_embed)          # -> [B, 128, H/2, W/2]
-    u3 = self.up3(u2 + d1, c=all_embed)          # -> [B, 64, H, W]
-
-    velocity = self.final_conv(u3)               # -> [B, img_chan, H, W]
-    return velocity
 
 
 class NextStatePredictorTrainer:

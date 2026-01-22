@@ -1,13 +1,19 @@
 import torch
-import random
-from collections import deque
 from torchvision import transforms
 from torch.utils.data import Dataset
 
 
 class ReplayBuffer:
-  def __init__(self, internal_state_dim, action_dim, image_size, image_chan=3, resize_to=None,
-               normalize_img=False, capacity=10_000, device='cpu', target_device=None):
+  def __init__(self,
+               internal_state_dim: int,
+               action_dim: int,
+               image_size: int,
+               image_chan: int = 3,
+               resize_to: int | None = None,
+               normalize_img: bool = False,
+               capacity: int = 10_000,
+               device: str = 'cpu',
+               target_device: torch.device | None = None):
     self.capacity = capacity
 
     self.device = torch.device(device)

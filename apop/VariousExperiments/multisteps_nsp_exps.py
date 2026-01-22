@@ -14,58 +14,9 @@ from collections import deque
 from pytorch_msssim import SSIM
 from torchvision.utils import make_grid
 
-from encoding_exps import CNNAE
 from flow_matching_exps import flow_matching_loss, rk45_sampling
+from models_zoo import CNNAE, get_embedding_block, GoalPolicy, GoalValue
 from next_state_predictor_exps import NextStatePredictorTrainer, WorldModelFlowUnet
-
-
-def get_embedding_block(n_embeddings, embedding_dim):
-  return nn.Sequential(nn.Embedding(n_embeddings, embedding_dim),
-                       nn.Linear(embedding_dim, embedding_dim),
-                       nn.SiLU(True))
-
-
-def get_linear_net(input_dim, hidden_dim, output_dim):
-  return nn.Sequential(nn.Linear(input_dim, hidden_dim),
-                       nn.ReLU(True),
-                       nn.Linear(hidden_dim, hidden_dim),
-                       nn.ReLU(True),
-                       nn.Linear(hidden_dim, output_dim))
-
-
-class GoalPolicy(nn.Module):
-  def __init__(self, a_dim=5, is_dim=32, is_n_values=37, hidden=256):
-    super().__init__()
-    self.is_emb = get_embedding_block(is_n_values, is_dim)
-    self.net = get_linear_net(2 * is_dim * 3, hidden, a_dim)
-
-  def forward(self, is_c, is_g):  # [B, 2], [B, 2]
-    is_c_emb = self.is_emb(is_c).flatten(1)  # -> [B, 2, 32] -> [B, 64]
-    is_g_emb = self.is_emb(is_g).flatten(1)  # -> [B, 2, 32] -> [B, 64]
-    x = torch.cat([is_c_emb, is_g_emb, is_g_emb - is_c_emb], dim=-1)  # [B, 192]
-    return self.net(x)  # [B, 5]
-  
-  def sample(self, states, goals):
-    # ---- Policy forward pass π(a | s, g) ----
-    a_logits = self.forward(states, goals)
-    dist = torch.distributions.Categorical(logits=a_logits)
-    # Sample action (on-policy)
-    actions = dist.sample()
-    # Get log probs for RL learning
-    log_probs = dist.log_prob(actions)
-    return actions, log_probs, dist.entropy()
-
-
-class GoalValue(nn.Module):
-  def __init__(self, is_dim=32, is_n_values=37, hidden=256):
-    super().__init__()
-    self.is_emb = get_embedding_block(is_n_values, is_dim)
-    self.net = get_linear_net(2 * is_dim * 2, hidden, 1)
-
-  def forward(self, is_c, is_g):
-    is_c_emb = self.is_emb(is_c).flatten(1)  # -> [B, 2, 32] -> [B, 64]
-    is_g_emb = self.is_emb(is_g).flatten(1)  # -> [B, 2, 32] -> [B, 64]
-    return self.net(torch.cat([is_c_emb, is_g_emb], dim=-1)).squeeze(-1)  # [B, 1] -> [B]
 
 
 class NISPredictor(nn.Module):
