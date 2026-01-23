@@ -8,8 +8,8 @@ import gymnasium as gym
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 
+import trainers_zoo as tz
 from replay_buffer import ReplayBuffer
-from trainers_zoo import GANGoalImagePredictor, FlowGoalImagePredictor
 
 sys.path.append('../../../robot/')
 warnings.filterwarnings("ignore")
@@ -25,9 +25,9 @@ class MultiStepsNSPOrchestrator:
     'resize_to':                32,
     'normalize_img':            True,
     'n_train_episodes':         100,
-    'train_replay_buffer_size': 100*60,
+    'train_buffer_size':        100*60,
     'n_test_episodes':          10,
-    'test_replay_buffer_size':  10*60,  # 10 episode of max size 100, test buffer will certainly not be full
+    'test_buffer_size':         10*60,  # 10 episode of max size 100, test buffer will certainly not be full
     'render_mode':              'rgb_array',
     'use_tf_logger':            True,
   }
@@ -44,24 +44,25 @@ class MultiStepsNSPOrchestrator:
     self.tf_logger = SummaryWriter(save_dir_run) if self.config['use_tf_logger'] else None
 
   def instanciate_trainers(self):
-    self.gan_goal_image_trainer = GANGoalImagePredictor()
-    self.flow_goal_image_trainer = FlowGoalImagePredictor()
+    self.gan_goal_image_trainer = tz.GANGoalImagePredictorTrainer()
+    self.flow_goal_image_trainer = tz.FlowGoalImagePredictorTrainer()
+    self.is_predictor_trainer = tz.ISPredictorTrainer()
   
   def instanciate_utils(self):
-    self.train_replay_buffer = ReplayBuffer(self.config['internal_state_dim'],
+    self.train_buffer = ReplayBuffer(self.config['internal_state_dim'],
                                             self.config['action_dim'],
                                             self.config['image_size'],
                                             resize_to=self.config['resize_to'],
                                             normalize_img=self.config['normalize_img'],
-                                            capacity=self.config['train_replay_buffer_size'],
+                                            capacity=self.config['train_buffer_size'],
                                             device='cpu',
                                             target_device=self.device)
-    self.test_replay_buffer = ReplayBuffer(self.config['internal_state_dim'],
+    self.test_buffer = ReplayBuffer(self.config['internal_state_dim'],
                                            self.config['action_dim'],
                                            self.config['image_size'],
                                            resize_to=self.config['resize_to'],
                                            normalize_img=self.config['normalize_img'],
-                                           capacity=self.config['train_replay_buffer_size'],
+                                           capacity=self.config['train_buffer_size'],
                                            device='cpu',
                                            target_device=self.device)
   
@@ -97,26 +98,48 @@ class MultiStepsNSPOrchestrator:
           break
   
   def run(self):
-    self.fill_memory(self.train_replay_buffer, n_episodes=self.config['n_train_episodes'])
-    self.fill_memory(self.test_replay_buffer, n_episodes=self.config['n_test_episodes'], act='best')
+    self.fill_memory(self.train_buffer, n_episodes=self.config['n_train_episodes'])
+    self.fill_memory(self.test_buffer, n_episodes=self.config['n_test_episodes'], act='best')
 
     # --- Goal Image prediction experiment using GAN --- #
     # self.gan_goal_image_trainer.load()
-    # losses = self.gan_goal_image_trainer.train(lambda x: self.train_replay_buffer.sample_image_is_goal_batch(x),
+    # losses = self.gan_goal_image_trainer.train(lambda x: self.train_buffer.sample_image_is_goal_batch(x),
     #                                            tf_logger=self.tf_logger)
-    # rec_loss = self.gan_goal_image_trainer.evaluate(lambda x: self.test_replay_buffer.sample_image_is_goal_batch(x),
+    # rec_loss = self.gan_goal_image_trainer.evaluate(lambda x: self.test_buffer.sample_image_is_goal_batch(x),
     #                                                 tf_logger=self.tf_logger)
     # self.gan_goal_image_trainer.save()
     # -------------------------------------------------- #
 
     # --- Goal Image prediction experiment using FLOW --- #
     self.flow_goal_image_trainer.load()
-    loss = self.flow_goal_image_trainer.train(lambda x: self.train_replay_buffer.sample_image_is_goal_batch(x),
+    loss = self.flow_goal_image_trainer.train(lambda x: self.train_buffer.sample_image_is_goal_batch(x),
                                               tf_logger=self.tf_logger)
-    rec_loss = self.flow_goal_image_trainer.evaluate(lambda x: self.test_replay_buffer.sample_image_is_goal_batch(x),
+    rec_loss = self.flow_goal_image_trainer.evaluate(lambda x: self.test_buffer.sample_image_is_goal_batch(x),
                                                      tf_logger=self.tf_logger)
     self.flow_goal_image_trainer.save()
+    print('Filling Replay Buffer with Generated Goal Image...')
+    goal_img_gen = torch.zeros_like(self.train_buffer.image, device=self.device)
+    for i in tqdm(range(0, self.train_buffer.size, 128)):
+      goal_img_gen[i:i+128] = self.flow_goal_image_trainer.infer(self.train_buffer.image[i:i+128].to(self.device))
+    self.train_buffer.add_variable(goal_img_gen, 'goal_image_generated')
+    self.tf_logger.add_images('goal_image_generated_train_examples', goal_img_gen[:24], 1)
+
+    goal_img_gen_test = torch.zeros_like(self.test_buffer.image, device=self.device)
+    for i in tqdm(range(0, self.test_buffer.size, 128)):
+      goal_img_gen_test[i:i+128] = self.flow_goal_image_trainer.infer(self.test_buffer.image[i:i+128].to(self.device))
+    self.test_buffer.add_variable(goal_img_gen_test, 'goal_image_generated')
+    self.tf_logger.add_images('goal_image_generated_test_examples', goal_img_gen_test[:24], 1)
     # --------------------------------------------------- #
+
+    # --- Internal State prediction from Generated Image using a CNN --- #
+    self.is_predictor_trainer.load()
+    loss = self.is_predictor_trainer.train(lambda x: self.train_buffer.sample_image_is_goal_batch(x),
+                                           tf_logger=self.tf_logger)
+    acc1, acc2 = self.is_predictor_trainer.evaluate(lambda x: self.test_buffer.sample_image_is_goal_batch(x),
+                                                    tf_logger=self.tf_logger)
+    print(f'Test mean accuracy: {(acc1+acc2)/2:.3f}')
+    self.is_predictor_trainer.save()
+    # -------------------------------------------------------- #
 
 
 if __name__ == '__main__':

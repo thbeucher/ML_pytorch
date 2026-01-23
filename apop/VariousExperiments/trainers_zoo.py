@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from tqdm import tqdm
 from pytorch_msssim import SSIM
 
-from models_zoo import CNNAE, WGANGP, WorldModelFlowUnet
+from models_zoo import CNNAE, WGANGP, WorldModelFlowUnet, ISPredictor
 from helpers_zoo import gradient_penalty, flow_matching_loss, rk45_sampling
 
 
@@ -155,7 +155,7 @@ class ImageCleaner(BaseTrainer):
     return running_mse_loss/n_data, running_ssim_loss/n_data, running_rec_loss/n_data
 
 
-class GANGoalImagePredictor(BaseTrainer):
+class GANGoalImagePredictorTrainer(BaseTrainer):
   CONFIG = {
     'experiment_name':         'gan_goal_image_predictor',
     'model_name':              'WGANGP',
@@ -165,7 +165,7 @@ class GANGoalImagePredictor(BaseTrainer):
     'gradient_penalty_lambda': 10.0,
   }
   def __init__(self, config={}):
-    super().__init__(config={**GANGoalImagePredictor.CONFIG, **config})
+    super().__init__(config={**GANGoalImagePredictorTrainer.CONFIG, **config})
   
   def instanciate_model(self):
     self.model = WGANGP().to(self.device)
@@ -261,7 +261,7 @@ class GANGoalImagePredictor(BaseTrainer):
     return mean_gp, mean_critic_loss, mean_gen_loss, mean_mse_loss, mean_ssim_loss, mean_rec_loss
 
   @torch.no_grad()
-  def evaluate(self, get_data_fn, n_steps=2, batch_size=128, tf_logger=None,
+  def evaluate(self, get_data_fn, n_steps=2, batch_size=32, tf_logger=None,
                goal_img_key='goal_image', start_img_key='image'):
     self.model.eval()
     running_loss = 0.
@@ -290,14 +290,14 @@ class GANGoalImagePredictor(BaseTrainer):
     return self.model.auto_encoder(start_images)
 
 
-class FlowGoalImagePredictor(BaseTrainer):
+class FlowGoalImagePredictorTrainer(BaseTrainer):
   CONFIG = {
     'experiment_name':         'flow_goal_image_predictor',
     'model_name':              'WorldModelFlowUnet',
     'time_dim':                64,
   }
   def __init__(self, config={}):
-    super().__init__(config={**FlowGoalImagePredictor.CONFIG, **config})
+    super().__init__(config={**FlowGoalImagePredictorTrainer.CONFIG, **config})
   
   def instanciate_model(self):
     self.model = WorldModelFlowUnet(img_chan=3,
@@ -307,7 +307,7 @@ class FlowGoalImagePredictor(BaseTrainer):
                                     add_ds=False,
                                     x_start=True).to(self.device)
   
-  def train(self, get_data_fn, n_max_steps=1_000, batch_size=128, tf_logger=None,
+  def train(self, get_data_fn, n_max_steps=500, batch_size=128, tf_logger=None,
             img_cleaner=None, img_normalizer=None,
             goal_img_key='goal_image', start_img_key='image'):
     '''Generator creates goal image starting from start_image and gaussian noise'''
@@ -364,11 +364,10 @@ class FlowGoalImagePredictor(BaseTrainer):
     return mean_loss
   
   @torch.no_grad()
-  def evaluate(self, get_data_fn, n_steps=1, batch_size=128, tf_logger=None,
+  def evaluate(self, get_data_fn, n_steps=1, batch_size=32, tf_logger=None,
                img_cleaner=None, img_normalizer=None,
                goal_img_key='goal_image', start_img_key='image'):
     self.model.eval()
-    running_loss = 0.
     pbar = tqdm(range(n_steps))
     for i in pbar:
       batch = get_data_fn(batch_size)
@@ -398,8 +397,99 @@ class FlowGoalImagePredictor(BaseTrainer):
         tf_logger.add_images('generated_gan_goal_image_test', img_comparison, global_step=1)
     return F.mse_loss(x1_pred, x1)
 
+  @torch.no_grad()
+  def infer(self, image, img_cleaner=None, img_normalizer=None):
+    self.model.eval()
+
+    condition = {'x_cond': image}
+
+    x1_pred = rk45_sampling(
+          self.model,
+          device=self.device,
+          n_samples=image.shape[0],
+          condition=condition,
+          n_steps=4
+        )
+    x1_pred = x1_pred[-1]
+
+    x1_pred_cleaned = x1_pred.clone()
+    if img_cleaner and img_normalizer:
+      with torch.no_grad():
+        x1_pred_cleaned = img_cleaner(img_normalizer(x1_pred))
+
+    return x1_pred_cleaned
+
+
+class ISPredictorTrainer(BaseTrainer):
+  CONFIG = {
+    'experiment_name':         'internal_state_predictor',
+    'model_name':              'ISPredictor',
+  }
+  def __init__(self, config={}):
+    super().__init__(config={**ISPredictorTrainer.CONFIG, **config})
+  
+  def instanciate_model(self):
+    self.model = ISPredictor().to(self.device)
+  
+  def train(self, get_data_fn, n_max_steps=5_000, batch_size=128, tf_logger=None,
+            internal_state_key='goal_internal_state', image_key='goal_image_generated'):
+    print('Internal State Predictor training pass...')
+    self.model.train()
+
+    mean_loss = 0.0
+    mean_acc1, mean_acc2 = 0.0, 0.0
+
+    pbar = tqdm(range(n_max_steps))
+    for step in pbar:
+      batch = get_data_fn(batch_size)
+
+      # Infer internal_state from replay_buffer images
+      g1_logits, g2_logits = self.model(batch[image_key])
+
+      loss = (
+        F.cross_entropy(g1_logits, batch[internal_state_key][:, 0]) +
+        F.cross_entropy(g2_logits, batch[internal_state_key][:, 1])
+      )
+
+      self.mdl_opt.zero_grad()
+      loss.backward()
+      self.mdl_opt.step()
+
+      mean_loss += (loss.item() - mean_loss) / (step + 1)
+
+      # Accuracies
+      acc1 = (g1_logits.argmax(dim=1) == batch[internal_state_key][:, 0]).float().mean().item()
+      acc2 = (g2_logits.argmax(dim=1) == batch[internal_state_key][:, 1]).float().mean().item()
+      mean_acc1 += (acc1 - mean_acc1) / (step + 1)
+      mean_acc2 += (acc2 - mean_acc2) / (step + 1)
+      
+      if tf_logger:
+        tf_logger.add_scalar('isp_loss', mean_loss, step)
+        tf_logger.add_scalar('isp_accuracy1', mean_acc1, step)
+        tf_logger.add_scalar('isp_accuracy2', mean_acc2, step)
+      
+      mean_acc = (mean_acc1 + mean_acc2) / 2
+      pbar.set_description(f'Loss: {mean_loss:.6f} | Mean_acc: {mean_acc:.2f}')
+    
+    return mean_loss, mean_acc
+  
+  @torch.no_grad()
+  def evaluate(self, get_data_fn, n_steps=1, batch_size=32, tf_logger=None,
+               internal_state_key='goal_internal_state', image_key='goal_image_generated'):
+    self.model.eval()
+    pbar = tqdm(range(n_steps))
+    for i in pbar:
+      batch = get_data_fn(batch_size)
+
+      g1_logits, g2_logits = self.model(batch[image_key])
+
+      acc1 = (g1_logits.argmax(dim=1) == batch[internal_state_key][:, 0]).float().mean().item()
+      acc2 = (g2_logits.argmax(dim=1) == batch[internal_state_key][:, 1]).float().mean().item()
+    return acc1, acc2
+
+
 if __name__ == '__main__':
-  ggp = GANGoalImagePredictor()
+  ggp = GANGoalImagePredictorTrainer()
   # --- Dummy test --- #
   # from replay_buffer import ReplayBuffer
   # ic = ImageCleaner()

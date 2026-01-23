@@ -15,8 +15,8 @@ from pytorch_msssim import SSIM
 from torchvision.utils import make_grid
 
 from flow_matching_exps import flow_matching_loss, rk45_sampling
-from models_zoo import CNNAE, get_embedding_block, GoalPolicy, GoalValue
 from next_state_predictor_exps import NextStatePredictorTrainer, WorldModelFlowUnet
+from models_zoo import CNNAE, get_embedding_block, GoalPolicy, GoalValue, ISPredictor
 
 
 class NISPredictor(nn.Module):
@@ -40,111 +40,6 @@ class NISPredictor(nn.Module):
     is1 = self.predictor1(main)                               # -> [B, 18]
     is2 = self.predictor2(main)                               # -> [B, 36]
     return is1, is2
-
-
-class ImageISPredictor(nn.Module):
-  """
-  Predicts an internal_state from:
-    - image: [B, 3, 32, 32]
-
-  Outputs:
-    - internal_state logits for each internal dimension
-  """
-  def __init__(self, is1_n_values=19, is2_n_values=37, is_dim=32, hidden_dim=512, done_info=False,
-               rnn_goal_prediction=False, rnn_hidden=256, num_layers=2, is_rnn=True):
-    super().__init__()
-    # --------------------------------------------------
-    # Image encoder
-    # --------------------------------------------------
-    self.image_encoder = nn.Sequential(
-      nn.Conv2d(3, 64, 3, stride=2, padding=1),   # [B, 64, 16, 16]
-      nn.BatchNorm2d(64),
-      nn.SiLU(),
-
-      nn.Conv2d(64, 128, 3, stride=2, padding=1), # [B, 128, 8, 8]
-      nn.BatchNorm2d(128),
-      nn.SiLU(),
-
-      nn.Conv2d(128, 256, 3, stride=2, padding=1),# [B, 256, 4, 4]
-      nn.BatchNorm2d(256),
-      nn.SiLU(),
-
-      nn.Conv2d(256, hidden_dim, 3, padding=1),  # [B, 512, 4, 4]
-      nn.BatchNorm2d(hidden_dim),
-      nn.SiLU(),
-    )
-
-    self.pool = nn.AdaptiveAvgPool2d(1)  # → [B, hidden_dim]
-
-    # --------------------------------------------------
-    # LSTM for temporal goal prediction
-    # --------------------------------------------------
-    self.rnn_goal_predictor = None
-    if rnn_goal_prediction:
-      self.rnn_goal_predictor = nn.LSTM(
-        input_size=hidden_dim + 2*is_dim,
-        hidden_size=rnn_hidden,
-        num_layers=num_layers,
-        batch_first=True,
-        bidirectional=True,
-      )
-      # --------------------------------------------------
-      # Internal state embedding
-      # --------------------------------------------------
-      self.is_rnn = is_rnn
-      if is_rnn:
-        self.is_emb = get_embedding_block(
-          n_embeddings=max(is1_n_values, is2_n_values),
-          embedding_dim=is_dim,
-        )
-
-    # --------------------------------------------------
-    # Goal prediction heads
-    # --------------------------------------------------
-    self.is1_head = nn.Linear(hidden_dim, is1_n_values)
-    self.is2_head = nn.Linear(hidden_dim, is2_n_values)
-
-    self.done_info = done_info
-    if self.done_info:
-      self.goal1_head = nn.Sequential(nn.Linear(hidden_dim, hidden_dim//2),
-                                      nn.SiLU(True),
-                                      nn.Dropout(p=0.7),
-                                      nn.Linear(hidden_dim//2, hidden_dim))
-      self.goal2_head = nn.Sequential(nn.Linear(hidden_dim, hidden_dim//2),
-                                      nn.SiLU(True),
-                                      nn.Dropout(p=0.7),
-                                      nn.Linear(hidden_dim//2, hidden_dim))
-
-  def forward(self, image, condition={}):
-    """image: [B, 3, 32, 32] or [B, T, 3, 32, 32]"""
-    if self.rnn_goal_predictor:
-      assert len(image.shape) == 5, 'ImageISPredictor in RNN mode but no temporal dimension found in given image'
-      B, T, C, H, W = image.shape
-      image = image.view(B*T, C, H, W)
-
-    img_feat = self.image_encoder(image)
-    img_feat = self.pool(img_feat).flatten(1)         # [B, hidden_dim]
-
-    if self.rnn_goal_predictor:
-      img_feat = img_feat.view(B, T, -1)  # Restore time dimension
-
-      if self.is_rnn:
-        is_emb = self.is_emb(condition['internal_state']).flatten(-2)  # [B, T, 2*32]
-        img_feat = torch.cat([img_feat, is_emb], dim=-1)
-
-      rnn_out, _ = self.rnn_goal_predictor(img_feat)  # [B, T, rnn_hidden]
-      img_feat = rnn_out
-      # img_feat = rnn_out[:, -1, :]                    # [B, rnn_hidden]
-
-    is1_logits = self.is1_head(img_feat)             # [B, is1_n_values]
-    is2_logits = self.is2_head(img_feat)             # [B, is2_n_values]
-
-    if self.done_info:
-      isg1_logits = self.goal1_head(img_feat)
-      isg2_logits = self.goal2_head(img_feat)
-      return is1_logits, is2_logits, isg1_logits, isg2_logits
-
-    return is1_logits, is2_logits
 
 
 class ImageISGoalPredictor(nn.Module):
@@ -298,7 +193,7 @@ class NSPTrainer(NextStatePredictorTrainer):
     self.goal_value = GoalValue(is_dim=self.config['internal_state_emb'],
                                 is_n_values=sum(self.config['internal_state_n_values'])).to(self.device)
     print(f'Instanciate GoalPolicy (trainable parameters: {self.get_train_params(self.goal_policy):,})')
-    self.is_predictor = ImageISPredictor().to(self.device)
+    self.is_predictor = ISPredictor().to(self.device)
     print(f'Instanciate ISPredictor (trainable parameters: {self.get_train_params(self.is_predictor):,})')
     # self.goal_is_predictor = ImageISPredictor(done_info=True).to(self.device)
     # print(f'Instanciate GoalISPredictor (trainable parameters: {self.get_train_params(self.goal_is_predictor):,})')

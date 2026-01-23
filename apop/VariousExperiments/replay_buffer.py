@@ -41,6 +41,8 @@ class ReplayBuffer:
     # --- priority / loss storage ---
     self.loss = torch.zeros((capacity,), device=self.device, dtype=torch.float32)
 
+    self.other_stored_obj = {}
+
     self.episode_id = torch.zeros((capacity,), dtype=torch.long, device=self.device)
     self.current_episode_id = 0
 
@@ -116,6 +118,9 @@ class ReplayBuffer:
     if done:
       self.current_episode_id += 1
 
+  def add_variable(self, variable, name):
+    self.other_stored_obj[name] = variable.to(self.device)
+
   def sample(self, batch_size):
     idxs = torch.randint(0, self.size, (batch_size,), device=self.device)
     batch = {
@@ -127,7 +132,8 @@ class ReplayBuffer:
       "next_internal_state": self.next_internal_state[idxs].to(self.target_device),
       "next_image": self.next_image[idxs].to(self.target_device),
     }
-    return batch
+    other_vars = {k: v[idxs].to(self.target_device) for k, v in self.other_stored_obj.items()}
+    return {**batch, **other_vars}
   
   def sample_prioritized(self, batch_size, alpha=1.0, eps=1e-6):
     """
@@ -210,6 +216,7 @@ class ReplayBuffer:
       torch.randint(0, len(valid_episode_ids), (B,), device=self.device)
     ]
 
+    idxs = []
     for b, eid in enumerate(sampled_eids):
       ep_mask = (self.episode_id[:self.size] == eid)
       ep_idxs = torch.where(ep_mask)[0]
@@ -241,6 +248,8 @@ class ReplayBuffer:
 
       fake_goal_states[b] = self.internal_state[fake_idxs].to(self.target_device)
 
+      idxs.append(b)
+
     batch = {
       "image": images,
       "internal_state": states,
@@ -248,8 +257,8 @@ class ReplayBuffer:
       "goal_image": goal_images,
       "fake_goal_internal_state": fake_goal_states,  # [B, K, D]
     }
-
-    return batch
+    other_vars = {k: v[idxs].to(self.target_device) for k, v in self.other_stored_obj.items()}
+    return {**batch, **other_vars}
   
   def sample_episode_batch(self, batch_size, episode_length, random_window=True, success_reward=None):
     B, T = batch_size, episode_length
