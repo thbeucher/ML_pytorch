@@ -97,6 +97,13 @@ class MultiStepsNSPOrchestrator:
           episode_step = 0
           break
   
+  def add_var_to_memory(self, buffer, var_generator, var_name, tensor_like, batch_size=128):
+    print(f'Add {var_name} to buffer...')
+    new_var = torch.zeros_like(tensor_like, device=self.device)
+    for i in tqdm(range(0, buffer.size, batch_size)):
+      new_var[i:i+batch_size] = var_generator.infer(tensor_like[i:i+batch_size].to(self.device))
+    buffer.add_variable(new_var, var_name)
+
   def run(self):
     self.fill_memory(self.train_buffer, n_episodes=self.config['n_train_episodes'])
     self.fill_memory(self.test_buffer, n_episodes=self.config['n_test_episodes'], act='best')
@@ -112,23 +119,25 @@ class MultiStepsNSPOrchestrator:
 
     # --- Goal Image prediction experiment using FLOW --- #
     self.flow_goal_image_trainer.load()
-    loss = self.flow_goal_image_trainer.train(lambda x: self.train_buffer.sample_image_is_goal_batch(x),
-                                              tf_logger=self.tf_logger)
-    rec_loss = self.flow_goal_image_trainer.evaluate(lambda x: self.test_buffer.sample_image_is_goal_batch(x),
-                                                     tf_logger=self.tf_logger)
-    self.flow_goal_image_trainer.save()
+    # loss = self.flow_goal_image_trainer.train(lambda x: self.train_buffer.sample_image_is_goal_batch(x),
+    #                                           tf_logger=self.tf_logger)
+    # rec_loss = self.flow_goal_image_trainer.evaluate(lambda x: self.test_buffer.sample_image_is_goal_batch(x),
+    #                                                  tf_logger=self.tf_logger)
+    # self.flow_goal_image_trainer.save()
     print('Filling Replay Buffer with Generated Goal Image...')
-    goal_img_gen = torch.zeros_like(self.train_buffer.image, device=self.device)
-    for i in tqdm(range(0, self.train_buffer.size, 128)):
-      goal_img_gen[i:i+128] = self.flow_goal_image_trainer.infer(self.train_buffer.image[i:i+128].to(self.device))
-    self.train_buffer.add_variable(goal_img_gen, 'goal_image_generated')
-    self.tf_logger.add_images('goal_image_generated_train_examples', goal_img_gen[:24], 1)
-
-    goal_img_gen_test = torch.zeros_like(self.test_buffer.image, device=self.device)
-    for i in tqdm(range(0, self.test_buffer.size, 128)):
-      goal_img_gen_test[i:i+128] = self.flow_goal_image_trainer.infer(self.test_buffer.image[i:i+128].to(self.device))
-    self.test_buffer.add_variable(goal_img_gen_test, 'goal_image_generated')
-    self.tf_logger.add_images('goal_image_generated_test_examples', goal_img_gen_test[:24], 1)
+    self.add_var_to_memory(self.train_buffer,
+                           self.flow_goal_image_trainer,
+                           'goal_image_generated',
+                           self.train_buffer.image)
+    self.tf_logger.add_images('goal_image_generated_train_examples',
+                              self.train_buffer.other_stored_obj['goal_image_generated'][:24], 1)
+    
+    self.add_var_to_memory(self.test_buffer,
+                           self.flow_goal_image_trainer,
+                           'goal_image_generated',
+                           self.test_buffer.image)
+    self.tf_logger.add_images('goal_image_generated_test_examples',
+                              self.test_buffer.other_stored_obj['goal_image_generated'][:24], 1)
     # --------------------------------------------------- #
 
     # --- Internal State prediction from Generated Image using a CNN --- #

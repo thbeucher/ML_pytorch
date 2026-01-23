@@ -3,6 +3,7 @@ import torch
 import torch.nn.functional as F
 
 from tqdm import tqdm
+from collections import deque
 from pytorch_msssim import SSIM
 
 from models_zoo import CNNAE, WGANGP, WorldModelFlowUnet, ISPredictor
@@ -34,7 +35,7 @@ class BaseTrainer:
 
     self.save_dir = os.path.join(self.config['model_save_dir'], self.config['experiment_name'])
     os.makedirs(self.save_dir, exist_ok=True)
-    print(f'Model will be saved in: {self.save_dir}')
+    print(f'Model will be saved in: {self.save_dir}.pt')
   
   def instanciate_model(self):
     self.model = torch.nn.Identity()
@@ -431,13 +432,13 @@ class ISPredictorTrainer(BaseTrainer):
   def instanciate_model(self):
     self.model = ISPredictor().to(self.device)
   
-  def train(self, get_data_fn, n_max_steps=5_000, batch_size=128, tf_logger=None,
+  def train(self, get_data_fn, n_max_steps=10_000, batch_size=128, tf_logger=None,
             internal_state_key='goal_internal_state', image_key='goal_image_generated'):
     print('Internal State Predictor training pass...')
     self.model.train()
 
     mean_loss = 0.0
-    mean_acc1, mean_acc2 = 0.0, 0.0
+    acc1_window, acc2_window = deque([0.0], maxlen=50), deque([0.0], maxlen=50)
 
     pbar = tqdm(range(n_max_steps))
     for step in pbar:
@@ -458,10 +459,10 @@ class ISPredictorTrainer(BaseTrainer):
       mean_loss += (loss.item() - mean_loss) / (step + 1)
 
       # Accuracies
-      acc1 = (g1_logits.argmax(dim=1) == batch[internal_state_key][:, 0]).float().mean().item()
-      acc2 = (g2_logits.argmax(dim=1) == batch[internal_state_key][:, 1]).float().mean().item()
-      mean_acc1 += (acc1 - mean_acc1) / (step + 1)
-      mean_acc2 += (acc2 - mean_acc2) / (step + 1)
+      acc1_window.append((g1_logits.argmax(dim=1) == batch[internal_state_key][:, 0]).float().mean().item())
+      acc2_window.append((g2_logits.argmax(dim=1) == batch[internal_state_key][:, 1]).float().mean().item())
+      mean_acc1 = sum(acc1_window) / len(acc1_window)
+      mean_acc2 = sum(acc2_window) / len(acc2_window)
       
       if tf_logger:
         tf_logger.add_scalar('isp_loss', mean_loss, step)
