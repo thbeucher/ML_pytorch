@@ -557,11 +557,6 @@ class NSPTrainer(NextStatePredictorTrainer):
         self.tf_logger.add_scalar('value_loss', mean_value_loss, step)
         self.tf_logger.add_scalar('success_rate', mean_success_rate, step)
       
-      if mean_success_rate > mean_success_rate:
-        mean_success_rate = mean_success_rate
-        self.save_model(self.goal_policy, 'goal_policy')
-        self.save_model(self.goal_value, 'goal_value')
-      
       descr = f"P_Loss: {loss_policy:.3f} | V_Loss: {loss_value:.3f} | SuccessRate: {mean_success_rate:.2f}"
       pbar.set_description(descr)
   

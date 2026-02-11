@@ -20,6 +20,48 @@ def get_linear_net(input_dim, hidden_dim, output_dim):
                        nn.Linear(hidden_dim, output_dim))
 
 
+class SequentialBottleneck(nn.Module):
+  CONFIG = {
+    'add_dec_attn':  True,
+    'embedding_dim': 128,
+    'n_embeddings':  1,
+  }
+  def __init__(self, config={}):
+    super().__init__()
+    self.config = {**SequentialBottleneck.CONFIG, **config}
+    self.encoder = cl.BigCNNEncoder()
+    # --- CONV VERSION ---
+    self.embedder = nn.Conv2d(256, self.config['embedding_dim'] * self.config['n_embeddings'], 4)
+    self.dec_embedder = nn.ConvTranspose2d(self.config['embedding_dim'], 256, 4)
+    # --------------------
+    # --- LINEAR VERSION ---
+    # embeddings = [nn.Linear(256*4*4, self.config['embedding_dim']) for _ in range(self.config['n_embeddings'])]
+    # self.embedders = nn.ModuleList(embeddings)
+    # self.dec_embedder = nn.Linear(self.config['embedding_dim'], 256*4*4)
+    # ----------------------
+    self.decoder = cl.CNNDecoder(add_attn=self.config['add_dec_attn'])
+  
+  def forward(self, x, return_latent=False):
+    d1, d2, d3 = self.encoder(x)
+    # --- LINEAR VERSION ---
+    # out = torch.zeros_like(x)
+    # for embedder in self.embedders:
+    #   emb = embedder(d3.flatten(1))
+    #   dec_emb = self.dec_embedder(emb)
+    #   out += self.decoder(dec_emb.view(d3.shape))
+    # ----------------------
+    # --- CONV VERSION ---
+    embs = self.embedder(d3)  # [B, n_embeddings * embedding_dim, 1, 1]
+    dec_embs = self.dec_embedder(embs.view(x.shape[0] * self.config['n_embeddings'],
+                                           self.config['embedding_dim'], 1, 1))
+    decoded = self.decoder(dec_embs)
+    out = decoded.view(x.shape[0], self.config['n_embeddings'], 3, 32, 32).sum(dim=1)
+    # --------------------
+    if return_latent:
+      return out, d3
+    return out
+
+
 class CNNAE(nn.Module):
   '''AutoEncoder that take an image and try to reconstruct it'''
   CONFIG = {'skip_connection': True,

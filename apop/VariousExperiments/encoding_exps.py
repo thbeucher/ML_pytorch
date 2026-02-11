@@ -22,9 +22,9 @@ from torchvision import datasets, transforms, utils
 from torch.utils.tensorboard import SummaryWriter
 
 import cnn_layers as cl
-from models_zoo import CNNAE
-from helpers_zoo import exponential_schedule
 from vision_transformer.cvt import CvT
+from helpers_zoo import exponential_schedule
+from models_zoo import CNNAE, SequentialBottleneck
 from vision_transformer.mae import MaskedAutoencoderViT
 
 
@@ -89,6 +89,8 @@ class CNNAETrainer:
 
     self.set_logger()  # tensorboard logger create the folders used by dump_config and save_model
     self.dump_config()
+
+    print(f'Model instanciated with {self.n_trainable_params:,} parameters')
   
   def set_logger(self, log_dir=None):
     if log_dir is None:
@@ -166,7 +168,7 @@ class CNNAETrainer:
     pbar = tqdm(range(self.config['n_epochs']))
     for epoch in pbar:
       running_rec_loss, running_ssim_loss, running_mse_loss = 0., 0., 0.
-      for img, _ in self.train_dataloader:
+      for img, _ in tqdm(self.train_dataloader, leave=False):
         img = img.to(self.device)
 
         if fixed_img is None:
@@ -643,6 +645,26 @@ class CvTTrainer(CNNAETrainer):
     self.n_trainable_params = sum(p.numel() for p in self.auto_encoder.parameters() if p.requires_grad)
 
 
+class SequentialTrainer(CNNAETrainer):
+  CONFIG = {
+    'lr':             1e-4,
+    'n_epochs':       30,
+    'save_rec_every': 5,
+    'exp_name':       'sequential_best',
+    'model_config':   {'add_dec_attn':  True,
+                       'embedding_dim': 128,
+                       'n_embeddings':  10}
+  }
+  def __init__(self, config={}):
+    config = {**SequentialTrainer.CONFIG, **config}
+    super().__init__(config=config)
+    
+  
+  def instanciate_model(self):
+    self.auto_encoder = SequentialBottleneck(self.config['model_config']).to(self.device)
+    self.n_trainable_params = sum(p.numel() for p in self.auto_encoder.parameters() if p.requires_grad)
+
+
 def flatten_dict(d, parent_key="", sep="."):
   """Recursively flattens a nested dictionary."""
   items = {}
@@ -786,7 +808,7 @@ def get_args():
 
 if __name__ == '__main__':
   trainers = {'cnn_ae': CNNAETrainer, 'mae': MAETrainer, 'wgan_gp': WGANGPTrainer,
-              'snake_ae': SnakeAETrainer, 'cvt_ae': CvTTrainer}
+              'snake_ae': SnakeAETrainer, 'cvt_ae': CvTTrainer, 'seq_ae': SequentialTrainer}
   args = get_args()
 
   if args.run_all_exps:

@@ -432,7 +432,7 @@ class ISPredictorTrainer(BaseTrainer):
   def instanciate_model(self):
     self.model = ISPredictor().to(self.device)
   
-  def train(self, get_data_fn, n_max_steps=10_000, batch_size=128, tf_logger=None,
+  def train(self, get_data_fn, n_max_steps=20_000, batch_size=128, tf_logger=None,
             internal_state_key='goal_internal_state', image_key='goal_image_generated'):
     print('Internal State Predictor training pass...')
     self.model.train()

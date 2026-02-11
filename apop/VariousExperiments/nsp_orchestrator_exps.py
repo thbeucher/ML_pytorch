@@ -119,11 +119,11 @@ class MultiStepsNSPOrchestrator:
 
     # --- Goal Image prediction experiment using FLOW --- #
     self.flow_goal_image_trainer.load()
-    # loss = self.flow_goal_image_trainer.train(lambda x: self.train_buffer.sample_image_is_goal_batch(x),
-    #                                           tf_logger=self.tf_logger)
-    # rec_loss = self.flow_goal_image_trainer.evaluate(lambda x: self.test_buffer.sample_image_is_goal_batch(x),
-    #                                                  tf_logger=self.tf_logger)
-    # self.flow_goal_image_trainer.save()
+    loss = self.flow_goal_image_trainer.train(lambda x: self.train_buffer.sample_image_is_goal_batch(x),
+                                              tf_logger=self.tf_logger)
+    rec_loss = self.flow_goal_image_trainer.evaluate(lambda x: self.test_buffer.sample_image_is_goal_batch(x),
+                                                     tf_logger=self.tf_logger)
+    self.flow_goal_image_trainer.save()
     print('Filling Replay Buffer with Generated Goal Image...')
     self.add_var_to_memory(self.train_buffer,
                            self.flow_goal_image_trainer,
