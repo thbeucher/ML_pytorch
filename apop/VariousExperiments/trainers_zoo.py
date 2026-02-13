@@ -35,7 +35,7 @@ class BaseTrainer:
 
     self.save_dir = os.path.join(self.config['model_save_dir'], self.config['experiment_name'])
     os.makedirs(self.save_dir, exist_ok=True)
-    print(f'Model will be saved in: {self.save_dir}.pt')
+    print(f'Model will be saved in: {self.save_dir}')
   
   def instanciate_model(self):
     self.model = torch.nn.Identity()
@@ -59,8 +59,10 @@ class BaseTrainer:
       data = torch.load(path, map_location=self.device)
       self.model.load_state_dict(data['model'])
       print(f'Model loaded successfully from {path}...')
+      return True
     else:
       print(f'File {path} not found... No loaded model.')
+      return False
   
   def save_optimizer(self, optimizer=None, optimizer_name=None):
     path = os.path.join(self.save_dir, f'{optimizer_name}.pt' if optimizer_name else 'mdl_opt.pt')
@@ -79,25 +81,27 @@ class BaseTrainer:
       print(f'File {path} not found... No optimizer loaded.')
 
 
-class ImageCleaner(BaseTrainer):
-  '''Takes an altered Image and try to recover the original Image'''
+class CNNAETrainer(BaseTrainer):
+  '''Can be used as ImageCleaner -> Takes an altered Image and try to recover the original Image'''
   CONFIG = {
     'experiment_name':  'image_cleaner',
     'model_name':       'CNNAE',
     'lambda_mse':       0.8,
     'lambda_ssim':      0.2,
+    'model_config':     {'encoder_archi': 'BigCNNEncoder'}
     }
   def __init__(self, config={}):
-    super().__init__(config={**ImageCleaner.CONFIG, **config})
+    super().__init__(config={**CNNAETrainer.CONFIG, **config})
   
   def instanciate_model(self):
-    self.model = CNNAE({'encoder_archi': 'BigCNNEncoder'}).to(self.device)
+    self.model = CNNAE(self.config['model_config']).to(self.device)
   
   def set_training_utils(self):
     super().set_training_utils()
     self.ssim_loss = SSIM(data_range=1, size_average=True, channel=3)
   
-  def train(self, get_data_fn, n_max_steps=300, batch_size=128, image_key='image', target_image_key='target_image'):
+  def train(self, get_data_fn, n_max_steps=300, batch_size=128, tf_logger=None,
+            image_key='image', target_image_key='target_image'):
     '''get_data_fn: function that take batch_size and return a dict with keys=(image_key, target_image_key)'''
     self.model.train()
 
@@ -124,6 +128,11 @@ class ImageCleaner(BaseTrainer):
       mean_rec_loss += (rec_loss.item() - mean_rec_loss) / (step + 1)
 
       pbar.set_description(f'Loss: {mean_rec_loss:.4f}')
+      if tf_logger is not None:
+        tf_logger.add_scalar('cnnae_rec_loss', mean_rec_loss, step)
+    
+    if tf_logger is not None:
+      tf_logger.add_images('cnnae_reconstructed_images', torch.cat([batch[image_key][:8], rec[:8]], dim=0))
     
     return mean_mse_loss, mean_ssim_loss, mean_rec_loss
   
@@ -291,6 +300,66 @@ class GANGoalImagePredictorTrainer(BaseTrainer):
     return self.model.auto_encoder(start_images)
 
 
+class FlowImagePredictorTrainer(BaseTrainer):
+  CONFIG = {
+    'experiment_name': 'flow_image_predictor',
+    'model_name':      'WorldModelFlowUnet',
+    'model_config': {
+      'img_chan':   3,
+      'time_dim':   64,
+      'add_action': False
+    },
+  }
+  def __init__(self, config={}):
+    super().__init__(config={**FlowImagePredictorTrainer.CONFIG, **config})
+  
+  def instanciate_model(self):
+    self.model = WorldModelFlowUnet(**self.config['model_config']).to(self.device)
+  
+  def train(self, get_data_fn, n_max_steps=500, batch_size=128, tf_logger=None,
+            target_img_key='target_image', condition_key=None, generate_every=20, n_gen_steps=2):
+    print('FlowImagePredictor training pass...')
+    self.model.train()
+
+    mean_loss = 0.0
+
+    pbar = tqdm(range(n_max_steps))
+    for step in pbar:
+      batch = get_data_fn(batch_size)
+      x1 = batch[target_img_key]  # target distribution is the image to predict
+      if condition_key is not None:
+        condition = {condition_key: batch[condition_key]}
+
+      loss = flow_matching_loss(self.model, x1, condition=condition)
+
+      self.mdl_opt.zero_grad()
+      loss.backward()
+      self.mdl_opt.step()
+
+      mean_loss += (loss.item() - mean_loss) / (step + 1)
+      
+      if tf_logger:
+        tf_logger.add_scalar('flow_image_predictor_loss', mean_loss, step)
+        
+        if step % generate_every == 0:
+          x1_pred = rk45_sampling(
+            self.model,
+            device=self.device,
+            n_samples=x1.shape[0],
+            condition=condition,
+            n_steps=n_gen_steps
+          )
+          x1_pred = x1_pred[-1]
+
+          img_comparison = torch.cat([x1[:8], x1_pred[:8]], dim=0)
+
+          tf_logger.add_scalar('flow_image_predictor_rec_loss', F.mse_loss(x1_pred, x1), step)
+          tf_logger.add_images('generated_flow_image_train', img_comparison, global_step=step)
+
+      pbar.set_description(f'Loss: {mean_loss:.6f}')
+    return mean_loss
+  
+
 class FlowGoalImagePredictorTrainer(BaseTrainer):
   CONFIG = {
     'experiment_name':         'flow_goal_image_predictor',
@@ -359,7 +428,7 @@ class FlowGoalImagePredictorTrainer(BaseTrainer):
             img_comparison = torch.cat([batch[start_img_key][:8], x1[:8], x1_pred[:8]], dim=0)
 
           tf_logger.add_scalar('flow_goal_image_predictor_rec_loss', F.mse_loss(x1_pred, x1), step)
-          tf_logger.add_images('generated_gan_goal_image_train', img_comparison, global_step=step)
+          tf_logger.add_images('generated_flow_goal_image_train', img_comparison, global_step=step)
 
       pbar.set_description(f'Loss: {mean_loss:.6f}')
     return mean_loss
@@ -493,7 +562,7 @@ if __name__ == '__main__':
   ggp = GANGoalImagePredictorTrainer()
   # --- Dummy test --- #
   # from replay_buffer import ReplayBuffer
-  # ic = ImageCleaner()
+  # ic = CNNAETrainer()
 
   # rb = ReplayBuffer(internal_state_dim=2, action_dim=1, image_size=256, image_chan=3, resize_to=32,
   #                   normalize_img=True, capacity=10, device='cpu', target_device=ic.device)

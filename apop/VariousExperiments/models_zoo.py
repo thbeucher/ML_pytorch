@@ -77,6 +77,7 @@ class CNNAE(nn.Module):
   def __init__(self, config={}):
     super().__init__()
     self.config = {**CNNAE.CONFIG, **config}
+    print(f'CNNAE: {self.config}')
 
     self.down = cl.CNN_LAYERS[self.config['encoder_archi']](**self.config)
 
@@ -92,18 +93,19 @@ class CNNAE(nn.Module):
   def forward(self, x, return_latent=False):
     d1, d2, d3 = self.down(x)
 
+    latent = d3
     if self.config['linear_bottleneck']:
-      d3 = self.fc_dec(self.embedder(d3.flatten(1))).view(d3.shape)
+      latent = self.embedder(latent.flatten(1))
     
     if self.config['add_noise_bottleneck']:
-      d3 = self.noise_layer(d3)
+      latent = self.noise_layer(latent)
 
-    u3 = self.up(d3,
+    u3 = self.up(self.fc_dec(latent).view(d3.shape) if self.config['linear_bottleneck'] else latent,
                  d2 if self.config['skip_connection'] else None,
                  d1 if self.config['skip_connection'] else None)
 
     if return_latent:
-      return u3, d3
+      return u3, latent
     return u3
 
 
@@ -141,8 +143,10 @@ class WorldModelFlowUnet(nn.Module):
                add_action=True, n_actions=5, action_dim=8,
                add_is=False, is_n_values=36, is_dim=32,  # is = internal_state
                add_ds=False, ds_n_values=2, ds_dim=64,  # ds = done_signal
+               add_other_cond=False, other_cond_dim=128,  # any other embedding to conditioned the model
                ):
     super().__init__()
+    print(f'WorldModelFlowUnet: {add_action=} | {add_is=} | {add_ds=} | {add_other_cond=}')
     self.time_emb = nn.Sequential(TimeEmbedding(time_dim), nn.Linear(time_dim, time_dim), nn.SiLU())
     condition_dim = time_dim 
 
@@ -160,6 +164,10 @@ class WorldModelFlowUnet(nn.Module):
     if add_ds:
       self.ds_emb = nn.Sequential(nn.Embedding(ds_n_values, ds_dim), nn.Linear(ds_dim, ds_dim), nn.SiLU())
       condition_dim += ds_dim
+    
+    self.add_other_cond = add_other_cond
+    if add_other_cond:
+      condition_dim += other_cond_dim
 
     self.x_start = x_start
     start_dim = 2*img_chan if x_start else img_chan
@@ -193,6 +201,9 @@ class WorldModelFlowUnet(nn.Module):
     if self.add_ds:
       ds_emb = self.ds_emb(condition['done_signal'].squeeze(-1))  # [B, ds_dim=64]
       all_embed += [ds_emb]
+    
+    if self.add_other_cond:
+      all_embed += [condition['other']]
 
     all_embed = torch.cat(all_embed, dim=1)  # -> [B, 104]
 
