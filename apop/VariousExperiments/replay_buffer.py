@@ -216,7 +216,7 @@ class ReplayBuffer:
       torch.randint(0, len(valid_episode_ids), (B,), device=self.device)
     ]
 
-    idxs = []
+    idxs, goal_idxs = [], []
     for b, eid in enumerate(sampled_eids):
       ep_mask = (self.episode_id[:self.size] == eid)
       ep_idxs = torch.where(ep_mask)[0]
@@ -226,6 +226,7 @@ class ReplayBuffer:
 
       # ---- goal is final state of the episode ----
       goal_idx = ep_idxs[-1]
+      goal_idxs.append(goal_idx.item())
 
       # ---- sample a random timestep from the episode ----
       t_idx = ep_idxs[torch.randint(0, len(ep_idxs), (1,), device=self.device).item()]
@@ -256,6 +257,7 @@ class ReplayBuffer:
       "goal_internal_state": goal_states,
       "goal_image": goal_images,
       "fake_goal_internal_state": fake_goal_states,  # [B, K, D]
+      "goal_idx": goal_idxs
     }
     other_vars = {k: v[idxs].to(self.target_device) for k, v in self.other_stored_obj.items()}
     return {**batch, **other_vars}
@@ -289,7 +291,11 @@ class ReplayBuffer:
         device=self.target_device,
         dtype=self.next_image.dtype,
       ),
+      "episode_size": torch.zeros((B,), device=self.target_device, dtype=torch.long),
     }
+    batch = {**batch, **{k: torch.zeros((B, T, *v.shape[1:]),
+                                        device=self.target_device,
+                                        dtype=v.dtype) for k, v in self.other_stored_obj.items()}}
 
     if success_reward is None:
       # ---- sample random episode ids ----
@@ -331,6 +337,11 @@ class ReplayBuffer:
       batch["done"][b, :L] = self.done[window_idxs].to(self.target_device)
       batch["next_internal_state"][b, :L] = self.next_internal_state[window_idxs].to(self.target_device)
       batch["next_image"][b, :L] = self.next_image[window_idxs].to(self.target_device)
+
+      batch["episode_size"][b] = L
+
+      for k, v in self.other_stored_obj.items():
+        batch[k][b, :L] = v[window_idxs].to(self.target_device)
 
       # ---- pad if shorter ----
       if L < T:

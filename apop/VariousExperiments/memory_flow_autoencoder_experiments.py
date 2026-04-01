@@ -25,7 +25,7 @@ class Trainer:
         'encoder_archi':     'BigCNNEncoder',
         'skip_connection':   False,
         'linear_bottleneck': True,
-        'latent_dim':        256,
+        'latent_dim':        512,
       }
     },
     'flow_config': {
@@ -35,7 +35,7 @@ class Trainer:
         'time_dim':       64,
         'add_action':     False,
         'add_other_cond': True,
-        'other_cond_dim': 256,
+        'other_cond_dim': 512,
       }
     }
   }
@@ -100,7 +100,7 @@ class Trainer:
       return {'image': img, 'target_image': img}
 
     if not self.ae_trainer.load():
-      losses = self.ae_trainer.train(get_ae_data_fn, n_max_steps=len(self.train_dataloader)*10,
+      losses = self.ae_trainer.train(get_ae_data_fn, n_max_steps=len(self.train_dataloader)*20,
                                      tf_logger=self.tf_logger)
       print(f'mean_mse_loss={losses[0]:.4f} | mean_ssim_loss={losses[1]:.4f} | mean_rec_loss={losses[2]:.4f}')
       self.ae_trainer.save()

@@ -1,3 +1,24 @@
+"""
+Next State Predictor Experiments Script
+
+This script implements experiments for training world models that predict next states in a reinforcement learning environment.
+It focuses on flow-based generative models to learn the dynamics of state transitions given current observations and actions.
+
+Key Features:
+- NextStatePredictorTrainer: Trains a flow-based world model (WorldModelFlowUnet) using flow matching loss.
+  The model predicts next image states from current images and actions, optionally training on deltas (differences).
+- Uses a replay buffer to store environment transitions.
+- Supports training on image deltas for better stability and efficiency.
+- Includes evaluation and autoplay modes for testing the model.
+- SimuCNNAETrainer: A simple CNN autoencoder trainer for baseline comparisons, using a simulated dataset from the environment.
+
+The world model is trained to minimize flow matching loss, enabling sampling of future states via ODE solvers like RK45.
+Experiments can be configured via command-line arguments for different trainers, training modes, and evaluation.
+
+Environment: Custom RobotArmEnv from gymnasium.
+Training: Involves filling a replay buffer with random actions, then training the flow model on state transitions.
+"""
+
 import os
 import sys
 import json

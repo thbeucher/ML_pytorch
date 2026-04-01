@@ -3,6 +3,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from torch.nn.utils.rnn import pack_padded_sequence
+
 import cnn_layers as cl
 
 
@@ -107,6 +109,49 @@ class CNNAE(nn.Module):
     if return_latent:
       return u3, latent
     return u3
+
+  def decode(self, latent, d2=None, d1=None):
+    if self.config['linear_bottleneck']:
+      x = self.fc_dec(latent).view(latent.shape[0], 256, 4, 4)
+    else:
+      x = latent
+    return self.up(x, d2, d1)
+
+
+class CNNAENSP(nn.Module):
+  '''AutoEncoder that take an image and reconstruct it and predict the next state in the embedding space'''
+  CONFIG = {
+    'ae_config': {'encoder_archi': 'BigCNNEncoder', 'skip_connection': True, 'linear_bottleneck': True,
+                  'latent_dim': 128},
+    'n_actions': 5, 'action_dim': 8, 'is1_n_values': 19, 'is2_n_values': 37, 'is_dim': 16,
+    'nsp_hidden_dim': 256,
+    }
+  def __init__(self, config={}):
+    super().__init__()
+    self.config = {**CNNAENSP.CONFIG, **config}
+    self.ae = CNNAE(self.config['ae_config'])
+    self.action_emb = get_embedding_block(self.config['n_actions'], self.config['action_dim'])
+    self.is_emb = get_embedding_block(max(self.config['is1_n_values'], self.config['is2_n_values']),
+                                      self.config['is_dim'])
+    self.nsp = get_linear_net(self.ae.config['latent_dim'] + self.config['action_dim'] + 2*self.config['is_dim'],
+                              self.config['nsp_hidden_dim'], self.ae.config['latent_dim'])
+  
+  @torch.no_grad()
+  def get_embedding(self, image):
+    _, latent = self.ae(image, return_latent=True)
+    return latent
+  
+  @torch.no_grad()
+  def infer(self, image):
+    return self.get_embedding(image)
+  
+  def forward(self, image, condition={}):
+    rec, latent = self.ae(image, return_latent=True)
+    action_emb = self.action_emb(condition.get('action', torch.zeros(image.shape[0], dtype=torch.long, device=image.device)).squeeze(-1))
+    is_emb = self.is_emb(condition.get('internal_state', torch.zeros(image.shape[0], dtype=torch.long, device=image.device))).flatten(1)
+    nsp_input = torch.cat([latent.flatten(1), action_emb, is_emb], dim=-1)
+    pred_next_latent = self.nsp(nsp_input)
+    return rec, pred_next_latent
 
 
 class TimeEmbedding(nn.Module):
@@ -289,7 +334,8 @@ class ISPredictor(nn.Module):
     - internal_state logits for each internal dimension
   """
   def __init__(self, is1_n_values=19, is2_n_values=37, is_dim=32, hidden_dim=512, done_info=False,
-               rnn_goal_prediction=False, rnn_hidden=256, num_layers=2, is_rnn=True):
+               rnn_goal_prediction=False, rnn_hidden=256, num_layers=2, is_rnn=True,
+               layer_norm_predictor=False):
     super().__init__()
     # --------------------------------------------------
     # Image encoder
@@ -342,6 +388,11 @@ class ISPredictor(nn.Module):
     self.is1_head = nn.Linear(hidden_dim, is1_n_values)
     self.is2_head = nn.Linear(hidden_dim, is2_n_values)
 
+    self.layer_norm_predictor = layer_norm_predictor
+    if layer_norm_predictor:
+      self.layer_norm_is1 = nn.LayerNorm(is1_n_values)
+      self.layer_norm_is2 = nn.LayerNorm(is2_n_values)
+
     self.done_info = done_info
     if self.done_info:
       self.goal1_head = nn.Sequential(nn.Linear(hidden_dim, hidden_dim//2),
@@ -377,9 +428,142 @@ class ISPredictor(nn.Module):
     is1_logits = self.is1_head(img_feat)             # [B, is1_n_values]
     is2_logits = self.is2_head(img_feat)             # [B, is2_n_values]
 
+    if self.layer_norm_predictor:
+      is1_logits = self.layer_norm_is1(is1_logits)
+      is2_logits = self.layer_norm_is2(is2_logits)
+
     if self.done_info:
       isg1_logits = self.goal1_head(img_feat)
       isg2_logits = self.goal2_head(img_feat)
       return is1_logits, is2_logits, isg1_logits, isg2_logits
 
     return is1_logits, is2_logits
+
+
+class EpisodeCompressor(nn.Module):
+  def __init__(self, embed_dim):
+    """
+    Compresses a sequence of embeddings (an episode) into a single embedding.
+    """
+    super(EpisodeCompressor, self).__init__()
+    # GRU is excellent for temporal sequence compression.
+    # It takes sequences of embed_dim and outputs a final hidden state of embed_dim.
+    self.gru = nn.GRU(
+      input_size=embed_dim, 
+      hidden_size=embed_dim, 
+      batch_first=True
+    )
+  
+  def forward(self, episodes, episode_lengths):
+    """
+    Args:
+        episodes: Tensor of shape [Flat_Batch, Max_Episode_Len, Embed_Dim]
+        episode_lengths: Tensor of shape [Flat_Batch] containing actual integer lengths.
+    Returns:
+        compressed_episodes: Tensor of shape [Flat_Batch, Embed_Dim]
+    """
+    # 1. Pack the padded sequence
+    # enforce_sorted=False allows us to pass lengths in any order
+    packed_episodes = pack_padded_sequence(
+      episodes, 
+      episode_lengths.cpu(), # Lengths must be on CPU for packing
+      batch_first=True, 
+      enforce_sorted=False
+    )
+    
+    # 2. Pass through GRU
+    # The GRU automatically retrieves the state at the *true* end of each sequence
+    _, final_hidden_state = self.gru(packed_episodes)
+    
+    # 3. Squeeze the layer dimension: [1, Flat_Batch, Embed_Dim] -> [Flat_Batch, Embed_Dim]
+    compressed_episodes = final_hidden_state.squeeze(0)
+    
+    return compressed_episodes
+
+
+class MemoryBankFuturStatePredictor(nn.Module):
+  def __init__(self, embed_dim, num_heads, num_layers, hidden_dim, max_memory_size):
+    """
+    Args:
+        embed_dim: Dimension of the state and goal embeddings.
+        num_heads: Number of attention heads in the Transformer.
+        num_layers: Number of Transformer encoder layers.
+        hidden_dim: Hidden dimension size for the feedforward network (MLP).
+        max_memory_size: The bounded maximum size of the memory buffer.
+    """
+    super(MemoryBankFuturStatePredictor, self).__init__()
+    
+    self.embed_dim = embed_dim
+    self.max_memory_size = max_memory_size
+
+    self.episode_compressor = EpisodeCompressor(embed_dim)
+    
+    # Learnable embeddings to distinguish the current state from memory tokens
+    self.state_token_type = nn.Parameter(torch.randn(1, 1, embed_dim))
+    self.memory_token_type = nn.Parameter(torch.randn(1, 1, embed_dim))
+    
+    # Transformer Encoder
+    encoder_layer = nn.TransformerEncoderLayer(
+      d_model=embed_dim, 
+      nhead=num_heads, 
+      dim_feedforward=hidden_dim,
+      batch_first=True, # Ensure batch is the first dimension [B, SeqLen, D]
+      dropout=0.1
+    )
+    self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+    
+    # Output MLP to predict the final goal embedding
+    self.output_head = nn.Sequential(
+      nn.Linear(embed_dim, hidden_dim),
+      nn.GELU(),
+      nn.Linear(hidden_dim, embed_dim)
+    )
+  
+  def forward(self, current_state, memory_bank_episodes, episode_lengths, memory_padding_mask=None):
+    """
+    Args:
+      current_state: [B, D]
+      memory_bank_episodes: [B, M, E, D] 
+      episode_lengths: [B, M] containing the actual length of each stored episode
+      memory_padding_mask: [B, M] (True means ignore memory slot)
+    Returns:
+      predicted_goal: [B, D]
+    """
+    B, M, E, D = memory_bank_episodes.shape
+    
+    # 1. Flatten the Batch and Memory dimensions
+    flat_episodes = memory_bank_episodes.reshape(B * M, E, D)
+    flat_lengths = episode_lengths.reshape(B * M)
+    
+    # 2. Protect against length 0 for empty memory slots
+    # (pack_padded_sequence needs length > 0. The transformer mask handles ignoring it later).
+    flat_lengths = torch.clamp(flat_lengths, min=1)
+    
+    # 3. Compress the episodes using true lengths
+    flat_compressed_memory = self.episode_compressor(flat_episodes, flat_lengths)
+    
+    # 4. Reshape back to Batch and Memory dimensions
+    memory_bank = flat_compressed_memory.reshape(B, M, D)
+    
+    # 5. Add token types and concatenate
+    state_token = current_state.unsqueeze(1) + self.state_token_type  
+    memory_tokens = memory_bank + self.memory_token_type  
+    sequence = torch.cat([state_token, memory_tokens], dim=1)         
+    
+    # 6. Apply Transformer masking
+    if memory_padding_mask is not None:
+      state_mask = torch.zeros((B, 1), dtype=torch.bool, device=current_state.device)
+      full_padding_mask = torch.cat([state_mask, memory_padding_mask], dim=1) 
+    else:
+      full_padding_mask = None
+        
+    # 7. Predict
+    encoded_sequence = self.transformer_encoder(sequence, src_key_padding_mask=full_padding_mask)
+
+    # 8. Extract the state token's representation (the first token)
+    state_representation = encoded_sequence[:, 0, :] # [B, D]
+    
+    # 9. Predict the goal embedding
+    predicted_goal = self.output_head(state_representation)
+    
+    return predicted_goal
