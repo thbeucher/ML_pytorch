@@ -24,6 +24,42 @@ def posemb_sincos_2d(h, w, dim, temperature: int = 10000, dtype = torch.float32)
   x = x.flatten()[:, None] * omega[None, :]
   pe = torch.cat((x.sin(), x.cos(), y.sin(), y.cos()), dim=1)
   return pe.type(dtype)
+
+
+def posemb_sincos_2d_from_indices(indices, grid_h=8, grid_w=8, dim=64, temperature: int = 10000, dtype = torch.float32):
+  """
+  Compute 2D sincos positional embeddings for specific patch indices.
+  
+  Args:
+    indices: [B, M] tensor of patch indices in flattened grid (0 to grid_h*grid_w-1)
+    grid_h: height of the patch grid
+    grid_w: width of the patch grid
+    dim: embedding dimension
+    temperature: temperature for sincos encoding
+    dtype: output dtype
+    
+  Returns:
+    pe: [B, M, dim] positional embeddings for the selected indices
+  """
+  batch_size, num_patches = indices.shape
+  device = indices.device
+  
+  # Convert flat indices to 2D coordinates
+  y_coords = indices // grid_h  # [B, M]
+  x_coords = indices % grid_w   # [B, M]
+  
+  # Compute sincos embeddings for these coordinates
+  assert (dim % 4) == 0, "feature dimension must be multiple of 4 for sincos emb"
+  omega = torch.arange(dim // 4, device=device, dtype=dtype) / (dim // 4 - 1)
+  omega = 1.0 / (temperature ** omega)
+  
+  # [B, M, dim//4]
+  y_emb = y_coords.float().unsqueeze(-1) * omega.unsqueeze(0).unsqueeze(0)
+  x_emb = x_coords.float().unsqueeze(-1) * omega.unsqueeze(0).unsqueeze(0)
+  
+  # [B, M, dim]
+  pe = torch.cat((x_emb.sin(), x_emb.cos(), y_emb.sin(), y_emb.cos()), dim=-1)
+  return pe.type(dtype)
 ##########################################################################################
 
 class FeedForward(Module):

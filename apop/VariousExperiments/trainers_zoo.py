@@ -447,6 +447,8 @@ class MemoryBankGoalEmbeddingPredictorTrainer(BaseTrainer):
       predicted_goals = self.model(curr_states, expanded_mem, expanded_mem_lens)
       
       # Mean Squared Error Loss in embedding space
+      predicted_goals = F.normalize(predicted_goals, dim=-1)
+      target_goals = F.normalize(target_goals, dim=-1)
       loss = F.mse_loss(predicted_goals, target_goals)
       
       self.mdl_opt.zero_grad()
@@ -495,6 +497,7 @@ class MemoryBankGoalEmbeddingPredictorTrainer(BaseTrainer):
     mem_imgs = memory_ep['image_embedding'].to(self.device)  # [M, E, D]
     mem_lens = memory_ep['episode_size'].to(self.device)     # [M]
     # Goals of these memory episodes (for the retrieval test later)
+    assert (mem_lens > 0).all(), "Empty episodes found in memory bank"
     mem_goals = mem_imgs[torch.arange(memory_size), mem_lens - 1]
 
     # --- 2. Evaluate GENERALIZATION (80% case) ---
