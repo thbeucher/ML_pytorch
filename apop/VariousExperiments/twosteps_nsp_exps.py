@@ -1134,20 +1134,18 @@ class NSPTrainer:  # NextStatePredictor
 
   def generate_imagined_trajectory(self, image, epoch, initial_internal_state=None):
     """
-    Generate trajectory by repeatedly applying the two-step predictor.
+    Generate dual trajectories: 1-step ahead and 5-step ahead predictions.
     
     EVALUATION STRATEGY:
-    - Use predefined action sequence: 12 steps of action 1, then 11 steps of action 3
-    - For each step:
-      a) Predict which patches will change
-      b) Predict new pixel values for changed patches
-      c) Reconstruct image
-      d) Save to trajectory
-    - Visualize as image grid: [step0, step1, ..., step23]
+    - Generate TWO independent trajectories using different prediction horizons
+    - 1-step trajectory: Accumulate actions one at a time (current method)
+    - 5-step trajectory: Jump ahead by predicting 5 steps at once, then continue
     
     PURPOSE:
-    - Visualize long-horizon prediction quality
-    - Detect if model "hallucinate" or diverges over time
+    - Compare single-step vs multi-step prediction quality
+    - Validate if multi-step training helps long-horizon prediction
+    - Identify which horizon generalizes better
+    - See if 5-step predictions are more stable or diverge earlier
     
     Args:
       image: [B, C, H, W] - initial image
@@ -1157,64 +1155,146 @@ class NSPTrainer:  # NextStatePredictor
     self.altered_predictor.eval()
     self.alteration_predictor.eval()
 
-    with torch.no_grad():
-      # Initialize trajectory with first image
-      imagined_traj = [image[:1]]
-      fake_actions = []
-      # Initialize internal state
-      current_internal_state = initial_internal_state[:1] if initial_internal_state is not None else None
+    # === Generate 1-step ahead trajectory ===
+    traj_1step = self.generate_trajectory_with_horizon(
+      image=image,
+      initial_internal_state=initial_internal_state,
+      horizon=1,
+      device=self.device
+    )
 
-      # === ACTION SEQUENCE ===
-      # 12 steps of action 1
-      # 11 steps of action 3
-      for fake_action in torch.as_tensor([[[1]]]*12 + [[[3]]]*11, device=self.device, dtype=torch.long):
-        fake_actions.append(fake_action)
+    # === Generate 5-step ahead trajectory ===
+    traj_5step = self.generate_trajectory_with_horizon(
+      image=image,
+      initial_internal_state=initial_internal_state,
+      horizon=5,
+      device=self.device
+    )
 
+    # === LOG BOTH TRAJECTORIES TO TENSORBOARD ===
+    # 1-step trajectory (fine-grained predictions)
+    self.tf_logger.add_images(
+      'generated_world_model_prediction_1step',
+      torch.cat(traj_1step, dim=0),
+      global_step=epoch
+    )
+    
+    # 5-step trajectory (multi-step predictions)
+    self.tf_logger.add_images(
+      'generated_world_model_prediction_5step',
+      torch.cat(traj_5step, dim=0),
+      global_step=epoch
+    )
+
+    self.altered_predictor.train()
+    self.alteration_predictor.train()
+
+  @torch.no_grad()
+  def generate_trajectory_with_horizon(self, image, initial_internal_state, horizon, device):
+    """
+    Generate trajectory using specified prediction horizon.
+    
+    When horizon=1: Predict 1 step at a time (fine-grained)
+    When horizon=5: Jump 5 steps ahead each time (coarse-grained)
+    
+    EXAMPLE with horizon=5:
+    Step 0: Image starts at time 0
+    Step 1: Predict 5 steps ahead → Image at time 5
+    Step 2: Use predictions to advance by 5 more → Image at time 10
+    ...
+    Total steps in trajectory = ceil(23 / 5) = 5 images
+    
+    vs horizon=1:
+    Each step advances by 1 → 23 images total
+    
+    Args:
+      image: [B, C, H, W] - initial image
+      initial_internal_state: [B, 2] - starting internal state
+      horizon: int - how many steps to predict ahead at once (1 or 5)
+      device: torch device
+    
+    Returns:
+      trajectory: list of [1, C, H, W] images
+    """
+    # Initialize trajectory with first image
+    imagined_traj = [image[:1]]
+    
+    # Initialize internal state
+    current_internal_state = initial_internal_state[:1] if initial_internal_state is not None else None
+    
+    # === ACTION SEQUENCE ===
+    # 12 steps of action 1, then 11 steps of action 3 (total 23 steps)
+    all_actions = torch.as_tensor([[[1]]]*12 + [[[3]]]*11, device=device, dtype=torch.long)
+    
+    # Process actions in chunks of size 'horizon'
+    fake_actions = []
+    step = 0
+    
+    for idx, fake_action in enumerate(all_actions):
+      fake_actions.append(fake_action)
+      
+      # Only make a prediction when we've accumulated 'horizon' actions
+      # or when we're at the last action
+      if len(fake_actions) == horizon or idx == len(all_actions) - 1:
         # Flatten action sequence: [[1], [1], ...] → [1, 1, ...]
-        fake_action = torch.cat(fake_actions, dim=-1)
-
+        accumulated_actions = torch.cat(fake_actions, dim=-1)
+        
         # === STEP 1: ALTERED PREDICTOR ===
         # Get current image and convert to patches
         patch = self.altered_predictor.patchify(imagined_traj[-1])
-
-        # get patches that are expected to change
-        patch_change_pred, next_is1_logits, next_is2_logits = self.altered_predictor(patch, fake_action, current_internal_state)
-
-        # Update internal state for next step
-        current_internal_state = torch.stack([torch.argmax(next_is1_logits, dim=1), torch.argmax(next_is2_logits, dim=1)], dim=1)
-
+        
+        # Predict which patches will change (for the accumulated action sequence)
+        patch_change_pred, next_is1_logits, next_is2_logits = self.altered_predictor(
+          patch, 
+          accumulated_actions, 
+          current_internal_state
+        )
+        
+        # Update internal state for next prediction
+        # This is the state after taking 'horizon' steps
+        current_internal_state = torch.stack([
+          torch.argmax(next_is1_logits, dim=1), 
+          torch.argmax(next_is2_logits, dim=1)
+        ], dim=1)
+        
         # === STEP 2: ALTERATION PREDICTOR ===
         # Convert predictions to binary mask (>0.5)
-        # get mask to select only predicted changed patches
         patch_change_pred_mask = (patch_change_pred > 0.5).squeeze(-1)
-
-        # select only predicted changed patches and get their spatial indices
-        patch_to_pred, counts, patch_indices = self.get_patch(patch, patch_change_pred_mask, return_indices=True)
-
+        
+        # Select only predicted changed patches and get their spatial indices
+        patch_to_pred, counts, patch_indices = self.get_patch(
+          patch, 
+          patch_change_pred_mask, 
+          return_indices=True
+        )
+        
         # Predict pixel values for changed patches if any exist
         if counts.max() > 0:
-          patch_predicted, _, _ = self.alteration_predictor(patch_to_pred,
-                                                            patch_indices,
-                                                            fake_action,
-                                                            current_internal_state)
+          patch_predicted, _, _ = self.alteration_predictor(
+            patch_to_pred,
+            patch_indices,
+            accumulated_actions,
+            current_internal_state
+          )
           # Reconstruct full image with predictions
-          patch_next_image_predicted = self.get_next_image(patch,
-                                                           patch_predicted,
-                                                           patch_change_pred_mask)
+          patch_next_image_predicted = self.get_next_image(
+            patch,
+            patch_predicted,
+            patch_change_pred_mask
+          )
         else:  # if no patches to change, next image is the original one
           patch_next_image_predicted = patch
+        
         # === RECONSTRUCT AND SAVE ===
         # Convert patches back to image
         cleaned_img = self.altered_predictor.unpatchify(patch_next_image_predicted)
         imagined_traj.append(cleaned_img)
-
-    # === LOG TO TENSORBOARD ===
-    # Visualize full trajectory as image grid
-    self.tf_logger.add_images('generated_world_model_prediction',
-                              torch.cat(imagined_traj, dim=0),
-                              global_step=epoch)
-    self.altered_predictor.train()
-    self.alteration_predictor.train()
+        
+        # Reset action accumulator for next prediction
+        fake_actions = []
+        step += 1
+    
+    return imagined_traj
 
   def train_alter_predictor(self):
     """
