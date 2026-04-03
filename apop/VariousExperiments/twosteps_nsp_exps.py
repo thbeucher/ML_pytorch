@@ -1132,7 +1132,7 @@ class NSPTrainer:  # NextStatePredictor
       self.save_model(self.alteration_predictor, 'alteration_predictor')
     return max(mean_accuracy, best_accuracy), min(mean_alteration_loss, best_loss)
 
-  def generate_imagined_trajectory(self, image, epoch):
+  def generate_imagined_trajectory(self, image, epoch, initial_internal_state=None):
     """
     Generate trajectory by repeatedly applying the two-step predictor.
     
@@ -1152,6 +1152,7 @@ class NSPTrainer:  # NextStatePredictor
     Args:
       image: [B, C, H, W] - initial image
       epoch: int - epoch number for logging
+      initial_internal_state: [B, 2] - initial internal state corresponding to image
     """
     self.altered_predictor.eval()
     self.alteration_predictor.eval()
@@ -1159,11 +1160,9 @@ class NSPTrainer:  # NextStatePredictor
     with torch.no_grad():
       # Initialize trajectory with first image
       imagined_traj = [image[:1]]
-      start_img_idx, current_history = 0, 0
-      next_restart = random.randint(0, self.config['rollout_size']-1)
       fake_actions = []
       # Initialize internal state
-      current_internal_state = torch.zeros(1, 2, dtype=torch.long, device=self.device)  # Initial state
+      current_internal_state = initial_internal_state[:1] if initial_internal_state is not None else None
 
       # === ACTION SEQUENCE ===
       # 12 steps of action 1
@@ -1171,20 +1170,12 @@ class NSPTrainer:  # NextStatePredictor
       for fake_action in torch.as_tensor([[[1]]]*12 + [[[3]]]*11, device=self.device, dtype=torch.long):
         fake_actions.append(fake_action)
 
-        # Occasionally restart trajectory
-        if current_history > next_restart:
-          start_img_idx += next_restart
-          current_history = 0
-          next_restart = random.randint(0, self.config['rollout_size']-1)
-          fake_actions = [fake_action]
-
-        current_history += 1
         # Flatten action sequence: [[1], [1], ...] → [1, 1, ...]
         fake_action = torch.cat(fake_actions, dim=-1)
 
         # === STEP 1: ALTERED PREDICTOR ===
         # Get current image and convert to patches
-        patch = self.altered_predictor.patchify(imagined_traj[start_img_idx])
+        patch = self.altered_predictor.patchify(imagined_traj[-1])
 
         # get patches that are expected to change
         patch_change_pred, next_is1_logits, next_is2_logits = self.altered_predictor(patch, fake_action, current_internal_state)
@@ -1317,13 +1308,15 @@ class NSPTrainer:  # NextStatePredictor
           mean_n_patch_to_modify += (n_patch_val - mean_n_patch_to_modify) / (i + 1)
 
       # === LOG EPOCH ===
-      self.log_epoch(epoch, mean_altered_loss, mean_alteration_loss, mean_accuracy, mean_n_patch_to_modify, image, next_image, patch_next_image_predicted)
+      self.log_epoch(epoch, mean_altered_loss, mean_alteration_loss, mean_accuracy, mean_n_patch_to_modify,
+                     image, next_image, patch_next_image_predicted)
 
       # === SAVE BEST MODELS ===
       best_accuracy, best_loss = self.save_best_models(mean_accuracy, best_accuracy, mean_alteration_loss, best_loss)
 
       # === GENERATE IMAGINED TRAJECTORY ===
-      self.generate_imagined_trajectory(image, epoch)
+      internal_state = episode['internal_state'][:, 0] if self.config['use_internal_state'] else None
+      self.generate_imagined_trajectory(image, epoch, internal_state)
       # === UPDATE PROGRESS BAR ===
       pbar.set_description(f'Mean_acc: {mean_accuracy:.3f}')
   
