@@ -1160,7 +1160,6 @@ class NSPTrainer:  # NextStatePredictor
       image=image,
       initial_internal_state=initial_internal_state,
       horizon=1,
-      device=self.device
     )
 
     # === Generate 5-step ahead trajectory ===
@@ -1168,7 +1167,12 @@ class NSPTrainer:  # NextStatePredictor
       image=image,
       initial_internal_state=initial_internal_state,
       horizon=5,
-      device=self.device
+    )
+
+    # === Generate trajectory from initial state (no horizon, direct prediction) ===
+    traj_direct = self.generate_trajectory_from_initial_state(
+      image=image,
+      initial_internal_state=initial_internal_state
     )
 
     # === LOG BOTH TRAJECTORIES TO TENSORBOARD ===
@@ -1186,11 +1190,18 @@ class NSPTrainer:  # NextStatePredictor
       global_step=epoch
     )
 
+    # Direct prediction trajectory (from initial state)
+    self.tf_logger.add_images(
+      'generated_world_model_prediction_direct',
+      torch.cat(traj_direct, dim=0),
+      global_step=epoch
+    )
+
     self.altered_predictor.train()
     self.alteration_predictor.train()
 
   @torch.no_grad()
-  def generate_trajectory_with_horizon(self, image, initial_internal_state, horizon, device):
+  def generate_trajectory_with_horizon(self, image, initial_internal_state, horizon):
     """
     Generate trajectory using specified prediction horizon.
     
@@ -1211,7 +1222,6 @@ class NSPTrainer:  # NextStatePredictor
       image: [B, C, H, W] - initial image
       initial_internal_state: [B, 2] - starting internal state
       horizon: int - how many steps to predict ahead at once (1 or 5)
-      device: torch device
     
     Returns:
       trajectory: list of [1, C, H, W] images
@@ -1224,7 +1234,7 @@ class NSPTrainer:  # NextStatePredictor
     
     # === ACTION SEQUENCE ===
     # 12 steps of action 1, then 11 steps of action 3 (total 23 steps)
-    all_actions = torch.as_tensor([[[1]]]*12 + [[[3]]]*11, device=device, dtype=torch.long)
+    all_actions = torch.as_tensor([[[1]]]*12 + [[[3]]]*11, device=self.device, dtype=torch.long)
     
     # Process actions in chunks of size 'horizon'
     fake_actions = []
@@ -1296,6 +1306,60 @@ class NSPTrainer:  # NextStatePredictor
     
     return imagined_traj
 
+  @torch.no_grad()
+  def generate_trajectory_from_initial_state(self, image, initial_internal_state=None):
+    """
+    Generate trajectory by predicting each step directly from the initial state.
+    
+    Each step n is predicted using:
+    - Starting image: initial image (constant)
+    - Actions: [1]*12 + [3]*11 (fixed sequence, 23 total steps)
+    - Starting state: initial_internal_state (constant)
+    
+    Returns:
+      trajectory: list of [1, C, H, W] images (1 initial + 23 predictions)
+    """
+    imagined_traj = [image[:1]]
+    
+    # Precompute constants
+    initial_patch = self.altered_predictor.patchify(image[:1])
+    starting_internal_state = initial_internal_state[:1] if initial_internal_state is not None else None
+    
+    # Fixed action sequence: 12x action 1, then 11x action 3
+    all_actions = torch.tensor([[[1]]]*12 + [[[3]]]*11, device=self.device, dtype=torch.long)
+    
+    for step_idx in range(1, len(all_actions) + 1):
+      accumulated_actions = all_actions[:step_idx].T.reshape(1, -1)
+      
+      # Altered predictor: which patches change?
+      patch_change_pred, next_is1_logits, next_is2_logits = self.altered_predictor(
+        initial_patch, accumulated_actions, starting_internal_state
+      )
+      
+      # Get next internal state
+      next_internal_state = torch.stack([
+        torch.argmax(next_is1_logits, dim=1),
+        torch.argmax(next_is2_logits, dim=1)
+      ], dim=1)
+      
+      # Alteration predictor: predict pixel changes for changed patches
+      patch_change_pred_mask = patch_change_pred.squeeze(-1) > 0.5
+      patch_to_pred, counts, patch_indices = self.get_patch(
+        initial_patch, patch_change_pred_mask, return_indices=True
+      )
+      
+      if counts.max() > 0:
+        patch_predicted, _, _ = self.alteration_predictor(
+          patch_to_pred, patch_indices, accumulated_actions, next_internal_state
+        )
+        patch_result = self.get_next_image(initial_patch, patch_predicted, patch_change_pred_mask)
+      else:
+        patch_result = initial_patch
+      
+      imagined_traj.append(self.altered_predictor.unpatchify(patch_result))
+  
+    return imagined_traj
+
   def train_alter_predictor(self):
     """
     Main training loop for both AlteredPredictor and AlterationPredictor.
@@ -1343,7 +1407,9 @@ class NSPTrainer:  # NextStatePredictor
         # Sample 5 different time steps for diversity
         # Each time step requires predicting further into future
         # Teaches model to handle different action sequence lengths
-        for t in torch.randint(1, self.config['rollout_size'], (5,)).tolist():
+        # for t in torch.randint(1, self.config['rollout_size'], (5,)).tolist():
+        # Train on ALL timesteps from 1 to rollout_size
+        for t in range(1, self.config['rollout_size'] + 1):
           # Get state at time t
           next_image = episode['next_image'][:, t-1]    # Image at step t
           action = episode['action'][:, :t].flatten(1)  # Actions 0:t
