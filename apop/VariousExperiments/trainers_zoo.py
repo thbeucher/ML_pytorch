@@ -342,48 +342,9 @@ class MemoryBankGoalEmbeddingPredictorTrainer(BaseTrainer):
   
   def instanciate_model(self):
     self.model = MemoryBankFuturStatePredictor(**self.config['model_config']).to(self.device)
-  
-  def train(self, buffer, memory_bank, n_max_steps=100, batch_size=32, tf_logger=None, memory_size=5,
-            start_step=0):
-    self.model.train()
 
-    mean_loss = 0.0
-
-    BM = batch_size + memory_size
-    memory_ep = memory_bank.sample_episode_batch(memory_size, 60, random_window=False, success_reward=10)
-    ep_sizes = memory_ep['episode_size']
-    memory = memory_ep['image_embedding'][:, :ep_sizes.max()].unsqueeze(0).repeat(BM, 1, 1, 1)
-    memory_ep_len = ep_sizes.unsqueeze(0).repeat(BM, 1)  # [1, M]
-    memory_goal = memory_ep['image_embedding'][torch.arange(memory_size), ep_sizes-1]  # [M, E]
-
-    pbar = tqdm(range(n_max_steps))
-    for step in pbar:
-      batch = buffer.sample_image_is_goal_batch(batch_size)
-      memory_batch = memory_bank.sample_image_is_goal_batch(memory_size)
-
-      current_state = torch.cat([batch['image_embedding'], memory_batch['image_embedding']], dim=0)  # [B+M, E]
-
-      predicted_goal = self.model(current_state, memory, memory_ep_len)  # [B+M, E]
-
-      batch_goal = buffer.other_stored_obj['image_embedding'][batch['goal_idx']].to(self.device)  # [B, E]
-      target_goal = torch.cat([batch_goal, memory_goal], dim=0)  # [B+M, E]
-
-      loss = F.mse_loss(predicted_goal, target_goal)
-      self.mdl_opt.zero_grad()
-      loss.backward()
-      self.mdl_opt.step()
-
-      mean_loss += (loss.item() - mean_loss) / (step + 1)
-
-      if tf_logger:
-        tf_logger.add_scalar('memory_bank_goal_predictor_loss', mean_loss, start_step + step)
-      
-      pbar.set_description(f'Loss: {mean_loss:.4f}')
-    
-    return mean_loss
-
-  def train_goal_prediction(self, buffer, memory_bank, n_training_episodes=100, batch_size=32, tf_logger=None,
-                            memory_size=5, start_step=0):
+  def train(self, buffer, memory_bank, n_training_episodes=100, batch_size=32, tf_logger=None,
+            memory_size=5, start_step=0):
     self.model.train()
     
     # --- 1. Prepare the FIXED CONTEXT (The Demonstrations) ---
@@ -463,30 +424,7 @@ class MemoryBankGoalEmbeddingPredictorTrainer(BaseTrainer):
     return mean_loss
   
   @torch.no_grad()
-  def evaluate(self, buffer, memory_bank, batch_size=10, tf_logger=None, memory_size=5, step=0):
-    self.model.eval()
-
-    memory_ep = memory_bank.sample_episode_batch(memory_size, 60, random_window=False, success_reward=10)
-    ep_sizes = memory_ep['episode_size']
-    memory = memory_ep['image_embedding'][:, :ep_sizes.max()].unsqueeze(0).repeat(batch_size, 1, 1, 1)
-    memory_ep_len = ep_sizes.unsqueeze(0).repeat(batch_size, 1)  # [1, M]
-    
-    batch = buffer.sample_image_is_goal_batch(batch_size)
-
-    predicted_goal = self.model(batch['image_embedding'], memory, memory_ep_len)
-
-    target_goal = buffer.other_stored_obj['image_embedding'][batch['goal_idx']].to(self.device)
-
-    loss = F.mse_loss(predicted_goal, target_goal)
-
-    if tf_logger:
-      tf_logger.add_scalar('memory_bank_goal_predictor_eval_loss', loss.item(), step)
-    
-    return loss.item()
-  
-  @torch.no_grad()
-  def evaluate_goal_prediction(self, buffer, memory_bank, n_trajectories=10, memory_size=5,
-                               step=0, tf_logger=None):
+  def evaluate(self, buffer, memory_bank, n_trajectories=10, memory_size=5, step=0, tf_logger=None):
     self.model.eval()
 
     # --- 1. Prepare the Fixed Memory (The Task Examples) ---

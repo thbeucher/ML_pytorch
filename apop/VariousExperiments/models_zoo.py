@@ -92,7 +92,7 @@ class CNNAE(nn.Module):
     if self.config['add_noise_encoder'] or self.config['add_noise_bottleneck']:
       self.noise_layer = cl.NoiseLayer(p=self.config['noise_prob'], std=self.config['noise_std'])
   
-  def forward(self, x, return_latent=False):
+  def forward(self, x, return_latent=False, return_all=False):
     d1, d2, d3 = self.down(x)
 
     latent = d3
@@ -106,6 +106,8 @@ class CNNAE(nn.Module):
                  d2 if self.config['skip_connection'] else None,
                  d1 if self.config['skip_connection'] else None)
 
+    if return_all:
+      return u3, (d1, d2, d3)
     if return_latent:
       return u3, latent
     return u3
@@ -147,8 +149,12 @@ class CNNAENSP(nn.Module):
   
   def forward(self, image, condition={}):
     rec, latent = self.ae(image, return_latent=True)
-    action_emb = self.action_emb(condition.get('action', torch.zeros(image.shape[0], dtype=torch.long, device=image.device)).squeeze(-1))
-    is_emb = self.is_emb(condition.get('internal_state', torch.zeros(image.shape[0], dtype=torch.long, device=image.device))).flatten(1)
+    action_emb = self.action_emb(condition.get('action', torch.zeros(image.shape[0],
+                                                                     dtype=torch.long,
+                                                                     device=image.device)).squeeze(-1))
+    is_emb = self.is_emb(condition.get('internal_state', torch.zeros(image.shape[0],
+                                                                     dtype=torch.long,
+                                                                     device=image.device))).flatten(1)
     nsp_input = torch.cat([latent.flatten(1), action_emb, is_emb], dim=-1)
     pred_next_latent = self.nsp(nsp_input)
     return rec, pred_next_latent

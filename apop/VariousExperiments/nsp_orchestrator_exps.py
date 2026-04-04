@@ -252,18 +252,12 @@ class MultiStepsNSPOrchestrator:
     best_loss = float('inf')
     pbar = tqdm(range(1000))
     for epoch in pbar:
-      # loss = self.mb_gep_trainer.train(self.train_buffer, self.memory_bank, n_max_steps=100, batch_size=32,
-      #                                 tf_logger=self.tf_logger, memory_size=5, start_step=100*epoch)
-      # eval_loss = self.mb_gep_trainer.evaluate(self.test_buffer, self.memory_bank, tf_logger=self.tf_logger,
-      #                                          memory_size=5, step=epoch)
-      loss = self.mb_gep_trainer.train_goal_prediction(self.train_buffer, self.memory_bank, start_step=100*epoch,
-                                                       n_training_episodes=n_train_finished_episodes,
-                                                       tf_logger=self.tf_logger, memory_size=5)
-      losses = self.mb_gep_trainer.evaluate_goal_prediction(self.test_buffer, self.memory_bank, step=epoch,
-                                                            tf_logger=self.tf_logger, memory_size=5,
-                                                            n_trajectories=self.config['n_test_episodes'])
-      # print(f'Epoch: {epoch} - Train loss: {loss:.4f}')
-      # print(f"Gen: Err={losses[0]:.3f}, Adv={losses[1]:.3f} | Ret: Err={losses[2]:.3f}, Adv={losses[3]:.3f}")
+      loss = self.mb_gep_trainer.train(self.train_buffer, self.memory_bank, start_step=100*epoch,
+                                       n_training_episodes=n_train_finished_episodes,
+                                       tf_logger=self.tf_logger, memory_size=5)
+      losses = self.mb_gep_trainer.evaluate(self.test_buffer, self.memory_bank, step=epoch,
+                                            tf_logger=self.tf_logger, memory_size=5,
+                                            n_trajectories=self.config['n_test_episodes'])
       if losses[0] < best_loss:
         best_loss = losses[0]
         self.mb_gep_trainer.save()
