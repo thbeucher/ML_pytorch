@@ -350,7 +350,7 @@ class MemoryBankGoalEmbeddingPredictorTrainer(BaseTrainer):
     mean_loss = 0.0
 
     BM = batch_size + memory_size
-    memory_ep = memory_bank.sample_episode_batch(memory_size, 60)
+    memory_ep = memory_bank.sample_episode_batch(memory_size, 60, random_window=False, success_reward=10)
     ep_sizes = memory_ep['episode_size']
     memory = memory_ep['image_embedding'][:, :ep_sizes.max()].unsqueeze(0).repeat(BM, 1, 1, 1)
     memory_ep_len = ep_sizes.unsqueeze(0).repeat(BM, 1)  # [1, M]
@@ -388,13 +388,13 @@ class MemoryBankGoalEmbeddingPredictorTrainer(BaseTrainer):
     
     # --- 1. Prepare the FIXED CONTEXT (The Demonstrations) ---
     # These are the M episodes the Transformer will attend to for every prediction.
-    memory_ep = memory_bank.sample_episode_batch(memory_size, 60)
-    mem_imgs = memory_ep['image_embedding'].to(self.device) # [M, E, D]
-    mem_lens = memory_ep['episode_size'].to(self.device)    # [M]
+    memory_ep = memory_bank.sample_episode_batch(memory_size, 60, random_window=False, success_reward=10)
+    mem_imgs = memory_ep['image_embedding'] # [M, E, D]
+    mem_lens = memory_ep['episode_size']    # [M]
 
     # --- 2. Prepare TRAINING DATA (The 20/80 Split) ---
     # Generalization: Brand new episodes from the buffer (n_training_episodes)
-    gen_ep = buffer.sample_episode_batch(n_training_episodes, 60)
+    gen_ep = buffer.sample_episode_batch(n_training_episodes, 60, random_window=False, success_reward=10)
     
     # Retrieval: The EXACT same episodes used in the memory context (memory_size)
     # This allows the model to learn perfect retrieval for known context.
@@ -420,8 +420,8 @@ class MemoryBankGoalEmbeddingPredictorTrainer(BaseTrainer):
         all_goals.append(goal.unsqueeze(0).repeat(length, 1))
 
     # Flatten into tensors for the "shuffled deck"
-    train_x = torch.cat(all_states, dim=0).to(self.device)
-    train_y = torch.cat(all_goals, dim=0).to(self.device)
+    train_x = torch.cat(all_states, dim=0)
+    train_y = torch.cat(all_goals, dim=0)
     
     num_total_states = train_x.size(0)
     indices = torch.randperm(num_total_states)
@@ -447,8 +447,6 @@ class MemoryBankGoalEmbeddingPredictorTrainer(BaseTrainer):
       predicted_goals = self.model(curr_states, expanded_mem, expanded_mem_lens)
       
       # Mean Squared Error Loss in embedding space
-      predicted_goals = F.normalize(predicted_goals, dim=-1)
-      target_goals = F.normalize(target_goals, dim=-1)
       loss = F.mse_loss(predicted_goals, target_goals)
       
       self.mdl_opt.zero_grad()
@@ -468,7 +466,7 @@ class MemoryBankGoalEmbeddingPredictorTrainer(BaseTrainer):
   def evaluate(self, buffer, memory_bank, batch_size=10, tf_logger=None, memory_size=5, step=0):
     self.model.eval()
 
-    memory_ep = memory_bank.sample_episode_batch(memory_size, 60)
+    memory_ep = memory_bank.sample_episode_batch(memory_size, 60, random_window=False, success_reward=10)
     ep_sizes = memory_ep['episode_size']
     memory = memory_ep['image_embedding'][:, :ep_sizes.max()].unsqueeze(0).repeat(batch_size, 1, 1, 1)
     memory_ep_len = ep_sizes.unsqueeze(0).repeat(batch_size, 1)  # [1, M]
@@ -493,18 +491,18 @@ class MemoryBankGoalEmbeddingPredictorTrainer(BaseTrainer):
 
     # --- 1. Prepare the Fixed Memory (The Task Examples) ---
     # These 5 episodes are the "context" for all predictions in this eval call.
-    memory_ep = memory_bank.sample_episode_batch(memory_size, 60)
-    mem_imgs = memory_ep['image_embedding'].to(self.device)  # [M, E, D]
-    mem_lens = memory_ep['episode_size'].to(self.device)     # [M]
+    memory_ep = memory_bank.sample_episode_batch(memory_size, 60, random_window=False, success_reward=10)
+    mem_imgs = memory_ep['image_embedding']  # [M, E, D]
+    mem_lens = memory_ep['episode_size']     # [M]
     # Goals of these memory episodes (for the retrieval test later)
     assert (mem_lens > 0).all(), "Empty episodes found in memory bank"
     mem_goals = mem_imgs[torch.arange(memory_size), mem_lens - 1]
 
     # --- 2. Evaluate GENERALIZATION (80% case) ---
     # Sample full trajectories from the test buffer (episodes the model hasn't seen)
-    eval_ep = buffer.sample_episode_batch(n_trajectories, 60)
-    traj_states = eval_ep['image_embedding'].to(self.device) # [B, T, D]
-    traj_lens = eval_ep['episode_size'].to(self.device)      # [B]
+    eval_ep = buffer.sample_episode_batch(n_trajectories, 60, random_window=False, success_reward=10)
+    traj_states = eval_ep['image_embedding'] # [B, T, D]
+    traj_lens = eval_ep['episode_size']      # [B]
     B, T, D = traj_states.shape
     
     # The true goal of each test trajectory
