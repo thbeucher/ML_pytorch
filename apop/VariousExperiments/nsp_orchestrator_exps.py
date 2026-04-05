@@ -245,8 +245,8 @@ class MultiStepsNSPOrchestrator:
                            tensor_like=torch.zeros(
                              (self.test_buffer.capacity,
                               self.ae_ensp_trainer.config['model_config']['ae_config']['latent_dim']),
-                              device=self.device))
-    n_train_finished_episodes = len(self.train_buffer.find_finished_episode())
+                               device=self.device))
+    n_train_finished_episodes = len(self.train_buffer.successful_episodes)
     print(f'{n_train_finished_episodes} finished episodes in train buffer')
     self.mb_gep_trainer.load()
     best_loss = float('inf')

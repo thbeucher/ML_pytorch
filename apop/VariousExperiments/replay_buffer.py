@@ -13,7 +13,9 @@ class ReplayBuffer:
                normalize_img: bool = False,
                capacity: int = 10_000,
                device: str = 'cpu',
-               target_device: torch.device | None = None):
+               target_device: torch.device | None = None,
+               internal_state_dtype=torch.long,
+               action_dtype=torch.long):
     self.capacity = capacity
 
     self.device = torch.device(device)
@@ -29,14 +31,16 @@ class ReplayBuffer:
     self.image_transforms = transforms.Compose(img_transforms)
 
     # --- storage ---
-    self.internal_state = torch.zeros((capacity, internal_state_dim), device=self.device, dtype=torch.long)
-    self.next_internal_state = torch.zeros((capacity, internal_state_dim), device=self.device, dtype=torch.long)
-    self.action = torch.zeros((capacity, action_dim), device=self.device, dtype=torch.long)
+    self.internal_state = torch.zeros((capacity, internal_state_dim), device=self.device, dtype=internal_state_dtype)
+    self.next_internal_state = torch.zeros((capacity, internal_state_dim), device=self.device, dtype=internal_state_dtype)
+    self.action = torch.zeros((capacity, action_dim), device=self.device, dtype=action_dtype)
     self.image = torch.zeros((capacity, image_chan, image_size, image_size), device=self.device, dtype=torch.float32)
     self.next_image = torch.zeros((capacity, image_chan, image_size, image_size),
                                   device=self.device, dtype=torch.float32)
     self.reward = torch.zeros((capacity, 1), device=self.device, dtype=torch.float32)
     self.done = torch.zeros((capacity, 1), device=self.device, dtype=torch.long)
+
+    self.successful_episodes = []
 
     # --- priority / loss storage ---
     self.loss = torch.zeros((capacity,), device=self.device, dtype=torch.float32)
@@ -66,7 +70,7 @@ class ReplayBuffer:
     return internal_state, action, image, reward, done, next_internal_state, next_image
 
   @torch.no_grad()
-  def add(self, internal_state, action, image, reward, done, next_internal_state, next_image):
+  def add(self, internal_state, action, image, reward, done, next_internal_state, next_image, sucess_reward=10):
     state = self.prepare_data(internal_state, action, image, reward, done, next_internal_state, next_image)
     internal_state, action, image, reward, done, next_internal_state, next_image = state
 
@@ -80,6 +84,8 @@ class ReplayBuffer:
 
     self.episode_id[self.ptr] = self.current_episode_id
     if done:
+      if reward == sucess_reward:
+        self.successful_episodes.append(self.current_episode_id)
       self.current_episode_id += 1
 
     self.ptr = (self.ptr + 1) % self.capacity
@@ -166,26 +172,6 @@ class ReplayBuffer:
 
     return batch
   
-  def find_finished_episode(self, success_reward=10):
-    # ---- find episodes whose final transition has reward == success_reward ----
-    valid_episode_ids = []
-
-    for eid in range(self.current_episode_id):
-      ep_mask = (self.episode_id[:self.size] == eid)
-      ep_idxs = torch.where(ep_mask)[0]
-      if len(ep_idxs) == 0:
-        continue
-
-      last_idx = ep_idxs[-1]
-      if self.reward[last_idx].item() == success_reward:
-        valid_episode_ids.append(eid)
-
-    self.n_finished_episode = len(valid_episode_ids)
-    assert len(valid_episode_ids) > 0, "No episodes with final reward == success_reward found!"
-
-    valid_episode_ids = torch.tensor(valid_episode_ids, device=self.device)
-    return valid_episode_ids
-  
   def sample_image_is_goal_batch(self, batch_size, n_fake_goals=4, success_reward=10):
     """
     Sample (image_t, internal_state_t) -> goal
@@ -209,7 +195,7 @@ class ReplayBuffer:
                                     dtype=self.internal_state.dtype)
 
     # ---- find episodes whose final transition has reward == success_reward ----
-    valid_episode_ids = self.find_finished_episode(success_reward=success_reward)
+    valid_episode_ids = self.successful_episodes
 
     # ---- sample only valid episodes ----
     sampled_eids = valid_episode_ids[
@@ -302,7 +288,7 @@ class ReplayBuffer:
       episode_ids = torch.randint(0, self.current_episode_id, (batch_size,), device=self.device)
     else:
       # ---- find episodes whose final transition has reward == success_reward ----
-      valid_episode_ids = self.find_finished_episode(success_reward=success_reward)
+      valid_episode_ids = self.successful_episodes
 
       # ---- sample only valid episodes ----
       episode_ids = valid_episode_ids[torch.randint(0, len(valid_episode_ids), (B,), device=self.device)]
