@@ -126,9 +126,68 @@ class ReplayBuffer:
 
   def add_variable(self, variable, name):
     self.other_stored_obj[name] = variable.to(self.device)
+  
+  def get_sampling_indices(self, batch_size, distinct_episodes=False):
+    if distinct_episodes:
+      # Get all unique episode IDs present in the buffer
+      unique_episode_ids = self.episode_id[:self.size].unique()
 
-  def sample(self, batch_size):
-    idxs = torch.randint(0, self.size, (batch_size,), device=self.device)
+      # Check if we have enough unique episodes to sample from
+      if len(unique_episode_ids) < batch_size:
+        raise ValueError(f"Cannot sample {batch_size} distinct episodes. "
+                          f"Only {len(unique_episode_ids)} unique episodes available.")
+
+      # 1. Sample 'batch_size' episode IDs without replacement
+      perm = torch.randperm(len(unique_episode_ids), device=self.device)
+      sampled_eids = unique_episode_ids[perm[:batch_size]]
+
+      # --- Vectorized Sampling from Groups ---
+      # The goal is to select one random transition from each of the `sampled_eids`.
+      # This is a vectorized implementation of "group by episode_id and sample 1".
+
+      # 2. Create a mask to find all transitions belonging to the sampled episodes
+      all_eids = self.episode_id[:self.size]
+      mask = torch.isin(all_eids, sampled_eids)
+
+      # 3. Get the buffer indices and episode IDs of the relevant transitions
+      all_buffer_indices = torch.arange(self.size, device=self.device)
+      filtered_indices = all_buffer_indices[mask]
+      filtered_eids = all_eids[mask]
+
+      # 4. Sort the filtered transitions by episode ID to group them together
+      # This is the key step that enables vectorized processing of the groups.
+      sorted_eids, sort_perm = torch.sort(filtered_eids)
+      sorted_indices = filtered_indices[sort_perm]
+
+      # 5. Find the boundaries of each episode's segment in the sorted tensor
+      # `unique_consecutive` is efficient on sorted data. It gives us the unique
+      # episode IDs that were actually found, and the number of transitions for each.
+      group_eids, counts = torch.unique_consecutive(sorted_eids, return_counts=True)
+      
+      if len(group_eids) < batch_size:
+        # Not all sampled episodes were found in the buffer.
+        # The resulting batch will be smaller than requested.
+        print(f"Warning: Only {len(group_eids)} of the {batch_size} sampled episodes were found in the buffer.")
+
+      # 6. Calculate the starting position of each group in the sorted tensor
+      segment_starts = torch.cat([torch.tensor([0], device=self.device), torch.cumsum(counts, 0)[:-1]])
+
+      # 7. Generate a random offset for each group to pick one random transition
+      rand_per_group = torch.rand(len(counts), device=self.device)
+      random_offsets = (rand_per_group * counts).to(torch.long)
+
+      # 8. Get the indices within the `sorted_indices` tensor by adding the offsets
+      indices_into_sorted = segment_starts + random_offsets
+      
+      # 9. Finally, retrieve the original buffer indices
+      idxs = sorted_indices[indices_into_sorted]
+    else:
+      # Standard uniform sampling
+      idxs = torch.randint(0, self.size, (batch_size,), device=self.device)
+    return idxs
+
+  def sample(self, batch_size, distinct_episodes=False):
+    idxs = self.get_sampling_indices(batch_size, distinct_episodes=distinct_episodes)
     batch = {
       "internal_state": self.internal_state[idxs].to(self.target_device),
       "action": self.action[idxs].to(self.target_device),
@@ -172,7 +231,7 @@ class ReplayBuffer:
 
     return batch
   
-  def sample_image_is_goal_batch(self, batch_size, n_fake_goals=4, success_reward=10):
+  def sample_image_is_goal_batch(self, batch_size, n_fake_goals=4):
     """
     Sample (image_t, internal_state_t) -> goal
     Goal is the final state of episodes whose LAST reward == success_reward.
@@ -195,7 +254,7 @@ class ReplayBuffer:
                                     dtype=self.internal_state.dtype)
 
     # ---- find episodes whose final transition has reward == success_reward ----
-    valid_episode_ids = self.successful_episodes
+    valid_episode_ids = torch.tensor(self.successful_episodes, device=self.device)
 
     # ---- sample only valid episodes ----
     sampled_eids = valid_episode_ids[
@@ -288,7 +347,7 @@ class ReplayBuffer:
       episode_ids = torch.randint(0, self.current_episode_id, (batch_size,), device=self.device)
     else:
       # ---- find episodes whose final transition has reward == success_reward ----
-      valid_episode_ids = self.successful_episodes
+      valid_episode_ids = torch.tensor(self.successful_episodes, device=self.device)
 
       # ---- sample only valid episodes ----
       episode_ids = valid_episode_ids[torch.randint(0, len(valid_episode_ids), (B,), device=self.device)]

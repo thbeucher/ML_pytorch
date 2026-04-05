@@ -93,11 +93,11 @@ class MultiStepsNSPOrchestrator:
 
         episode_step += 1
 
-        replay_buffer.add(obs//5, action, img, reward, terminated or episode_step > max_episode_steps,
+        replay_buffer.add(obs//5, action, img, reward, terminated or episode_step >= max_episode_steps,
                           next_obs//5, next_img)
         obs, img = next_obs, next_img
 
-        if terminated or episode_step > max_episode_steps:
+        if terminated or episode_step >= max_episode_steps:
           obs, _ = self.env.reset()
           img = self.env.render()
           episode_step = 0

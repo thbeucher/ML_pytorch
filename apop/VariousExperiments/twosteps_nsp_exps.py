@@ -36,6 +36,7 @@ import gymnasium as gym
 import torch.nn.functional as F
 
 from tqdm import tqdm
+from typing import Callable, Optional, Tuple
 from torch.utils.tensorboard import SummaryWriter
 
 from vision_transformer.vit import *
@@ -47,6 +48,38 @@ warnings.filterwarnings("ignore")
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+
+# --- Object Finding Helper ---
+def find_object_center(frame: np.ndarray, color_condition: Callable[[np.ndarray], np.ndarray]) -> Optional[Tuple[float, float]]:
+    """
+    Finds the geometric center (mean) of pixels that match a given color condition.
+    """
+    pixels = np.where(color_condition(frame))
+    if pixels[0].size > 0:
+        y_coords, x_coords = pixels
+        center_y, center_x = np.mean(y_coords), np.mean(x_coords)
+        return center_x, center_y
+    return None
+
+def find_object_patch_index(frame: np.ndarray, color_condition: Callable, image_size: int, patch_size: int) -> Optional[int]:
+    """
+    Takes an image and an object to find, and returns the patch index.
+    """
+    center = find_object_center(frame, color_condition)
+    if center:
+        center_x, center_y = center
+        num_patches_per_row = image_size // patch_size
+        patch_col = int(center_x // patch_size)
+        patch_row = int(center_y // patch_size)
+        patch_index = patch_row * num_patches_per_row + patch_col
+        return patch_index
+    return None
+
+# These lambda functions define how to find the 'hand' (blue) and 'target' (red)
+# based on which color channel is dominant in a given pixel.
+HAND_CONDITION = lambda frame: (frame[:, :, 2] > frame[:, :, 0]) & (frame[:, :, 2] > frame[:, :, 1]) & (frame[:, :, 2] > 0.1)
+TARGET_CONDITION = lambda frame: (frame[:, :, 0] > frame[:, :, 1]) & (frame[:, :, 0] > frame[:, :, 2]) & (frame[:, :, 0] > 0.1)
 
 
 class AlteredPredictor(nn.Module):
@@ -477,6 +510,164 @@ class AlterationPredictor(nn.Module):
     return patch, next_is1_logits, next_is2_logits
 
 
+class ObjectPredictor(nn.Module):
+  """
+  ObjectPredictor: A Vision Transformer (ViT) model that predicts which image patch contains a specified object
+  (e.g., the robot's hand or a target), given the current image, the robot's internal state, and an object ID.
+
+  This model processes image patches through a transformer encoder, incorporates embeddings for internal state
+  and the specified object, and outputs a probability distribution over the patches, indicating the most likely
+  location of the object.
+
+  ARCHITECTURE OVERVIEW:
+  1. Patchify: Splits input image into non-overlapping patches.
+  2. Patch Embedding: Projects each patch from pixel space to embedding space.
+  3. Positional Embedding: Adds 2D sinusoidal positional encoding to preserve spatial information.
+  4. Internal State Embedding: Encodes the robot's internal state (e.g., joint angles).
+  5. Object Embedding: Encodes the ID of the object to be located (e.g., 0 for hand, 1 for target).
+  6. Transformer Encoder: Processes all tokens (patches + state + object) through multi-head attention.
+  7. Prediction Head: A classifier that outputs a probability distribution over all patches for the object's location.
+
+  INPUT SHAPES:
+  - patch: [B, n_patchs, N] - flattened image patches.
+  - internal_state: [B, 2] - two internal state values.
+  - object_id: [B, 1] - ID of the object to locate.
+
+  OUTPUT SHAPES:
+  - preds: [B, n_patchs] - probability for each patch to contain the specified object.
+  """
+  def __init__(
+    self,
+    *,
+    image_size,
+    patch_size,
+    dim,
+    depth,
+    heads,
+    mlp_dim,
+    channels=3,
+    dim_head=64,
+    dropout=0.,
+    emb_dropout=0.,
+    is1_n_values=19,
+    is2_n_values=37,
+    is_emb_dim=16,
+    n_objects=2,  # Number of objects to distinguish (e.g., hand, target)
+    object_emb_dim=16
+  ):
+    super().__init__()
+    # === SPATIAL SETUP ===
+    self.channels = channels
+    self.image_height, self.image_width = pair(image_size)
+    self.patch_height, self.patch_width = pair(patch_size)
+    self.patch_dim = channels * self.patch_height * self.patch_width
+    self.grid = [(self.image_height // self.patch_height), (self.image_width // self.patch_width)]
+    self.n_patchs = self.grid[0] * self.grid[1]
+
+    # === OBJECT EMBEDDING ===
+    self.object_emb = nn.Sequential(
+        nn.Embedding(n_objects, object_emb_dim),
+        nn.Linear(object_emb_dim, dim),
+        nn.SiLU()
+    )
+
+    # === INTERNAL STATE EMBEDDING ===
+    self.is1_emb = nn.Sequential(
+      nn.Embedding(is1_n_values, is_emb_dim),
+      nn.Linear(is_emb_dim, is_emb_dim),
+      nn.SiLU()
+    )
+    self.is2_emb = nn.Sequential(
+      nn.Embedding(is2_n_values, is_emb_dim),
+      nn.Linear(is_emb_dim, is_emb_dim),
+      nn.SiLU()
+    )
+    self.is_proj = nn.Linear(2 * is_emb_dim, dim)
+
+    # === PATCH EMBEDDING ===
+    self.patchify = Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1=self.patch_height, p2=self.patch_width)
+    self.to_patch_embedding = nn.Sequential(
+        nn.Linear(self.patch_dim, dim),
+        nn.LayerNorm(dim)
+    )
+
+    # === POSITIONAL EMBEDDING ===
+    self.pos_embedding = posemb_sincos_2d(
+      h = self.image_height // self.patch_height,
+      w = self.image_width // self.patch_width,
+      dim = dim,
+    ) 
+    self.dropout = nn.Dropout(emb_dropout)
+
+    # === TRANSFORMER ===
+    self.transformer = Transformer(dim, depth, heads, dim_head, mlp_dim, dropout)
+
+    # === PREDICTION HEAD ===
+    self.find_object_patch = nn.Sequential(
+        nn.Linear(dim, 2*dim),
+        nn.ReLU(True),
+        nn.Linear(2*dim, 1)
+    )
+
+    # === UNPATCHIFY ===
+    self.unpatchify = Rearrange(
+      'b (h w) (p1 p2 c) -> b c (h p1) (w p2)',
+      h=self.image_height // self.patch_height,
+      w=self.image_width // self.patch_width,
+      p1=self.patch_height,
+      p2=self.patch_width,
+      c=channels
+    )
+
+  def forward(self, patch, internal_state, object_id):
+    """
+    COMPUTATION FLOW:
+    1. Embed patches
+    2. Add positional information
+    3. Embed internal state
+    4. Embed object ID
+    5. Concatenate all tokens
+    6. Process through Transformer
+    7. Extract patch tokens and predict object location
+    
+    Args:
+      patch: [B, n_patchs, patch_dim] - flattened image patches
+      internal_state: [B, 2] - internal state bins
+      object_id: [B, 1] - ID of the object to locate
+    
+    Returns:
+      preds: [B, n_patchs] - probability distribution over patches for object location
+    """
+    # Step 1: Project patches from pixel space to embedding space
+    patch = self.to_patch_embedding(patch)
+
+    # Step 2: Add positional embeddings
+    pos_emb = self.pos_embedding.to(patch.device, dtype=patch.dtype)
+    patch = self.dropout(patch + pos_emb)
+
+    # Step 3: Embed internal state
+    internal_emb = torch.cat([self.is1_emb(internal_state[:, 0]), self.is2_emb(internal_state[:, 1])], dim=-1)
+    internal_emb = self.is_proj(internal_emb).unsqueeze(1)
+
+    # Step 4: Embed object ID
+    object_emb = self.object_emb(object_id)
+
+    # Step 5: Concatenate all tokens
+    tokens = [patch, internal_emb, object_emb]
+    patch = torch.cat(tokens, dim=1)
+
+    # Step 6: Process through Transformer
+    patch = self.transformer(patch)
+
+    # Step 7: Extract patch tokens
+    patchs_wo_extra = patch[:, :self.n_patchs]
+
+    # Step 8: Predict object patch logits
+    logits = self.find_object_patch(patchs_wo_extra).squeeze(-1)
+
+    return logits
+
+
 class NSPTrainer:  # NextStatePredictor
   """
   NSPTrainer: Trainer class for the Two-Step Next State Predictor system.
@@ -517,7 +708,10 @@ class NSPTrainer:  # NextStatePredictor
             'action_dim':                        1,       # Single action per step
             'action_n_values':                   5,       # 5 possible actions (0-4)
             'action_emb':                        8,       # Action embedding dimension
-            'replay_buffer_size':                10_000,  # Number of transitions to collect
+            'n_train_episodes':                  128,
+            'train_buffer_size':                 100*60,
+            'n_test_episodes':                   10,
+            'test_buffer_size':                  10*60,
             'replay_buffer_device':              'cpu',   # Store on CPU to save GPU memory
             'render_mode':                       'rgb_array',
             'n_epochs':                          100,
@@ -530,6 +724,7 @@ class NSPTrainer:  # NextStatePredictor
             'rollout_size':                      30,    # Max episode length for sampling
             'use_internal_state':                True,  # Include internal state in training
             'internal_state_emb_dim':            16,    # Internal state embedding dimension
+            'add_hand_and_target_patch_indices': True, # Add hand and target patch indices to the replay buffer
             }
   def __init__(self, config={}):
     """
@@ -667,18 +862,44 @@ class NSPTrainer:  # NextStatePredictor
       grid_w=self.altered_predictor.grid[1]   # 8 (from AlteredPredictor)
     ).to(self.device)
     print(f'Instanciate alteration_predictor with {self.get_train_params(self.alteration_predictor):,} params')
+
+    # === OBJECT PREDICTOR ===
+    self.object_predictor = ObjectPredictor(
+        image_size=32,
+        patch_size=2,
+        dim=128,
+        depth=4,
+        heads=8,
+        mlp_dim=256,
+        dim_head=64,
+        channels=3,
+        is1_n_values=self.config['internal_state_n_values'][0],
+        is2_n_values=self.config['internal_state_n_values'][1],
+        is_emb_dim=self.config['internal_state_emb_dim'],
+        n_objects=2,  # hand and target
+        object_emb_dim=16
+    ).to(self.device)
+    print(f'Instanciate object_predictor with {self.get_train_params(self.object_predictor):,} params')
   
   def set_trainer_utils(self):
     """Initialize replay buffer, optimizers, and loss functions."""
     # === REPLAY BUFFER ===
     # Stores environment transitions for training
     resize_img = True if self.config['resize_to'] != self.config['image_size'] else False
-    self.replay_buffer = ReplayBuffer(self.config['internal_state_dim'],
+    self.train_buffer = ReplayBuffer(self.config['internal_state_dim'],
+                                       self.config['action_dim'],
+                                       self.config['image_size'],
+                                       resize_to=self.config['resize_to'] if resize_img else None,
+                                       normalize_img=self.config['normalize_image'],
+                                       capacity=self.config['train_buffer_size'],
+                                       device=self.config['replay_buffer_device'],
+                                       target_device=self.device)
+    self.test_buffer = ReplayBuffer(self.config['internal_state_dim'],
                                       self.config['action_dim'],
                                       self.config['image_size'],
                                       resize_to=self.config['resize_to'] if resize_img else None,
                                       normalize_img=self.config['normalize_image'],
-                                      capacity=self.config['replay_buffer_size'],
+                                      capacity=self.config['test_buffer_size'],
                                       device=self.config['replay_buffer_device'],
                                       target_device=self.device)
     # === OPTIMIZERS ===
@@ -687,51 +908,59 @@ class NSPTrainer:  # NextStatePredictor
                                          weight_decay=1e-4, betas=(0.9, 0.999))
     self.alteration_opt = torch.optim.AdamW(self.alteration_predictor.parameters(), lr=1e-4,
                                             weight_decay=1e-4, betas=(0.9, 0.999))
+    self.object_predictor_opt = torch.optim.AdamW(self.object_predictor.parameters(), lr=1e-4,
+                                                  weight_decay=1e-4, betas=(0.9, 0.999))
     # === LOSS FUNCTIONS ===
     self.bce_criterion = nn.BCELoss()  # Binary Cross-Entropy for change prediction (0/1 classification)
     self.mse_criterion = nn.MSELoss()  # Mean Squared Error for pixel reconstruction
-    
-  def fill_memory(self, random_act=True, max_episode_steps=60):
+    self.ce_criterion = nn.CrossEntropyLoss()
+      
+  def fill_memory(self, replay_buffer, act='random', n_episodes=128, max_episode_steps=60):
     """
-    Collect random environment trajectories and fill the replay buffer.
-    
-    COLLECTION STRATEGY:
-    - Random actions: each step selects uniformly random action
-    - Episodes: reset after terminal state or max_episode_steps
-    - Stores: (state, action, image, reward, done, next_state, next_image)
-    
+    Collects trajectories from the environment and populates the given replay buffer.
+
+    This function drives the data collection process by interacting with the
+    environment based on a specified action strategy. It records the transitions
+    (state, action, reward, etc.) and stores them for later use in training.
+
     Args:
-        random_act: if True, use random actions; else use policy (TODO)
-        max_episode_steps: max steps per episode
+        replay_buffer: The replay buffer to fill.
+        act (str): The action strategy to use. Can be:
+                   'random' - Selects actions uniformly at random.
+                   'best' - Follows a hardcoded "optimal" policy.
+                   'policy' - (Placeholder) Uses a learned policy.
+        n_episodes (int): The number of episodes to collect.
+        max_episode_steps (int): The maximum number of steps per episode before
+                                 a reset is forced.
     """
-    print('Filling memory buffer...')
-    # Initialize environment
+    print(f'Filling memory buffer... ({act=})')
     obs, _ = self.env.reset()
     img = self.env.render()
-    episode_step = 0
-    # Collect transitions
-    for _ in tqdm(range(self.config['replay_buffer_size'])):
-      # === SELECT ACTION ===
-      action = random.randint(0, 4) if random_act else 0  #TODO use policy
-      # === STEP ENVIRONMENT ===
-      # Get next observation, reward, done flag
-      next_obs, reward, terminated, truncated, info = self.env.step(action)
-      next_img = self.env.render()
-      episode_step += 1
-      # === STORE TRANSITION ===
-      # obs//5: quantize state
-      # img: RGB observation
-      self.replay_buffer.add(obs//5,action, img, reward, terminated or episode_step > max_episode_steps,
-                             next_obs//5, next_img)
-      # Update state for next iteration
-      obs, img = next_obs, next_img
 
-      # === EPISODE RESET ===
-      # Start new episode if done
-      if terminated or episode_step > max_episode_steps:
-        obs, _ = self.env.reset()
-        img = self.env.render()
-        episode_step = 0
+    for _ in tqdm(range(n_episodes)):
+      episode_step = 0
+      for _ in range(max_episode_steps):
+        if act == 'policy':
+          action = random.randint(0, 4)
+        elif act == 'best':
+          action = self.env.unwrapped.get_best_action()
+        else:
+          action = random.randint(0, 4)
+
+        next_obs, reward, terminated, truncated, info = self.env.step(action)
+        next_img = self.env.render()
+
+        episode_step += 1
+
+        replay_buffer.add(obs//5, action, img, reward, terminated or episode_step >= max_episode_steps,
+                          next_obs//5, next_img)
+        obs, img = next_obs, next_img
+
+        if terminated or episode_step >= max_episode_steps:
+          obs, _ = self.env.reset()
+          img = self.env.render()
+          episode_step = 0
+          break
     
   def get_patch(self, patch, mask, return_indices=False):
     """
@@ -810,6 +1039,36 @@ class NSPTrainer:  # NextStatePredictor
     else:
       return padded, counts
   
+  def add_hand_and_target_patch_indices_to_memory(self, buffer, batch_size=128):
+    '''Add a variable to the replay buffer by generating it with the provided generator and
+    adding it in batches.'''
+    print(f'Add hand_patch_index and target_patch_index to buffer...')
+    
+    hand_patch_index = torch.zeros(buffer.capacity, 1, dtype=torch.long)
+    target_patch_index = torch.zeros(buffer.capacity, 1, dtype=torch.long)
+
+    for i in tqdm(range(0, buffer.size, batch_size)):
+        images = buffer.image[i:i+batch_size]
+        for j, img in enumerate(images):
+            # The image is normalized, so we need to denormalize it
+            img = (img + 1) / 2
+            img_np = img.permute(1, 2, 0).cpu().numpy()
+            
+            # --- hand_patch_index ---
+            patch_idx = find_object_patch_index(img_np, HAND_CONDITION, self.config['resize_to'], self.object_predictor.patch_height)
+            
+            if patch_idx is not None:
+                hand_patch_index[i+j] = patch_idx
+
+            # --- target_patch_index ---
+            patch_idx = find_object_patch_index(img_np, TARGET_CONDITION, self.config['resize_to'], self.object_predictor.patch_height)
+            
+            if patch_idx is not None:
+                target_patch_index[i+j] = patch_idx
+    
+    buffer.add_variable(hand_patch_index, 'hand_patch_index')
+    buffer.add_variable(target_patch_index, 'target_patch_index')
+
   def get_next_image(self, patch, patch_predicted, patch_mask):
     """
     Reconstruct full image by applying predicted changes to original patches.
@@ -901,10 +1160,6 @@ class NSPTrainer:  # NextStatePredictor
     )
     return img_vis
   
-  def sample_training_batch(self):
-    """Sample a batch of episodes for training."""
-    return self.replay_buffer.sample_episode_batch(self.config['batch_size'], self.config['rollout_size'])
-
   def compute_altered_loss(self, patch, action, patch_next_image, internal_state=None, next_internal_state=None):
     """
     Compute loss for the AlteredPredictor (Step 1 model).
@@ -1399,7 +1654,7 @@ class NSPTrainer:  # NextStatePredictor
       # === MINI-BATCH LOOP ===
       # Process 10 batches per epoch
       for i in tqdm(range(10), leave=False):
-        episode = self.sample_training_batch()
+        episode = self.train_buffer.sample_episode_batch(self.config['batch_size'], self.config['rollout_size'])
 
         # === GET INITIAL IMAGE ===
         image = episode['image'][:, 0]  # [B, C, H, W]
@@ -1466,14 +1721,144 @@ class NSPTrainer:  # NextStatePredictor
       # === UPDATE PROGRESS BAR ===
       pbar.set_description(f'Mean_acc: {mean_accuracy:.3f}')
   
+  def train_object_predictor(self, n_epochs=100, n_steps_per_epoch=4, batch_size=32):
+    """
+    Train the ObjectPredictor model.
+    """
+    self.object_predictor.train()
+    pbar = tqdm(range(n_epochs), desc='Training Object Predictor')
+    for epoch in pbar:
+      mean_hand_loss = 0.0
+      mean_target_loss = 0.0
+      mean_hand_acc = 0.0
+      mean_target_acc = 0.0
+      for i in tqdm(range(n_steps_per_epoch), leave=False):
+        batch = self.train_buffer.sample(batch_size, distinct_episodes=True)
+        
+        image = batch['image']
+        internal_state = batch['internal_state']
+        hand_patch_index = batch['hand_patch_index'].squeeze(-1)
+        target_patch_index = batch['target_patch_index'].squeeze(-1)
+
+        patch = self.object_predictor.patchify(image)
+
+        # --- Train on hand ---
+        object_id_hand = torch.zeros(batch_size, 1, dtype=torch.long, device=self.device)
+        hand_preds = self.object_predictor(patch, internal_state, object_id_hand)
+        loss_hand = self.ce_criterion(hand_preds, hand_patch_index)
+
+        # --- Train on target ---
+        object_id_target = torch.ones(batch_size, 1, dtype=torch.long, device=self.device)
+        target_preds = self.object_predictor(patch, internal_state, object_id_target)
+        loss_target = self.ce_criterion(target_preds, target_patch_index)
+        
+        loss = loss_hand + loss_target
+        
+        self.object_predictor_opt.zero_grad()
+        loss.backward()
+        self.object_predictor_opt.step()
+        
+        # --- Compute Accuracy ---
+        with torch.no_grad():
+            hand_pred_idx = torch.argmax(hand_preds, dim=1)
+            hand_acc = (hand_pred_idx == hand_patch_index).float().mean().item()
+            target_pred_idx = torch.argmax(target_preds, dim=1)
+            target_acc = (target_pred_idx == target_patch_index).float().mean().item()
+
+        mean_hand_loss += loss_hand.item()
+        mean_target_loss += loss_target.item()
+        mean_hand_acc += hand_acc
+        mean_target_acc += target_acc
+
+      mean_hand_loss /= n_steps_per_epoch
+      mean_target_loss /= n_steps_per_epoch
+      mean_hand_acc /= n_steps_per_epoch
+      mean_target_acc /= n_steps_per_epoch
+
+      if self.tf_logger:
+        self.tf_logger.add_scalar('object_predictor_hand_loss', mean_hand_loss, epoch)
+        self.tf_logger.add_scalar('object_predictor_target_loss', mean_target_loss, epoch)
+        self.tf_logger.add_scalar('object_predictor_hand_acc', mean_hand_acc, epoch)
+        self.tf_logger.add_scalar('object_predictor_target_acc', mean_target_acc, epoch)
+      pbar.set_description(f'Object Predictor - Hand Acc: {mean_hand_acc:.2f}, Target Acc: {mean_target_acc:.2f}')
+
+      self.evaluate_object_predictor(epoch)
+    
+    self.save_model(self.object_predictor, 'object_predictor')
+
+  @torch.no_grad()
+  def evaluate_object_predictor(self, epoch, batch_size=10):
+    self.object_predictor.eval()
+    
+    mean_hand_loss = 0.0
+    mean_target_loss = 0.0
+    mean_hand_acc = 0.0
+    mean_target_acc = 0.0
+    
+    n_steps = self.test_buffer.size // batch_size
+    
+    for _ in range(n_steps):
+      batch = self.test_buffer.sample(batch_size, distinct_episodes=True)
+      
+      image = batch['image']
+      internal_state = batch['internal_state']
+      hand_patch_index = batch['hand_patch_index'].squeeze(-1)
+      target_patch_index = batch['target_patch_index'].squeeze(-1)
+
+      patch = self.object_predictor.patchify(image)
+
+      # --- Hand ---
+      object_id_hand = torch.zeros(batch_size, 1, dtype=torch.long, device=self.device)
+      hand_preds = self.object_predictor(patch, internal_state, object_id_hand)
+      loss_hand = self.ce_criterion(hand_preds, hand_patch_index)
+
+      # --- Target ---
+      object_id_target = torch.ones(batch_size, 1, dtype=torch.long, device=self.device)
+      target_preds = self.object_predictor(patch, internal_state, object_id_target)
+      loss_target = self.ce_criterion(target_preds, target_patch_index)
+      
+      # --- Compute Accuracy ---
+      hand_pred_idx = torch.argmax(hand_preds, dim=1)
+      hand_acc = (hand_pred_idx == hand_patch_index).float().mean().item()
+      target_pred_idx = torch.argmax(target_preds, dim=1)
+      target_acc = (target_pred_idx == target_patch_index).float().mean().item()
+
+      mean_hand_loss += loss_hand.item()
+      mean_target_loss += loss_target.item()
+      mean_hand_acc += hand_acc
+      mean_target_acc += target_acc
+
+    mean_hand_loss /= n_steps
+    mean_target_loss /= n_steps
+    mean_hand_acc /= n_steps
+    mean_target_acc /= n_steps
+
+    if self.tf_logger:
+      self.tf_logger.add_scalar('test_object_predictor_hand_loss', mean_hand_loss, epoch)
+      self.tf_logger.add_scalar('test_object_predictor_target_loss', mean_target_loss, epoch)
+      self.tf_logger.add_scalar('test_object_predictor_hand_acc', mean_hand_acc, epoch)
+      self.tf_logger.add_scalar('test_object_predictor_target_acc', mean_target_acc, epoch)
+
+    self.object_predictor.train()
+
   def train(self):
     """
     Main entry point: fill buffer then train.
     """
     # Step 1: Collect environment transitions
-    self.fill_memory()
-    # Step 2: Train models
-    self.train_alter_predictor()
+    self.fill_memory(self.train_buffer, n_episodes=self.config['n_train_episodes'])
+    self.fill_memory(self.test_buffer, n_episodes=self.config['n_test_episodes'], act='best')
+
+    # Step 2: Train Altered & Alteration models
+    # print('Training AlteredPredictor and AlterationPredictor...')
+    # self.train_alter_predictor()
+
+    # Step 3: Optionally, add hand and target patch indices to the replay buffer
+    if self.config['add_hand_and_target_patch_indices']:
+      self.add_hand_and_target_patch_indices_to_memory(self.train_buffer)
+      self.add_hand_and_target_patch_indices_to_memory(self.test_buffer)
+      print('Training ObjectPredictor...')
+      self.train_object_predictor()
 
 
 if __name__ == '__main__':

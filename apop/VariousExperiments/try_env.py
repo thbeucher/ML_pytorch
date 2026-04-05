@@ -3,7 +3,7 @@ import pygame
 import gymnasium as gym
 
 from replay_buffer import ReplayBuffer
-from interactive_plot import InteractivePlot
+from interactive_plot import InteractivePlot, HAND_CONDITION, TARGET_CONDITION
 
 sys.path.append('../../../robot/')
 
@@ -27,20 +27,14 @@ KEY_ACTIONS = {
 
 running = True
 
-# Initialize interactive plot
-image_size = 32
-cell_size = 4
-plot = InteractivePlot(image_size, cell_size)
+# Initialize interactive plot for ViT patch visualization
+IMAGE_SIZE = 32
+PATCH_SIZE = 2  # Using 4x4 patches, so there's an 8x8 grid of patches
+plot = InteractivePlot(image_size=IMAGE_SIZE, patch_size=PATCH_SIZE)
 
 # --- Define and Register Objects to Track ---
-# The color conditions are defined as lambda functions that check for specific color characteristics in the frame.
-# For example, the 'hand' condition checks for pixels where the blue channel is dominant and above a certain threshold,
-# while the 'target' condition checks for pixels where the red channel is dominant.
-hand_condition = lambda frame: (frame[:, :, 2] > frame[:, :, 0]) & (frame[:, :, 2] > frame[:, :, 1]) & (frame[:, :, 2] > 0.1)
-target_condition = lambda frame: (frame[:, :, 0] > frame[:, :, 1]) & (frame[:, :, 0] > frame[:, :, 2]) & (frame[:, :, 0] > 0.1)
-
-plot.add_tracked_object(name='hand', color_condition=hand_condition, highlight_color='g')
-plot.add_tracked_object(name='target', color_condition=target_condition, highlight_color='r')
+plot.add_tracked_object(name='hand', color_condition=HAND_CONDITION, highlight_color='b')
+plot.add_tracked_object(name='target', color_condition=TARGET_CONDITION, highlight_color='r')
 
 while running:
     # Capture keyboard events
@@ -58,10 +52,15 @@ while running:
                 frame = env.render()
                 _, _, frame, _, _, _, _ = rb.prepare_data(None, None, frame, None, None, None, None)
                 
-                # Update the plot
-                plot.update(frame.squeeze().permute(1, 2, 0).numpy())
+                # Update the plot and calculate patch indices
+                processed_frame = frame.squeeze().permute(1, 2, 0).numpy()
+                plot.update(processed_frame)
                 
-                print(f"Action Taken: {action}, Reward: {reward:.4f}")
+                # Retrieve and print the patch indices for the ViT model
+                hand_idx = plot.get_patch_index('hand')
+                target_idx = plot.get_patch_index('target')
+                
+                print(f"Action: {action}, Reward: {reward:.4f} | Hand Index: {hand_idx}, Target Index: {target_idx}")
 
                 if terminated or truncated:
                     obs, info = env.reset(options={'only_target': True})  # Reset environment if episode ends
