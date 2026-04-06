@@ -49,6 +49,10 @@ warnings.filterwarnings("ignore")
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# These lambda functions define how to find the 'hand' (blue) and 'target' (red)
+# based on which color channel is dominant in a given pixel.
+HAND_CONDITION = lambda frame: (frame[:, :, 2] > frame[:, :, 0]) & (frame[:, :, 2] > frame[:, :, 1]) & (frame[:, :, 2] > 0.1)
+TARGET_CONDITION = lambda frame: (frame[:, :, 0] > frame[:, :, 1]) & (frame[:, :, 0] > frame[:, :, 2]) & (frame[:, :, 0] > 0.1)
 
 # --- Object Finding Helper ---
 def find_object_center(frame: np.ndarray, color_condition: Callable[[np.ndarray], np.ndarray]) -> Optional[Tuple[float, float]]:
@@ -62,9 +66,9 @@ def find_object_center(frame: np.ndarray, color_condition: Callable[[np.ndarray]
         return center_x, center_y
     return None
 
-def find_object_patch_index(frame: np.ndarray, color_condition: Callable, image_size: int, patch_size: int) -> Optional[int]:
+def find_object_patch_index_from_centroid(frame: np.ndarray, color_condition: Callable, image_size: int, patch_size: int) -> Optional[int]:
     """
-    Takes an image and an object to find, and returns the patch index.
+    Takes an image and an object to find, and returns the patch index based on the object's centroid.
     """
     center = find_object_center(frame, color_condition)
     if center:
@@ -76,10 +80,14 @@ def find_object_patch_index(frame: np.ndarray, color_condition: Callable, image_
         return patch_index
     return None
 
-# These lambda functions define how to find the 'hand' (blue) and 'target' (red)
-# based on which color channel is dominant in a given pixel.
-HAND_CONDITION = lambda frame: (frame[:, :, 2] > frame[:, :, 0]) & (frame[:, :, 2] > frame[:, :, 1]) & (frame[:, :, 2] > 0.1)
-TARGET_CONDITION = lambda frame: (frame[:, :, 0] > frame[:, :, 1]) & (frame[:, :, 0] > frame[:, :, 2]) & (frame[:, :, 0] > 0.1)
+def find_object_patch_index_from_scoring(patches: np.ndarray, color_condition: Callable) -> Optional[int]:
+    """
+    Takes patches and an object to find, and returns the patch index by scoring patches for the specified color.
+    """
+    scores = np.array([color_condition(patch).mean() for patch in patches])
+    if scores.max() > 0:
+        return np.argmax(scores)
+    return None
 
 
 class AlteredPredictor(nn.Module):
@@ -551,9 +559,7 @@ class ObjectPredictor(nn.Module):
     emb_dropout=0.,
     is1_n_values=19,
     is2_n_values=37,
-    is_emb_dim=16,
-    n_objects=2,  # Number of objects to distinguish (e.g., hand, target)
-    object_emb_dim=16
+    is_emb_dim=16
   ):
     super().__init__()
     # === SPATIAL SETUP ===
@@ -563,13 +569,6 @@ class ObjectPredictor(nn.Module):
     self.patch_dim = channels * self.patch_height * self.patch_width
     self.grid = [(self.image_height // self.patch_height), (self.image_width // self.patch_width)]
     self.n_patchs = self.grid[0] * self.grid[1]
-
-    # === OBJECT EMBEDDING ===
-    self.object_emb = nn.Sequential(
-        nn.Embedding(n_objects, object_emb_dim),
-        nn.Linear(object_emb_dim, dim),
-        nn.SiLU()
-    )
 
     # === INTERNAL STATE EMBEDDING ===
     self.is1_emb = nn.Sequential(
@@ -602,8 +601,14 @@ class ObjectPredictor(nn.Module):
     # === TRANSFORMER ===
     self.transformer = Transformer(dim, depth, heads, dim_head, mlp_dim, dropout)
 
-    # === PREDICTION HEAD ===
-    self.find_object_patch = nn.Sequential(
+    # === PREDICTION HEADS ===
+    # Multi-head architecture: one head per object
+    self.find_hand_patch = nn.Sequential(
+        nn.Linear(dim, 2*dim),
+        nn.ReLU(True),
+        nn.Linear(2*dim, 1)
+    )
+    self.find_target_patch = nn.Sequential(
         nn.Linear(dim, 2*dim),
         nn.ReLU(True),
         nn.Linear(2*dim, 1)
@@ -619,53 +624,42 @@ class ObjectPredictor(nn.Module):
       c=channels
     )
 
-  def forward(self, patch, internal_state, object_id):
+  def forward(self, patch, internal_state):
     """
     COMPUTATION FLOW:
-    1. Embed patches
-    2. Add positional information
-    3. Embed internal state
-    4. Embed object ID
-    5. Concatenate all tokens
-    6. Process through Transformer
-    7. Extract patch tokens and predict object location
+    1. Embed patches and add positional information.
+    2. Embed internal state.
+    3. Concatenate all tokens and process through Transformer.
+    4. Extract patch tokens and pass through separate heads for hand and target prediction.
     
     Args:
       patch: [B, n_patchs, patch_dim] - flattened image patches
       internal_state: [B, 2] - internal state bins
-      object_id: [B, 1] - ID of the object to locate
     
     Returns:
-      preds: [B, n_patchs] - probability distribution over patches for object location
+      hand_logits: [B, n_patchs] - logits for hand location
+      target_logits: [B, n_patchs] - logits for target location
     """
-    # Step 1: Project patches from pixel space to embedding space
+    # Step 1: Embed patches and add positional info
     patch = self.to_patch_embedding(patch)
-
-    # Step 2: Add positional embeddings
     pos_emb = self.pos_embedding.to(patch.device, dtype=patch.dtype)
     patch = self.dropout(patch + pos_emb)
 
-    # Step 3: Embed internal state
+    # Step 2: Embed internal state
     internal_emb = torch.cat([self.is1_emb(internal_state[:, 0]), self.is2_emb(internal_state[:, 1])], dim=-1)
     internal_emb = self.is_proj(internal_emb).unsqueeze(1)
 
-    # Step 4: Embed object ID
-    object_emb = self.object_emb(object_id)
+    # Step 3: Concatenate and process through Transformer
+    tokens = [patch, internal_emb]
+    patch_tokens = torch.cat(tokens, dim=1)
+    processed_tokens = self.transformer(patch_tokens)
 
-    # Step 5: Concatenate all tokens
-    tokens = [patch, internal_emb, object_emb]
-    patch = torch.cat(tokens, dim=1)
+    # Step 4: Extract patch embeddings and predict with separate heads
+    patch_embeddings = processed_tokens[:, :self.n_patchs]
+    hand_logits = self.find_hand_patch(patch_embeddings).squeeze(-1)
+    target_logits = self.find_target_patch(patch_embeddings).squeeze(-1)
 
-    # Step 6: Process through Transformer
-    patch = self.transformer(patch)
-
-    # Step 7: Extract patch tokens
-    patchs_wo_extra = patch[:, :self.n_patchs]
-
-    # Step 8: Predict object patch logits
-    logits = self.find_object_patch(patchs_wo_extra).squeeze(-1)
-
-    return logits
+    return hand_logits, target_logits
 
 
 class NSPTrainer:  # NextStatePredictor
@@ -719,7 +713,7 @@ class NSPTrainer:  # NextStatePredictor
             'use_tf_logger':                     True,
             'save_dir':                          'NSP_experiments/',
             'log_dir':                           'runs/',
-            'exp_name':                          'nsp_twosteps_big_rollout_actionIS_newPE',
+            'exp_name':                          'nsp_twosteps_big_rollout_actionIS_newPE_multiheadOP',
             'seed':                              42,
             'rollout_size':                      30,    # Max episode length for sampling
             'use_internal_state':                True,  # Include internal state in training
@@ -876,8 +870,6 @@ class NSPTrainer:  # NextStatePredictor
         is1_n_values=self.config['internal_state_n_values'][0],
         is2_n_values=self.config['internal_state_n_values'][1],
         is_emb_dim=self.config['internal_state_emb_dim'],
-        n_objects=2,  # hand and target
-        object_emb_dim=16
     ).to(self.device)
     print(f'Instanciate object_predictor with {self.get_train_params(self.object_predictor):,} params')
   
@@ -1047,24 +1039,37 @@ class NSPTrainer:  # NextStatePredictor
     hand_patch_index = torch.zeros(buffer.capacity, 1, dtype=torch.long)
     target_patch_index = torch.zeros(buffer.capacity, 1, dtype=torch.long)
 
+    patch_h = self.object_predictor.patch_height
+    patch_w = self.object_predictor.patch_width
+    channels = self.object_predictor.channels
+    n_patches = self.object_predictor.n_patchs
+
     for i in tqdm(range(0, buffer.size, batch_size)):
         images = buffer.image[i:i+batch_size]
         for j, img in enumerate(images):
             # The image is normalized, so we need to denormalize it
             img = (img + 1) / 2
-            img_np = img.permute(1, 2, 0).cpu().numpy()
             
-            # --- hand_patch_index ---
-            patch_idx = find_object_patch_index(img_np, HAND_CONDITION, self.config['resize_to'], self.object_predictor.patch_height)
+            # --- Hand detection (Patch Scoring) ---
+            img_on_device = img.to(self.device)
+            img_batch = img_on_device.unsqueeze(0)
             
-            if patch_idx is not None:
-                hand_patch_index[i+j] = patch_idx
+            patches_flat = self.object_predictor.patchify(img_batch)
+            
+            patches = patches_flat.view(n_patches, channels, patch_h, patch_w)
+            patches_np = patches.permute(0, 2, 3, 1).cpu().numpy()
+            
+            patch_idx_hand = find_object_patch_index_from_scoring(patches_np, HAND_CONDITION)
+            
+            if patch_idx_hand is not None:
+                hand_patch_index[i+j] = patch_idx_hand
 
-            # --- target_patch_index ---
-            patch_idx = find_object_patch_index(img_np, TARGET_CONDITION, self.config['resize_to'], self.object_predictor.patch_height)
-            
-            if patch_idx is not None:
-                target_patch_index[i+j] = patch_idx
+            # --- Target detection (Centroid) ---
+            img_np = img.permute(1, 2, 0).cpu().numpy()
+            patch_idx_target = find_object_patch_index_from_centroid(img_np, TARGET_CONDITION, self.config['resize_to'], self.object_predictor.patch_height)
+
+            if patch_idx_target is not None:
+                target_patch_index[i+j] = patch_idx_target
     
     buffer.add_variable(hand_patch_index, 'hand_patch_index')
     buffer.add_variable(target_patch_index, 'target_patch_index')
@@ -1721,7 +1726,7 @@ class NSPTrainer:  # NextStatePredictor
       # === UPDATE PROGRESS BAR ===
       pbar.set_description(f'Mean_acc: {mean_accuracy:.3f}')
   
-  def train_object_predictor(self, n_epochs=100, n_steps_per_epoch=4, batch_size=32):
+  def train_object_predictor(self, n_epochs=300, n_steps_per_epoch=4, batch_size=32):
     """
     Train the ObjectPredictor model.
     """
@@ -1742,14 +1747,11 @@ class NSPTrainer:  # NextStatePredictor
 
         patch = self.object_predictor.patchify(image)
 
-        # --- Train on hand ---
-        object_id_hand = torch.zeros(batch_size, 1, dtype=torch.long, device=self.device)
-        hand_preds = self.object_predictor(patch, internal_state, object_id_hand)
+        # Get simultaneous predictions for hand and target
+        hand_preds, target_preds = self.object_predictor(patch, internal_state)
+        
+        # Calculate losses for both heads
         loss_hand = self.ce_criterion(hand_preds, hand_patch_index)
-
-        # --- Train on target ---
-        object_id_target = torch.ones(batch_size, 1, dtype=torch.long, device=self.device)
-        target_preds = self.object_predictor(patch, internal_state, object_id_target)
         loss_target = self.ce_criterion(target_preds, target_patch_index)
         
         loss = loss_hand + loss_target
@@ -1760,10 +1762,10 @@ class NSPTrainer:  # NextStatePredictor
         
         # --- Compute Accuracy ---
         with torch.no_grad():
-            hand_pred_idx = torch.argmax(hand_preds, dim=1)
-            hand_acc = (hand_pred_idx == hand_patch_index).float().mean().item()
-            target_pred_idx = torch.argmax(target_preds, dim=1)
-            target_acc = (target_pred_idx == target_patch_index).float().mean().item()
+          hand_pred_idx = torch.argmax(hand_preds, dim=1)
+          hand_acc = (hand_pred_idx == hand_patch_index).float().mean().item()
+          target_pred_idx = torch.argmax(target_preds, dim=1)
+          target_acc = (target_pred_idx == target_patch_index).float().mean().item()
 
         mean_hand_loss += loss_hand.item()
         mean_target_loss += loss_target.item()
@@ -1807,14 +1809,11 @@ class NSPTrainer:  # NextStatePredictor
 
       patch = self.object_predictor.patchify(image)
 
-      # --- Hand ---
-      object_id_hand = torch.zeros(batch_size, 1, dtype=torch.long, device=self.device)
-      hand_preds = self.object_predictor(patch, internal_state, object_id_hand)
-      loss_hand = self.ce_criterion(hand_preds, hand_patch_index)
+      # Get simultaneous predictions
+      hand_preds, target_preds = self.object_predictor(patch, internal_state)
 
-      # --- Target ---
-      object_id_target = torch.ones(batch_size, 1, dtype=torch.long, device=self.device)
-      target_preds = self.object_predictor(patch, internal_state, object_id_target)
+      # Calculate losses
+      loss_hand = self.ce_criterion(hand_preds, hand_patch_index)
       loss_target = self.ce_criterion(target_preds, target_patch_index)
       
       # --- Compute Accuracy ---
@@ -1840,11 +1839,8 @@ class NSPTrainer:  # NextStatePredictor
       self.tf_logger.add_scalar('test_object_predictor_target_acc', mean_target_acc, epoch)
 
     self.object_predictor.train()
-
+        
   def train(self):
-    """
-    Main entry point: fill buffer then train.
-    """
     # Step 1: Collect environment transitions
     self.fill_memory(self.train_buffer, n_episodes=self.config['n_train_episodes'])
     self.fill_memory(self.test_buffer, n_episodes=self.config['n_test_episodes'], act='best')
@@ -1859,6 +1855,8 @@ class NSPTrainer:  # NextStatePredictor
       self.add_hand_and_target_patch_indices_to_memory(self.test_buffer)
       print('Training ObjectPredictor...')
       self.train_object_predictor()
+    
+    # Step 4: train an RL policy using the ObjectPredictor for distance to goal computation
 
 
 if __name__ == '__main__':
