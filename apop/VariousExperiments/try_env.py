@@ -53,7 +53,7 @@ while running:
                 _, _, frame, _, _, _, _ = rb.prepare_data(None, None, frame, None, None, None, None)
                 
                 # Update the plot and calculate patch indices
-                processed_frame = frame.squeeze().permute(1, 2, 0).numpy()
+                processed_frame = (frame.squeeze().permute(1, 2, 0).numpy() + 1) / 2
                 plot.update(processed_frame)
                 
                 # Retrieve and print the patch indices for the ViT model

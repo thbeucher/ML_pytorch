@@ -281,6 +281,21 @@ class NSPTrainer(NextStatePredictorTrainer):
     imageio.mimsave("sequence.gif", frames, fps=10)
   
   def compute_gae(self, rewards, values, masks, next_value, gamma, lmbda):
+    """
+    Compute the Generalized Advantage Estimation (GAE) for a trajectory.
+
+    Args:
+      rewards (torch.Tensor): The rewards for each step in the trajectory.
+      values (torch.Tensor): The value estimates for each step in the trajectory.
+      masks (torch.Tensor): The masks for each step in the trajectory (0 for terminal states).
+      next_value (torch.Tensor): The value estimate for the state after the last step.
+      gamma (float): The discount factor.
+      lmbda (float): The GAE lambda parameter.
+
+    Returns:
+      advantages (torch.Tensor): The computed advantages for each step.
+      returns (torch.Tensor): The computed returns for each step.
+    """
     T = rewards.size(0)
 
     # ---- Generalized Advantage Estimation (GAE) ----
@@ -292,14 +307,25 @@ class NSPTrainer(NextStatePredictorTrainer):
       next_values = next_value if t == T - 1 else values[t + 1]
       # TD error δ_t
       delta = rewards[t] + gamma * next_values * masks[t] - values[t]
-      # GAE recursion
+      # GAE recursion: A(t) = delta_t + gamma * lambda * A(t+1)
       last_gae = delta + gamma * lmbda * masks[t] * last_gae
       advantages[t] = last_gae
 
+    # The returns are the advantages plus the value estimates.
     returns = advantages + values
     return advantages, returns
 
   def reinforce_update_is_goal_networks(self, trajs, next_value, gamma, lmbda, entropy_coef):
+    """
+    Update the policy and value networks using the REINFORCE algorithm with GAE.
+
+    Args:
+      trajs (dict): Dictionary containing the collected trajectory data.
+      next_value (torch.Tensor): The value estimate for the last state in the trajectory.
+      gamma (float): The discount factor.
+      lmbda (float): The GAE lambda parameter.
+      entropy_coef (float): The coefficient for the entropy bonus.
+    """
     # Convert lists to tensors [T, B]
     rewards = torch.stack(trajs['rewards'])
     values = torch.stack(trajs['values'])
@@ -309,22 +335,27 @@ class NSPTrainer(NextStatePredictorTrainer):
 
     advantages, returns = self.compute_gae(rewards, values, masks, next_value, gamma, lmbda)
 
-    # Normalize advantages for stability
+    # Normalize advantages for stability. This is a common trick to improve training stability.
     advantages = advantages.view(-1)
     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
     advantages = advantages.view(returns.shape)
 
     # --- Policy Loss ---
+    # The policy loss is the negative of the log probability of the action multiplied by the advantage.
+    # An entropy bonus is added to encourage exploration.
     loss_policy = -(log_probs * advantages.detach()).mean() - entropy_coef * entropies.mean()
 
     # --- Value Loss ---
+    # The value loss is the mean squared error between the predicted values and the returns.
     loss_value = self.mse_criterion(values, returns.detach())
 
-    # Update
+    # --- Update Networks ---
+    # Update the policy network.
     self.opt_policy.zero_grad()
     loss_policy.backward()
     self.opt_policy.step()
 
+    # Update the value network.
     self.opt_value.zero_grad()
     loss_value.backward()
     self.opt_value.step()
@@ -335,6 +366,17 @@ class NSPTrainer(NextStatePredictorTrainer):
                                   value_coef=0.5, entropy_coef=0.01, n_epochs=4, max_grad_norm=0.5):
     """
     Perform PPO updates using a collected rollout.
+
+    Args:
+      traj (dict): Dictionary containing the collected trajectory data.
+      next_value (torch.Tensor): The value estimate for the last state in the trajectory.
+      gamma (float): The discount factor.
+      lmbda (float): The GAE lambda parameter.
+      clip_eps (float): The PPO clipping parameter.
+      value_coef (float): The coefficient for the value loss.
+      entropy_coef (float): The coefficient for the entropy bonus.
+      n_epochs (int): The number of epochs to update the networks.
+      max_grad_norm (float): The maximum norm for gradient clipping.
 
     PPO key ideas implemented here:
     - GAE advantage estimation
@@ -349,7 +391,7 @@ class NSPTrainer(NextStatePredictorTrainer):
 
     advantages, returns = self.compute_gae(rewards, values, masks, next_value, gamma, lmbda)
 
-    # ---- Flatten time and batch dimensions ----
+    # ---- Flatten time and batch dimensions for easier processing ----
     states = torch.cat(traj['states'])
     goals = torch.cat(traj['goals'])
     actions = torch.cat(traj['actions'])
@@ -359,10 +401,11 @@ class NSPTrainer(NextStatePredictorTrainer):
     advantages = advantages.view(-1)
     returns = returns.view(-1)
 
-    # --- Normalize advantages ---
+    # --- Normalize advantages for stability ---
     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
     # --- PPO epochs ---
+    # The same rollout data is used for multiple epochs to improve data efficiency.
     for _ in range(n_epochs):
       # Recompute policy π(a | s, g) with CURRENT parameters
       logits = self.goal_policy(states, goals)
@@ -375,12 +418,15 @@ class NSPTrainer(NextStatePredictorTrainer):
       new_values = self.goal_value(states, goals).squeeze(-1)
 
       # ---- PPO policy loss (clipped surrogate) ----
+      # The ratio is the probability of the action under the new policy divided by the probability under the old policy.
       ratio = torch.exp(new_log_probs - old_log_probs)
+      # The surrogate loss is the minimum of the normal objective and the clipped objective.
       surr1 = ratio * advantages
       surr2 = torch.clamp(ratio, 1 - clip_eps, 1 + clip_eps) * advantages
       policy_loss = -torch.min(surr1, surr2).mean()
 
       # ---- PPO value loss (clipped) ----
+      # The value loss is also clipped to prevent large updates.
       value_clipped = old_values + \
         (new_values - old_values).clamp(-clip_eps, clip_eps)
 
@@ -389,8 +435,10 @@ class NSPTrainer(NextStatePredictorTrainer):
         (value_clipped - returns).pow(2)
       ).mean()
 
+      # The total loss is a combination of the policy loss, value loss, and entropy bonus.
       loss = policy_loss + value_coef * value_loss - entropy_coef * entropy
 
+      # --- Update Networks ---
       self.opt_policy.zero_grad()
       self.opt_value.zero_grad()
       loss.backward()
@@ -431,31 +479,45 @@ class NSPTrainer(NextStatePredictorTrainer):
     """
     Collect an on-policy rollout using the current goal-conditioned policy.
 
+    Args:
+      batch (dict): A batch of data from the replay buffer.
+      mean_success_rate (float): The mean success rate of the policy.
+      max_horizon (int): The maximum number of steps in the rollout.
+
+    Returns:
+      trajs (dict): A dictionary containing the collected trajectory data.
+      final_val (torch.Tensor): The value estimate for the last state in the trajectory.
+      reached (torch.Tensor): A boolean tensor indicating whether the goal was reached.
+
     IMPORTANT:
     - This function must NOT keep computation graphs.
     - PPO replays data, not graphs.
     """
     # Current internal state s_t
     is_c = batch['internal_state']  # internal_state_current [B, 2]
+    # Goal internal state s_g
     is_g = batch['next_internal_state'].clone()
 
-    # Fraction of long goals
+    # ---- Curriculum Learning for Goal Selection ----
+    # Fraction of long goals is determined by the success rate of the policy.
     p_long = self.long_goal_fraction(mean_success_rate)
 
     if p_long > 0.0:
       B = is_c.size(0)
 
-      # Which batch elements get long goals
+      # Which batch elements get long goals (from other trajectories in the batch)
       long_mask = torch.rand(B, device=is_c.device) < p_long
 
       if long_mask.any():
+        # Permute goals to create "long" goals that are harder to reach.
         perm = torch.randperm(B, device=is_c.device)
         is_g[long_mask] = is_g[perm][long_mask]
 
-    # Buffers for trajectory
+    # Buffers to store the trajectory data
     trajs = {'states': [], 'goals': [], 'actions': [], 'log_probs': [], 'values': [],
              'rewards': [], 'masks': [], 'entropies': []}
 
+    # ---- Rollout Loop ----
     for t in range(max_horizon):
       # ---- Policy forward pass π(a | s, g) ----
       a, log_p, ent = self.goal_policy.sample(is_c, is_g)
@@ -463,19 +525,21 @@ class NSPTrainer(NextStatePredictorTrainer):
       # Goal-conditioned value estimate V(s, g)
       val = self.goal_value(is_c, is_g).squeeze(-1)
 
-      # Internal World model is frozen and used only to simulate transitions
+      # The Internal World model is frozen and used only to simulate transitions in the imagination.
       with torch.no_grad():
-        # Predict next state
+        # Predict next internal state using the internal world model
         is1_logits, is2_logits = self.internal_world_model(a, is_c)
         # Discrete next internal state
         is_next = torch.stack([is1_logits.argmax(-1), is2_logits.argmax(-1)], dim=1)
         
         reached = (is_next == is_g).all(dim=1)
+        # The reward is 0 if the goal is reached, and -0.1 otherwise (sparse reward).
         reward = torch.where(reached, 0.0, -0.1)
-        # Mask = 0 when terminal (goal reached), 1 otherwise
+        # The mask is 0 when the episode is terminal (goal reached), and 1 otherwise.
         mask = (~reached).float()
 
-      # Detaching is CRITICAL: PPO must not reuse graphs
+      # ---- Store trajectory data ----
+      # Detaching is CRITICAL: PPO must not reuse computation graphs from the rollout.
       trajs['states'].append(is_c.detach())
       trajs['goals'].append(is_g.detach())
       trajs['actions'].append(a.detach())
@@ -495,21 +559,29 @@ class NSPTrainer(NextStatePredictorTrainer):
     return trajs, final_val, reached
   
   def train_is_goal_policy(self):
+    """
+    Train the internal state goal-conditioned policy using PPO.
+    This function orchestrates the training loop, including:
+    - On-policy rollout collection.
+    - PPO updates.
+    - Logging and model saving.
+    """
     print('Training Internal State Goal policy...')
     self.goal_policy.train()
     self.goal_value.train()
 
-    # Freeze internal state world model
+    # Freeze the internal state world model, as it's used as a fixed simulator.
     self.internal_world_model.eval()
     for p in self.internal_world_model.parameters():
       p.requires_grad = False
     
-    # instanciate optimizers
+    # Instantiate optimizers for the policy and value networks.
     self.opt_policy = torch.optim.Adam(self.goal_policy.parameters(), lr=1e-4)
     self.opt_value = torch.optim.Adam(self.goal_value.parameters(), lr=1e-4)
 
-    # training loop
+    # ---- Training Loop Initialization ----
     self.long_goal = False
+    # Entropy coefficient is annealed during training to balance exploration and exploitation.
     entropy_coef = self.config['isgp_entropy_coef_start']
     best_success_rate = -torch.inf
     mean_policy_loss = 0.0
@@ -518,16 +590,16 @@ class NSPTrainer(NextStatePredictorTrainer):
     mean_success_rate_window = deque(maxlen=100)
     pbar = tqdm(range(self.config['isgp_n_updates']))
     for step in pbar:
+      # Sample a batch of starting states from the replay buffer.
       batch = self.replay_buffer.sample(self.config['isgp_batch_size'])
 
-      # Collect ON-POLICY rollout
+      # ---- 1. Collect ON-POLICY rollout ----
+      # The agent interacts with its imagined environment to collect data.
       trajs, final_val, reached = self.collect_is_goal_rollout(batch,
                                                                mean_success_rate,
-                                                              #  self.config['isgp_mean_success_rate_curriculum'],
                                                                self.config['isgp_max_horizon'])
       
-      # --- 2. Update Networks ---
-      # loss_policy, loss_value = self.update_is_goal_networks(trajs, final_val, gamma, lmbda, entropy_coef)
+      # ---- 2. Update Networks using PPO ----
       loss_policy, loss_value = self.ppo_update_is_goal_networks(trajs,
                                                                  final_val,
                                                                  gamma=self.config['isgp_gamma'],
@@ -537,21 +609,25 @@ class NSPTrainer(NextStatePredictorTrainer):
                                                                  entropy_coef=entropy_coef,
                                                                  n_epochs=4)
 
-      # Gradual decay
+      # ---- Anneal entropy coefficient ----
       entropy_coef = max(self.config['isgp_entropy_coef_end'],
                          self.config['isgp_entropy_coef_start'] * (1 - step / self.config['isgp_n_updates']))
 
+      # ---- Update and log metrics ----
       mean_policy_loss += (loss_policy - mean_policy_loss) / (step + 1)
       mean_value_loss += (loss_value - mean_value_loss) / (step + 1)
       # mean_success_rate += (reached.float().mean() - mean_success_rate) / (step + 1)
+      # Use a sliding window to get a more stable estimate of the success rate.
       mean_success_rate_window.append(reached.float().mean().item())
       mean_success_rate = sum(mean_success_rate_window) / len(mean_success_rate_window)
     
+      # ---- Save the best models ----
       if mean_success_rate > best_success_rate:
         self.save_model(self.goal_policy, 'goal_policy')
         self.save_model(self.goal_value, 'goal_value')
         best_success_rate = mean_success_rate
       
+      # ---- Log to Tensorboard ----
       if self.tf_logger is not None:
         self.tf_logger.add_scalar('policy_loss', mean_policy_loss, step)
         self.tf_logger.add_scalar('value_loss', mean_value_loss, step)
@@ -1259,16 +1335,19 @@ class NSPTrainer(NextStatePredictorTrainer):
 
   @torch.no_grad()
   def autoplay(self):
-    # self.img_goal_predictor.eval()
+    """
+    Run the trained agent in the environment and visualize its behavior.
+    The agent uses its learned models to predict goals and plan actions.
+    """
+    # ---- Set all models to evaluation mode ----
     self.goal_image_predictor.eval()
     self.is_predictor.eval()
     self.goal_policy.eval()
-    # self.rnn_gisp.eval()
-    # self.goal_is_predictor.eval()
     self.image_cleaner.eval()
 
-    pygame.init()  # Initialize pygame for keyboard input
-    plt.ion()   # interactive mode (non-blocking)
+    # ---- Initialize Pygame and Matplotlib for visualization ----
+    pygame.init()
+    plt.ion()   # Interactive mode for non-blocking plot updates
 
     fig, ax = plt.subplots(figsize=(3, 3))
     goal_im = ax.imshow(np.zeros((32, 32, 3), dtype=np.uint8))
@@ -1277,12 +1356,15 @@ class NSPTrainer(NextStatePredictorTrainer):
     fig.canvas.draw()
     fig.show()
 
+    # ---- Main Loop Variables ----
     running = True
     force_reset = False
 
+    # ---- Reset Environment ----
     obs, _ = self.env.reset()
     img = self.env.render()
 
+    # ---- Helper function to convert tensor to numpy image ----
     def tensor_to_uint8(img):
       img = img.squeeze(0).permute(1, 2, 0).detach().cpu().numpy()
 
@@ -1293,18 +1375,19 @@ class NSPTrainer(NextStatePredictorTrainer):
       img = (img * 255).astype(np.uint8)
       return img
 
+    # ---- Helper function to format data for the models ----
     def format_data(obs, img):
       obs, _, img, *_ = self.replay_buffer.prepare_data(obs//5, None, img, None, None, None, None)
       obs, img = obs.unsqueeze(0).to(self.device), img.unsqueeze(0).to(self.device)
       return obs, img  # [1, 2], [1, 3, 32, 32]
 
+    # ---- Helper function to predict the goal ----
     def find_goal(img, obs):
-      # --- From GoalInternalStatePredictor --- #
-      # _, _, g1_logits, g2_logits  = self.goal_is_predictor(img)
-      # img_goal = None
-      # --------------------------------------- #
-      # img_goal = self.img_goal_predictor(img)
+      # This function uses the learned models to predict a goal image and its corresponding internal state.
+      # Different strategies are commented out, showing the flexibility of the framework.
+
       # --- From GoalImagePredictor --- #
+      # 1. Predict a goal image from the current image.
       condition = {'x_cond': img}
       img_goal = rk45_sampling(
         self.goal_image_predictor,
@@ -1313,81 +1396,56 @@ class NSPTrainer(NextStatePredictorTrainer):
         condition=condition,
         n_steps=4
       )
+      # 2. Clean the predicted goal image.
       img_goal = self.image_cleaner(self.clamp_denorm_fn(img_goal[-1]))
+      # 3. Predict the internal state from the cleaned goal image.
       g1_logits, g2_logits = self.is_predictor(img_goal)
       # ------------------------------- #
       goal = torch.stack([g1_logits.argmax(-1), g2_logits.argmax(-1)], dim=1)  # [1, 2]
-      # --- From RNN IS Goal Predictor --- #
-      # g1_logits, g2_logits = self.rnn_gisp(img, condition={'internal_state': obs})
-      # g1_logits, g2_logits = g1_logits.argmax(-1)[:, -1], g2_logits.argmax(-1)[:, -1]
-      # goal = torch.stack([g1_logits, g2_logits], dim=1)
-      # img_goal = None
-      # ---------------------------------- #
       return goal, img_goal
-
-    # --- Agent goal prediction ---
+    # ---- Initial Goal Prediction ----
     obs, img = format_data(obs, img)
-
-    # image_history = deque([img], maxlen=self.config.get('rnngisp_max_episode_length', 50))
-    # obs_history = deque([obs], maxlen=self.config.get('rnngisp_max_episode_length', 50))
-
-    # img = torch.stack(list(image_history), dim=1)  # [1, T, 3, 32, 32]
-    # obs = torch.stack(list(obs_history), dim=1)  # [1, T, 2]
-
     goal, img_goal = find_goal(img, obs)
 
+    # ---- Autoplay Loop ----
     while running:
-      # Capture keyboard events
+      # ---- Handle User Input ----
       for event in pygame.event.get():
-        if event.type == pygame.QUIT:  # Close window
+        if event.type == pygame.QUIT:
           running = False
         elif event.type == pygame.KEYDOWN:
           if event.key == pygame.K_q:  # Quit when 'Q' is pressed
             running = False
-          elif event.key == pygame.K_r:
+          elif event.key == pygame.K_r:  # Force reset
             force_reset = True
 
-      # --- Agent action ---
+      # ---- Agent Action Selection ----
+      # The agent selects an action based on its current state and the predicted goal.
       action, *_ = self.goal_policy.sample(obs, goal)
-      # action, *_ = self.goal_policy.sample(obs[:, -1], goal)
-
-      # --- Perform action ---
+      # ---- Environment Step ----
       obs, reward, terminated, truncated, info = self.env.step(action)
       img = self.env.render()
 
-      # --- Format data ---
+      # ---- Format Data ----
       obs, img = format_data(obs, img)
-
-      # image_history.append(img)
-      # obs_history.append(obs)
-      # img = torch.stack(list(image_history), dim=1)
-      # obs = torch.stack(list(obs_history), dim=1)
-
-      # goal, img_goal = find_goal(img, obs)
-
       print(f'{terminated=} | {obs=} | {goal=}')
+
+      # ---- Handle Episode End ----
       if terminated or truncated or force_reset:
         force_reset = False
         print('RESET ENV!')
-        # image_history.clear()
-        # obs_history.clear()
-
+        
+        # Reset the environment and get a new starting state.
         obs, _ = self.env.reset(options={'only_target': True})
         img = self.env.render()
         obs, img = format_data(obs, img)
 
-        # image_history.append(img)
-        # img = torch.stack(list(image_history), dim=1)
-
-        # obs_history.append(obs)
-        # obs = torch.stack(list(obs_history), dim=1)
-
-        # --- Agent goal prediction ---
+        # ---- Predict a new goal for the new episode ----
         goal, img_goal = find_goal(img, obs)
 
+      # ---- Update Visualization ----
       if img_goal is not None:
         goal_np = tensor_to_uint8(img_goal)
-
         goal_im.set_data(goal_np)
         ax.draw_artist(ax.patch)
         ax.draw_artist(goal_im)

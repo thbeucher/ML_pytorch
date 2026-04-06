@@ -166,11 +166,9 @@ class InteractivePlot:
             # --- Find Object and Calculate Index ---
             center = find_object_center(frame, obj.color_condition)
             
-            center = find_object_center(frame, obj.color_condition)
-            
             linestyle = 'solid'  # Default to solid line for active detection
             
-            if center:
+            if center is not None:
                 # --- CASE 1: OBJECT IS FOUND ---
                 center_x, center_y = center
                 # 1. Convert pixel center to 2D patch grid coordinates.
