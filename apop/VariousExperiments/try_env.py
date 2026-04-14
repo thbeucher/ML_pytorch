@@ -60,7 +60,7 @@ while running:
                 hand_idx = plot.get_patch_index('hand')
                 target_idx = plot.get_patch_index('target')
                 
-                print(f"Action: {action}, Reward: {reward:.4f} | Hand Index: {hand_idx}, Target Index: {target_idx}")
+                print(f"Action: {action}, Reward: {reward:.4f} | Hand Index: {hand_idx}, Target Index: {target_idx}, Joint Angles: {obs}")
 
                 if terminated or truncated:
                     obs, info = env.reset(options={'only_target': True})  # Reset environment if episode ends

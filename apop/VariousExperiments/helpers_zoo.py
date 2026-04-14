@@ -160,3 +160,56 @@ def gradient_penalty(critic, real, fake, device, gp_lambda=10.0):
   grad_norm = gradients.norm(2, dim=1)
   gp = gp_lambda * ((grad_norm - 1) ** 2).mean()
   return gp
+
+
+def random_patch_mask(patch_embeddings, mask_prob=0.25):
+  """
+  Randomly zeros out a percentage of patches.
+  Args:
+      patch_embeddings: [B, N, D] tensor
+      mask_prob: Float between 0 and 1 (0.25 = mask 25% of patches)
+  """
+  B, N, D = patch_embeddings.shape
+  if mask_prob <= 0:
+    return patch_embeddings
+
+  # Create a random mask of 1s and 0s
+  # bernoulli(0.75) gives 1 with 75% probability (the kept patches)
+  mask = torch.bernoulli(torch.full((B, N, 1), 1 - mask_prob)).to(patch_embeddings.device)
+  
+  # Apply mask and scale to maintain activation magnitude (like Dropout)
+  return (patch_embeddings * mask) / (1 - mask_prob)
+
+
+def mask_specific_patch(patch_embeddings, patch_index):
+  """
+  Zeros out the exact patch where the object is.
+  patch_index: [B] tensor of indices
+  """
+  B, N, D = patch_embeddings.shape
+  # Create a mask of ones
+  mask = torch.ones((B, N, 1), device=patch_embeddings.device)
+  
+  # Set the specific patch index to zero for each batch item
+  batch_indices = torch.arange(B, device=patch_embeddings.device)
+  mask[batch_indices, patch_index, 0] = 0
+  
+  return patch_embeddings * mask
+
+
+def create_gif_from_images(images, filename, duration=100):
+  """
+  Creates a GIF from a list of PIL images or numpy arrays.
+  """
+  import imageio
+  import numpy as np
+  
+  pil_images = []
+  for img in images:
+    if isinstance(img, torch.Tensor):
+      img = img.permute(1, 2, 0).cpu().numpy()
+    if img.dtype == np.float32 or img.dtype == np.float64:
+      img = (img * 255).astype(np.uint8)
+    pil_images.append(img)
+
+  imageio.mimsave(filename, pil_images, duration=duration)
