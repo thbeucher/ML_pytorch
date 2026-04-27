@@ -1,8 +1,32 @@
+"""
+This module contains a collection of helper functions for various machine learning experiments.
+
+| Function                | Description                                                               |
+|-------------------------|---------------------------------------------------------------------------|
+| `exponential_schedule`  | Generates an exponential learning rate schedule.                          |
+| `linear_schedule`       | Generates a linear learning rate schedule.                                |
+| `cosine_schedule`       | Generates a cosine learning rate schedule.                                |
+| `sample_time`           | Samples time for flow matching, biased towards smaller values.            |
+| `flow_matching_loss`    | Calculates the flow matching loss for training a flow-based model.        |
+| `euler_sampling`        | Performs sampling using the Euler method for a flow-based model.          |
+| `rk45_step`             | Performs a single step of the Runge-Kutta 45 (Dormand-Prince) method.     |
+| `rk45_sampling`         | Performs sampling using the RK45 method for a flow-based model.           |
+| `gradient_penalty`      | Calculates the gradient penalty for a critic in a GAN (WGAN-GP).          |
+| `random_patch_mask`     | Randomly masks out a percentage of patch embeddings.                      |
+| `mask_specific_patch`   | Masks a specific patch in the patch embeddings.                           |
+| `create_gif_from_images`| Creates a GIF from a list of images.                                      |
+| `set_seed`              | Sets the random seed for reproducibility.                                 |
+"""
+import os
+import json
 import math
 import torch
+import random
+import numpy as np
 import torch.nn.functional as F
 
 from torch.autograd import grad
+from typing import Callable, Optional, Tuple
 
 
 def exponential_schedule(epoch, n_epochs_decay, start=0.1, end=0.75):
@@ -213,3 +237,55 @@ def create_gif_from_images(images, filename, duration=100):
     pil_images.append(img)
 
   imageio.mimsave(filename, pil_images, duration=duration)
+
+
+def set_seed(seed=42, device='cuda'):
+  """Set random seeds for reproducibility across PyTorch, NumPy, and Python."""
+  torch.manual_seed(seed)
+  np.random.seed(seed)
+  random.seed(seed)
+  # For deterministic behavior on GPU (may be slower)
+  if device == 'cuda':
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
+def dump_json_data(save_dir, exp_name, data):
+  """Save configuration to JSON file for reproducibility."""
+  with open(os.path.join(save_dir, f"{exp_name}.json"), 'w') as f:
+    json.dump(data, f)
+
+
+def find_object_center(
+    frames: torch.Tensor,
+    color_condition: Callable[[torch.Tensor], torch.Tensor]
+) -> torch.Tensor:
+  """
+  Finds the geometric center (mean) of pixels that match a given color condition for a batch of frames.
+
+  Args:
+      frames (torch.Tensor): A tensor of shape [B, C, H, W].
+      color_condition (Callable): A function that takes the frames tensor and returns a boolean mask
+                                  of shape [B, H, W] where True indicates a pixel of interest.
+
+  Returns:
+      torch.Tensor: A tensor of shape [B, 2] containing the (x, y) coordinates of the center for each frame.
+                    If no object is found in a frame, the coordinates for that frame will be NaN.
+  """
+  mask = color_condition(frames)
+  batch_size = frames.shape[0]
+  centers = torch.zeros(batch_size, 2, device=frames.device, dtype=torch.float32)
+
+  for i in range(batch_size):
+    # nonzero(as_tuple=True) is the replacement for np.where(condition)
+    pixels = mask[i].nonzero(as_tuple=True)
+    if pixels[0].numel() > 0:
+      y_coords, x_coords = pixels
+      center_y = torch.mean(y_coords.float())
+      center_x = torch.mean(x_coords.float())
+      centers[i, 0] = center_x
+      centers[i, 1] = center_y
+    else:
+      centers[i, :] = float('nan')
+  
+  return centers

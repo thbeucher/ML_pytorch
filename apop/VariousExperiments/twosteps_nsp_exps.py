@@ -1140,7 +1140,7 @@ class NSPTrainer:  # NextStatePredictor
       # === UPDATE PROGRESS BAR ===
       pbar.set_description(f'Mean_acc: {mean_accuracy:.3f}')
   
-  def train_object_predictor(self, n_epochs=100, n_steps_per_epoch=4, batch_size=32):
+  def train_object_predictor(self, n_epochs=200, n_steps_per_epoch=4, batch_size=32):
     """
     Train the ObjectPredictor model.
     """
@@ -1185,6 +1185,8 @@ class NSPTrainer:  # NextStatePredictor
           target_preds_binary = (torch.sigmoid(target_preds) > 0.5).float()
           target_acc = (target_preds_binary == target_patch_index).float().mean().item()
 
+          # Precision answers: “When the model predicts positive, how often is it correct?”
+          # Recall answers: “Out of all actual positives, how many did the model catch?”
           # --- Precision/Recall for Hand ---
           tp_hand = ((hand_preds_binary == 1) & (hand_patch_index == 1)).sum().item()
           fp_hand = ((hand_preds_binary == 1) & (hand_patch_index == 0)).sum().item()
@@ -1230,7 +1232,7 @@ class NSPTrainer:  # NextStatePredictor
         self.tf_logger.add_scalar('object_predictor_target_precision', mean_target_precision, epoch)
         self.tf_logger.add_scalar('object_predictor_target_recall', mean_target_recall, epoch)
 
-      pbar.set_description(f'Object Predictor - Hand Acc: {mean_hand_acc:.2f}, Target Acc: {mean_target_acc:.2f}')
+      pbar.set_description(f'Object Predictor - Hand Recall: {mean_hand_recall:.2f}, Target Recall: {mean_target_recall:.2f}')
 
       self.evaluate_object_predictor(epoch)
     
@@ -1249,7 +1251,6 @@ class NSPTrainer:  # NextStatePredictor
     mean_target_precision, mean_target_recall = 0.0, 0.0
     
     n_steps = self.test_buffer.size // batch_size
-    print(f'n_steps for evaluation: {n_steps} | {batch_size=} | {self.test_buffer.size=}')
     for step in range(n_steps):
       batch = self.test_buffer.sample(batch_size, distinct_episodes=True)
       
