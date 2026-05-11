@@ -2,6 +2,8 @@ import torch
 from torchvision import transforms
 from torch.utils.data import Dataset
 
+import helpers_zoo as hz
+
 
 class ReplayBuffer:
   def __init__(self,
@@ -39,6 +41,7 @@ class ReplayBuffer:
                                   device=self.device, dtype=torch.float32)
     self.reward = torch.zeros((capacity, 1), device=self.device, dtype=torch.float32)
     self.done = torch.zeros((capacity, 1), device=self.device, dtype=torch.long)
+    self.target_patch_gt = torch.full((capacity,), -1, dtype=torch.long, device=self.device)
 
     self.successful_episodes = []
 
@@ -49,6 +52,7 @@ class ReplayBuffer:
 
     self.episode_id = torch.zeros((capacity,), dtype=torch.long, device=self.device)
     self.current_episode_id = 0
+    self.hand_condition = None
 
     self.ptr = 0
     self.size = 0
@@ -56,7 +60,29 @@ class ReplayBuffer:
   def __len__(self):
     return self.size
   
-  def prepare_data(self, internal_state, action, image, reward, done, next_internal_state, next_image):
+  def set_hand_condition(self, hand_condition):
+    self.hand_condition = hand_condition
+
+  def _update_target_for_episode(self, episode_id, next_image_of_rewarded_state):
+    if self.hand_condition is None:
+      return
+
+    # find_object_center expects a batch.
+    pos = hz.find_object_center(next_image_of_rewarded_state.unsqueeze(0), self.hand_condition)
+
+    if not torch.isnan(pos).any():
+      # The image is 32x32, and the patch grid is 16x16. Patch size is 2x2.
+      patch_x = (pos[0, 0] / 2).long()
+      patch_y = (pos[0, 1] / 2).long()
+      patch_idx = patch_y * 16 + patch_x
+
+      # Update all transitions of this episode
+      episode_indices = torch.where(self.episode_id == episode_id)[0]
+      if episode_indices.numel() > 0:
+        self.target_patch_gt[episode_indices] = patch_idx.item()
+
+  def prepare_data(self, internal_state=None, action=None, image=None, reward=None, done=None,
+                   next_internal_state=None, next_image=None):
     if internal_state is not None and not torch.is_tensor(internal_state):
       internal_state = torch.as_tensor(internal_state, device=self.device, dtype=torch.long)
     if action is not None and not torch.is_tensor(action):
@@ -86,6 +112,7 @@ class ReplayBuffer:
     if done:
       if reward == sucess_reward:
         self.successful_episodes.append(self.current_episode_id)
+        self._update_target_for_episode(self.current_episode_id, next_image)
       self.current_episode_id += 1
 
     self.ptr = (self.ptr + 1) % self.capacity
@@ -126,6 +153,62 @@ class ReplayBuffer:
 
   def add_variable(self, variable, name):
     self.other_stored_obj[name] = variable.to(self.device)
+  
+  def get_batch(self, idxs):
+    batch = {
+      "internal_state": self.internal_state[idxs].to(self.target_device),
+      "action": self.action[idxs].to(self.target_device),
+      "image": self.image[idxs].to(self.target_device),
+      "reward": self.reward[idxs].to(self.target_device),
+      "done": self.done[idxs].to(self.target_device),
+      "next_internal_state": self.next_internal_state[idxs].to(self.target_device),
+      "next_image": self.next_image[idxs].to(self.target_device),
+      "target_patch_gt": self.target_patch_gt[idxs].to(self.target_device),
+      "loss": self.loss[idxs].to(self.target_device),
+    }
+    other_vars = {k: v[idxs].to(self.target_device) for k, v in self.other_stored_obj.items()}
+    return {**batch, **other_vars}
+  
+  def get_episodes_sizes(self):
+    """
+    Returns the size of each episode in the buffer.
+    """
+    if self.size == 0:
+      return torch.tensor([], dtype=torch.long, device=self.device), torch.tensor([], dtype=torch.long, device=self.device)
+
+    all_eids = self.episode_id[:self.size]
+    sorted_eids, _ = torch.sort(all_eids)
+    
+    unique_eids, counts = torch.unique_consecutive(sorted_eids, return_counts=True)
+    
+    return unique_eids, counts
+
+  def get_first_states(self):
+    """
+    Provides the first state of all available episodes.
+    The batch size will correspond to the number of episodes.
+    """
+    if self.size == 0:
+      return {}
+
+    all_eids = self.episode_id[:self.size]
+    
+    # Sort episode IDs to group them
+    sorted_eids, sort_perm = torch.sort(all_eids)
+    
+    # Original buffer indices, but sorted by episode ID
+    sorted_indices = torch.arange(self.size, device=self.device)[sort_perm]
+    
+    # Find the boundaries of each episode's segment
+    group_eids, counts = torch.unique_consecutive(sorted_eids, return_counts=True)
+    
+    # Calculate the starting position of each group in the sorted tensor
+    segment_starts = torch.cat([torch.tensor([0], device=self.device), torch.cumsum(counts, 0)[:-1]])
+    
+    # Get the indices within the `sorted_indices` tensor that correspond to the first state of each episode
+    # Retrieve the original buffer indices
+    first_state_idxs = sorted_indices[segment_starts]
+    return self.get_batch(first_state_idxs)
   
   def get_sampling_indices(self, batch_size, distinct_episodes=False):
     if distinct_episodes:
@@ -188,17 +271,7 @@ class ReplayBuffer:
 
   def sample(self, batch_size, distinct_episodes=False):
     idxs = self.get_sampling_indices(batch_size, distinct_episodes=distinct_episodes)
-    batch = {
-      "internal_state": self.internal_state[idxs].to(self.target_device),
-      "action": self.action[idxs].to(self.target_device),
-      "image": self.image[idxs].to(self.target_device),
-      "reward": self.reward[idxs].to(self.target_device),
-      "done": self.done[idxs].to(self.target_device),
-      "next_internal_state": self.next_internal_state[idxs].to(self.target_device),
-      "next_image": self.next_image[idxs].to(self.target_device),
-    }
-    other_vars = {k: v[idxs].to(self.target_device) for k, v in self.other_stored_obj.items()}
-    return {**batch, **other_vars}
+    return self.get_batch(idxs)
   
   def sample_prioritized(self, batch_size, alpha=1.0, eps=1e-6):
     """
@@ -217,19 +290,54 @@ class ReplayBuffer:
 
     # ---- sample indices ----
     idxs = torch.multinomial(probs, batch_size, replacement=True)
+    return self.get_batch(idxs)
+  
+  def sample_from_successful_episodes(self, batch_size, distinct_episodes=False):
+    """
+    Samples a batch of transitions exclusively from episodes that were successful.
+    If distinct_episodes is True, each transition in the batch comes from a different episode.
+    """
+    if not self.successful_episodes:
+      return None
 
-    batch = {
-        "internal_state": self.internal_state[idxs].to(self.target_device),
-        "action": self.action[idxs].to(self.target_device),
-        "image": self.image[idxs].to(self.target_device),
-        "reward": self.reward[idxs].to(self.target_device),
-        "done": self.done[idxs].to(self.target_device),
-        "next_internal_state": self.next_internal_state[idxs].to(self.target_device),
-        "next_image": self.next_image[idxs].to(self.target_device),
-        "loss": self.loss[idxs].to(self.target_device),  # optional, useful for updates
-    }
+    successful_eids = torch.tensor(list(set(self.successful_episodes)), device=self.device)
 
-    return batch
+    if distinct_episodes:
+      if len(successful_eids) < batch_size:
+        # print(f"Warning: Requested batch size {batch_size} is larger than the number of successful episodes "
+        #       f"{len(successful_eids)}. Returning a smaller batch.")
+        batch_size = len(successful_eids)
+
+      # Sample episode IDs without replacement
+      perm = torch.randperm(len(successful_eids), device=self.device)
+      sampled_eids = successful_eids[perm[:batch_size]]
+
+      idxs = []
+      for eid in sampled_eids:
+        # Find all transitions for the current episode
+        episode_indices = torch.where((self.episode_id[:self.size] == eid) &
+                                      torch.isin(self.episode_id[:self.size], successful_eids))[0]
+        if len(episode_indices) > 0:
+          # Sample one transition from this episode
+          sample_idx = torch.randint(0, len(episode_indices), (1,), device=self.device).item()
+          idxs.append(episode_indices[sample_idx])
+      
+      if not idxs:
+        return None
+      idxs = torch.tensor(idxs, device=self.device)
+    else:
+      # Original behavior: sample from all successful transitions
+      mask = torch.isin(self.episode_id[:self.size], successful_eids)
+      valid_indices = torch.where(mask)[0]
+
+      if len(valid_indices) == 0:
+        return None
+
+      # Sample with replacement from the valid indices
+      sample_perms = torch.randint(0, len(valid_indices), (batch_size,), device=self.device)
+      idxs = valid_indices[sample_perms]
+
+    return self.get_batch(idxs)
   
   def sample_image_is_goal_batch(self, batch_size, n_fake_goals=4):
     """

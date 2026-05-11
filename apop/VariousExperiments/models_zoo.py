@@ -43,6 +43,32 @@ def get_linear_net(input_dim, hidden_dim, output_dim):
                        nn.Linear(hidden_dim, output_dim))
 
 
+class DeepLinear(nn.Module):
+  CONFIG = {
+    'input_dim':           128,
+    'hidden_dim':          256,
+    'block_hidden_dim':    512,
+    'output_dim':          128,
+    'residual_connection': True,
+    'n_blocks':            2,
+  }
+  def __init__(self, config={}):
+    super().__init__()
+    self.config = {**DeepLinear.CONFIG, **config}
+    self.input_scaler = torch.nn.Linear(self.config['input_dim'], self.config['hidden_dim'])
+    self.blocks = nn.ModuleList([get_linear_net(
+      self.config['hidden_dim'], self.config['block_hidden_dim'], self.config['hidden_dim']
+    ) for _ in range(self.config['n_blocks'])])
+    self.output_scaler = torch.nn.Linear(self.config['hidden_dim'], self.config['output_dim'])
+  
+  def forward(self, x):
+    x = self.input_scaler(x)
+    for block in self.blocks:
+      xt = block(x)
+      x = xt + x if self.config['residual_connection'] else xt
+    return self.output_scaler(x)
+
+
 class SequentialBottleneck(nn.Module):
   CONFIG = {
     'add_dec_attn':  True,
@@ -128,7 +154,7 @@ class CNNAE(nn.Module):
                  d1 if self.config['skip_connection'] else None)
 
     if return_all:
-      return u3, (d1, d2, d3)
+      return u3, (d1, d2, d3), latent
     if return_latent:
       return u3, latent
     return u3
