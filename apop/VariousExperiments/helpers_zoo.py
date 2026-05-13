@@ -16,6 +16,10 @@ This module contains a collection of helper functions for various machine learni
 | `mask_specific_patch`   | Masks a specific patch in the patch embeddings.                           |
 | `create_gif_from_images`| Creates a GIF from a list of images.                                      |
 | `set_seed`              | Sets the random seed for reproducibility.                                 |
+| `compute_gae`           | Computes the Generalized Advantage Estimation (GAE) for a trajectory.     |
+| `ppo_update`            | Performs a Proximal Policy Optimization (PPO) update.                     |
+| `dump_json_data`        | Saves configuration data to a JSON file for reproducibility.              |
+| `find_object_center`    | Finds the geometric center of pixels matching a given color condition.    |
 """
 import os
 import json
@@ -26,7 +30,7 @@ import numpy as np
 import torch.nn.functional as F
 
 from torch.autograd import grad
-from typing import Callable, Optional, Tuple
+from typing import Callable
 
 
 def exponential_schedule(epoch, n_epochs_decay, start=0.1, end=0.75):
@@ -248,6 +252,209 @@ def set_seed(seed=42, device='cuda'):
   if device == 'cuda':
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+
+
+@torch.no_grad()
+def compute_gae(rewards: torch.Tensor,
+                values: torch.Tensor,
+                masks: torch.Tensor,
+                next_value: torch.Tensor,
+                gamma: float,
+                lmbda: float,
+                normalize: bool = True) -> tuple[torch.Tensor, torch.Tensor]:
+  """
+  Computes the Generalized Advantage Estimation (GAE) for a trajectory.
+
+  GAE is a method for estimating the advantage function, which is used to update the policy in PPO.
+  It's a trade-off between unbiased but high-variance Monte-Carlo returns and biased but low-variance TD-returns.
+
+  Args:
+    rewards (torch.Tensor): Tensor of rewards for each step in the trajectory. Shape: [T, B]
+    values (torch.Tensor): Tensor of value estimates for each state. Shape: [T, B]
+    masks (torch.Tensor): Tensor of masks for each step (0 for terminal states, 1 otherwise). Shape: [T, B]
+    next_value (torch.Tensor): Value estimate for the state after the last step. Shape: [B]
+    gamma (float): The discount factor.
+    lmbda (float): The GAE lambda parameter (λ). Controls the bias-variance trade-off.
+                   λ=0 corresponds to 1-step TD error, λ=1 corresponds to Monte-Carlo returns.
+    normalize (bool): If True, normalize the advantages to have zero mean and unit variance. This often stabilizes training.
+
+  Returns:
+    advantages (torch.Tensor): The computed advantages for each step. Shape: [T, B]
+    returns (torch.Tensor): The computed returns (targets for the value function). Shape: [T, B]
+  """
+  T = rewards.size(0)
+  advantages = torch.zeros_like(rewards)
+  last_gae = torch.zeros_like(next_value)
+
+  for t in reversed(range(T)):
+    # If the current state is terminal, the value of the next state is 0.
+    # Otherwise, if it's the last step of the trajectory, we bootstrap with `next_value`.
+    # Otherwise, we use the value of the actual next state from the rollout.
+    next_values = next_value if t == T - 1 else values[t + 1]
+
+    # Calculate the TD error (δ_t)
+    # δ_t = r_t + γ * V(s_{t+1}) * mask_t - V(s_t)
+    delta = rewards[t] + gamma * next_values * masks[t] - values[t]
+
+    # GAE recursion: A_t = δ_t + γ * λ * mask_t * A_{t+1}
+    last_gae = delta + gamma * lmbda * masks[t] * last_gae
+    advantages[t] = last_gae
+
+  # Returns are the advantages plus the value estimates
+  # R_t = A_t + V(s_t)
+  returns = advantages + values
+
+  advantages = advantages.flatten()
+  returns = returns.flatten()
+
+  if normalize:
+    advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+  return advantages, returns
+
+
+def ppo_update(policy_net: torch.nn.Module,
+               value_net: torch.nn.Module,
+               policy_optimizer: torch.optim.Optimizer,
+               value_optimizer: torch.optim.Optimizer,
+               traj: dict,
+               next_value: torch.Tensor,
+               gamma: float = 0.99,
+               gae_lambda: float = 0.95,
+               clip_eps: float = 0.2,
+               value_coef: float = 0.5,
+               entropy_coef: float = 0.01,
+               n_epochs: int = 4,
+               n_minibatches: int = 4,
+               max_grad_norm: float = 0.5,
+               normalize_advantage: bool = True):
+    """
+    Performs a PPO (Proximal Policy Optimization) update for the policy and value networks.
+
+    This function implements the core PPO algorithm, including:
+    - GAE advantage estimation.
+    - Clipped surrogate policy objective.
+    - Clipped value loss (optional, but standard).
+    - Entropy bonus for exploration.
+    - Multiple update epochs over the same rollout data for improved sample efficiency.
+    - Minibatching for more stable and efficient updates.
+
+    Args:
+      policy_net (torch.nn.Module): The policy network to be updated.
+      value_net (torch.nn.Module): The value network to be updated.
+      policy_optimizer (torch.optim.Optimizer): The optimizer for the policy network.
+      value_optimizer (torch.optim.Optimizer): The optimizer for the value network.
+      traj (dict): A dictionary containing the collected trajectory data. Must contain:
+                   'rewards', 'values', 'masks', 'states', 'goals', 'actions', 'log_probs'.
+      next_value (torch.Tensor): The value estimate for the last state in the trajectory.
+      gamma (float): The discount factor.
+      gae_lambda (float): The GAE lambda parameter.
+      clip_eps (float): The PPO clipping parameter (ε).
+      value_coef (float): The coefficient for the value loss.
+      entropy_coef (float): The coefficient for the entropy bonus.
+      n_epochs (int): The number of optimization epochs to run on the rollout data.
+      n_minibatches (int): The number of minibatches to split the data into for each epoch.
+      max_grad_norm (float): The maximum norm for gradient clipping to prevent large updates.
+      normalize_advantage (bool): Whether to normalize the advantages.
+
+    Returns:
+        A tuple containing the mean policy loss and mean value loss over the update epochs.
+    """
+    # ---- Stack rollout tensors from list to tensor: shape [T, B, ...] ----
+    rewards = torch.stack(traj['rewards'])
+    values = torch.stack(traj['values'])
+    masks = torch.stack(traj['masks'])
+
+    # ---- Compute advantages and returns using GAE ----
+    advantages, returns = compute_gae(
+      rewards, values, masks, next_value, gamma, gae_lambda, normalize_advantage)
+
+    # ---- Flatten time and batch dimensions for easier processing in epochs ----
+    # Filter out the steps of episodes that finished before the last episode that finished
+    # We want to include the terminal step, but not any steps after it.
+    # A 'valid_step' at time `t` is one where the episode was not done at `t-1`.
+    T, B = masks.shape
+    # We shift the masks by one timestep and pad the beginning with ones (as all episodes are active at t=0)
+    padded_masks = torch.ones(T + 1, B, device=masks.device)
+    padded_masks[1:] = masks
+    # The cumulative product will propagate the first zero, marking all subsequent steps as invalid.
+    valid_steps = torch.cumprod(padded_masks, dim=0)[:-1, :].bool()
+    valid_steps_flat = valid_steps.flatten()
+
+    states = torch.cat(traj['states'])[valid_steps_flat]
+    goals = torch.cat(traj['goals'])[valid_steps_flat]
+    actions = torch.cat(traj['actions'])[valid_steps_flat]
+    old_log_probs = torch.cat(traj['log_probs']).squeeze(-1)[valid_steps_flat]
+    old_values = torch.cat(traj['values']).flatten()[valid_steps_flat]
+    advantages = advantages[valid_steps_flat]
+    returns = returns[valid_steps_flat]
+
+    # --- PPO update epochs ---
+    batch_size = len(states)
+
+    policy_losses = []
+    value_losses = []
+
+    for _ in range(n_epochs):
+      # Shuffle data at the start of each epoch
+      indices = torch.randperm(batch_size, device=states.device)
+
+      for mb_indices in torch.chunk(indices, n_minibatches):
+        # --- Get minibatch data ---
+        mb_states = states[mb_indices]
+        mb_goals = goals[mb_indices]
+        mb_actions = actions[mb_indices]
+        mb_old_log_probs = old_log_probs[mb_indices]
+        mb_advantages = advantages[mb_indices]
+        mb_returns = returns[mb_indices]
+        mb_old_values = old_values[mb_indices]
+
+        # Recompute policy π(a | s, g) with CURRENT network parameters
+        logits = policy_net(mb_states, mb_goals)
+        dist = torch.distributions.Categorical(logits=logits)
+        new_log_probs = dist.log_prob(mb_actions)
+        entropy = dist.entropy().mean()
+
+        # Recompute value V(s, g) with CURRENT network parameters
+        new_values = value_net(mb_states, mb_goals).squeeze(-1)
+
+        # ---- PPO Policy Loss (Clipped Surrogate Objective) ----
+        # ratio = π_new(a|s) / π_old(a|s)
+        ratio = torch.exp(new_log_probs - mb_old_log_probs)
+        surr1 = ratio * mb_advantages
+        surr2 = torch.clamp(ratio, 1 - clip_eps, 1 + clip_eps) * mb_advantages
+        policy_loss = -torch.min(surr1, surr2).mean()
+
+        # ---- PPO Value Loss (Clipped) ----
+        # This helps to prevent the value function from changing too quickly.
+        value_pred_clipped = mb_old_values + torch.clamp(new_values - mb_old_values, -clip_eps, clip_eps)
+        value_loss_unclipped = (new_values - mb_returns).pow(2)
+        value_loss_clipped = (value_pred_clipped - mb_returns).pow(2)
+        value_loss = torch.max(value_loss_unclipped, value_loss_clipped).mean()
+
+        # ---- Total Loss & Update ----
+        # Note: We assume the policy and value networks are separate.
+        # The policy loss is the standard PPO clipped surrogate objective minus an entropy bonus.
+        policy_total_loss = policy_loss - entropy_coef * entropy
+        # The value loss is scaled by a coefficient.
+        value_total_loss = value_loss * value_coef
+
+        # Update policy network
+        policy_optimizer.zero_grad()
+        policy_total_loss.backward()
+        torch.nn.utils.clip_grad_norm_(policy_net.parameters(), max_grad_norm)
+        policy_optimizer.step()
+
+        # Update value network
+        value_optimizer.zero_grad()
+        value_total_loss.backward()
+        torch.nn.utils.clip_grad_norm_(value_net.parameters(), max_grad_norm)
+        value_optimizer.step()
+
+        policy_losses.append(policy_total_loss.item())
+        value_losses.append(value_total_loss.item())
+
+    return np.mean(policy_losses), np.mean(value_losses)
 
 
 def dump_json_data(save_dir, exp_name, data):

@@ -1,3 +1,24 @@
+#
+# | Class/Function                  | Description                                                                                             |
+# |---------------------------------|---------------------------------------------------------------------------------------------------------|
+# | `ReplayBuffer`                  | A class to store and manage transitions for reinforcement learning.                                     |
+# | `__init__(...)`                 | Initializes the replay buffer with given dimensions, capacity, and other settings.                      |
+# | `__len__()`                     | Returns the number of transitions currently stored in the buffer.                                       |
+# | `set_hand_condition(...)`       | Sets a hand condition used for calculating target patches.                                              |
+# | `prepare_data(...)`             | Converts input data (states, actions, etc.) to the correct tensor format and device.                    |
+# | `add(...)`                      | Adds a single transition (state, action, reward, done, next_state) to the buffer.                       |
+# | `add_prioritize(...)`           | Adds a transition to the buffer, replacing the one with the smallest loss if the buffer is full.        |
+# | `add_variable(...)`             | Stores an additional tensor variable alongside the standard transition data.                            |
+# | `get_batch(...)`                | Retrieves a batch of transitions from the buffer given a set of indices.                                |
+# | `get_episodes_sizes()`          | Returns the number of transitions in each episode stored in the buffer.                                 |
+# | `get_first_states()`            | Retrieves the first transition from every episode in the buffer.                                        |
+# | `get_sampling_indices(...)`     | Generates indices for sampling a batch, with an option for distinct episodes.                           |
+# | `sample(...)`                   | Samples a random batch of transitions from the buffer.                                                  |
+# | `sample_prioritized(...)`       | Samples a batch of transitions using a priority distribution based on stored losses.                    |
+# | `sample_from_successful_episodes(...)` | Samples transitions exclusively from episodes that were marked as successful.                    |
+# | `sample_image_is_goal_batch(...)` | Samples a batch for goal-conditioned tasks, providing (state, image) and corresponding goal states.   |
+# | `sample_episode_batch(...)`     | Samples a batch of entire episodes (or fixed-length windows from them).                                 |
+#
 import torch
 from torchvision import transforms
 from torch.utils.data import Dataset
