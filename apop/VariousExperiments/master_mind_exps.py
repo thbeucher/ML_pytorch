@@ -218,11 +218,21 @@ class Actor(nn.Module):
       self.config['action_n_values']
     )
 
-  def forward(self, state, goal):
-    # state: concatenated (emb, hand_patch_emb, is1_emb, is2_emb)
-    # goal: target_patch_emb
-    x = torch.cat([state, goal], dim=-1)
+  def forward(self, states, goals):
+    # states: concatenated (emb, hand_patch_emb, is1_emb, is2_emb)
+    # goals: target_patch_emb
+    x = torch.cat([states, goals], dim=-1)
     return self.net(x)
+  
+  def sample(self, state, goal):
+    # ---- Policy forward pass π(a | s, g) ----
+    a_logits = self.forward(state, goal)
+    dist = torch.distributions.Categorical(logits=a_logits)
+    # Sample action (on-policy)
+    actions = dist.sample()
+    # Get log probs for RL learning
+    log_probs = dist.log_prob(actions)
+    return actions, log_probs, dist.entropy()
 
 
 class Policy(nn.Module):
@@ -249,9 +259,9 @@ class Policy(nn.Module):
     x = torch.cat([state, goal], dim=-1)
     return self.net(x)
   
-  def sample(self, states, goals):
+  def sample(self, state, goal):
     # ---- Policy forward pass π(a | s, g) ----
-    a_logits = self.forward(states, goals)
+    a_logits = self.forward(state, goal)
     dist = torch.distributions.Categorical(logits=a_logits)
     # Sample action (on-policy)
     actions = dist.sample()
@@ -813,6 +823,67 @@ class MasterMind:
     return emb, is1_emb, is2_emb, patchs, patchs_enriched, scaled_embs, hand_pred
   
   @torch.no_grad()
+  def evaluate_policy_in_imagination(self, policy_net):
+    policy_net.eval();self.patch_emb.eval();self.is1_emb.eval();self.is2_emb.eval();self.we.eval()
+
+    # --- Get starting point from buffer ---
+    batch = self.test_buffer.get_first_states()
+
+    # --- Retrieves embeddings, Get hand and target position ---
+    # emb: [B, 256], is1_emb: [B, 16], patchs_enriched: [B, 256, 64], hand_pred: [B]
+    emb, is1_emb, is2_emb, patchs, patchs_enriched, scaled_embs, hand_pred = self.get_actor_intermediate_vars(
+      batch['image'], batch['internal_state'])
+    target_pred = batch['target_patch_gt']  # [B]
+
+    hand_patch_emb, target_patch_emb = self.patch_emb(hand_pred), self.patch_emb(target_pred)
+
+    # --- Run Episodes ---
+    batch_size = batch['image'].shape[0]
+    active_episodes = torch.ones(batch_size, dtype=torch.bool, device=self.device)
+    steps_to_success = torch.full((batch_size,), 0, dtype=torch.long, device=self.device)
+
+    for step in tqdm(range(self.config['max_ep_len']), leave=False):
+      if not active_episodes.any():
+        break
+
+      state = torch.cat([emb, hand_patch_emb, is1_emb, is2_emb], dim=-1)  # [B, 352]
+      # ---- Policy forward pass π(a | s, g) ----
+      action, _, _ = policy_net.sample(state, target_patch_emb)  # [B], [B], [B]
+
+      # --- Get next states --- next_is1, next_is2
+      action_emb = self.action_emb(action)  # [B, 8]
+
+      _, _, nisp1, nisp2 = self.we.isp(emb, action_emb, is1_emb, is2_emb)  # [B, 19], [B, 37]
+
+      # --- Get next state embeddings --- next_emb, next_hand_patch_emb, next_is1_emb, next_is2_emb
+      emb_action = torch.cat([emb, action_emb], dim=-1)  # -> [B, 256+8]
+      emb = self.we.nep(emb_action)  # next_emb
+      emb = self.we.emb_enricher(emb.view(-1, 4, 64)).view(-1, 256)
+
+      hand_pred = self.we.find_next_hand_patch(
+        torch.cat([self.we.patch_emb(hand_pred), emb_action, is1_emb, is2_emb], dim=-1)
+      ).argmax(-1)
+      hand_patch_emb = self.patch_emb(hand_pred)  # next_hand_patch_emb
+
+      is1_emb, is2_emb = self.is1_emb(nisp1.argmax(-1)), self.is2_emb(nisp2.argmax(-1))  # next_is_emb
+
+      # --- Termination criteria ---
+      reached = hand_pred == target_pred
+      
+      newly_reached = active_episodes & reached
+      if newly_reached.any():
+        steps_to_success[newly_reached] = step + 1
+      
+      active_episodes.logical_and_(~reached)
+
+    total_successes = (steps_to_success > 0).sum().item()
+    success_rate = total_successes / batch_size if batch_size > 0 else 0.0
+    avg_steps = steps_to_success[steps_to_success > 0].float().mean().item() if total_successes > 0 else 0.0
+
+    policy_net.train();self.patch_emb.train();self.is1_emb.train();self.is2_emb.train();self.we.train()
+    return success_rate, avg_steps
+  
+  @torch.no_grad()
   def evaluate_policy(self, policy_net, n_episodes=10):
     policy_net.eval();self.patch_emb.eval()
 
@@ -917,6 +988,7 @@ class MasterMind:
         self.actor_optimizer.step()
 
       if (epoch + 1) % 10 == 0:
+        success_rate_imagination, avg_steps_imagination = self.evaluate_policy_in_imagination(self.actor)
         success_rate, avg_steps, success_rate_predtarget, avg_steps_predtarget = self.evaluate_policy(self.actor)
 
         if self.tf_logger:
@@ -925,9 +997,12 @@ class MasterMind:
           self.tf_logger.add_scalar('actor_eval_avg_steps_to_success', avg_steps, epoch)
           self.tf_logger.add_scalar('actor_eval_success_rate_predtarget', success_rate_predtarget, epoch)
           self.tf_logger.add_scalar('actor_eval_avg_steps_predtarget_to_success', avg_steps_predtarget, epoch)
+          self.tf_logger.add_scalar('actor_eval_success_rate_imagination', success_rate_imagination, epoch)
+          self.tf_logger.add_scalar('actor_eval_avg_steps_to_success_imagination', avg_steps_imagination, epoch)
         
-        descr = f'Phase 2: loss={loss.item():.4f} | {success_rate=:.2f} | {avg_steps=:.2f}'
-        descr += f' | {success_rate_predtarget=:.2f} | {avg_steps_predtarget=:.2f}'
+        descr = f'Phase 2: loss={loss.item():.4f} | {success_rate=:.2f} | steps={avg_steps:.2f}'
+        descr += f' | sr_target={success_rate_predtarget:.2f} | steps={avg_steps_predtarget:.2f}'
+        descr += f' | sr_i={success_rate_imagination:.2f} | steps={avg_steps_imagination:.2f}'
         pbar.set_description(descr)
   
   def ppo_train_actor(self, n_epochs=500):
@@ -965,7 +1040,6 @@ class MasterMind:
           value = self.critic(state, target_patch_emb)
 
           # --- Get next states --- next_is1, next_is2
-          emb = self.we.emb_enricher(emb.view(-1, 4, 64)).view(-1, 256)
           action_emb = self.action_emb(action)  # [B, 8]
 
           isp1, isp2, nisp1, nisp2 = self.we.isp(emb, action_emb, is1_emb, is2_emb)  # [B, 19], [B, 37]
@@ -973,6 +1047,7 @@ class MasterMind:
           # --- Get next state embeddings --- next_emb, next_hand_patch_emb, next_is1_emb, next_is2_emb
           emb_action = torch.cat([emb, action_emb], dim=-1)  # -> [B, 256+8]
           emb = self.we.nep(emb_action)  # next_emb
+          emb = self.we.emb_enricher(emb.view(-1, 4, 64)).view(-1, 256)
 
           hand_pred = self.we.find_next_hand_patch(
             torch.cat([self.we.patch_emb(hand_pred), emb_action, is1_emb, is2_emb], dim=-1)
@@ -1009,6 +1084,7 @@ class MasterMind:
       )
       
       if (epoch + 1) % 10 == 0:
+        success_rate_imagination, avg_steps_imagination = self.evaluate_policy_in_imagination(self.policy)
         success_rate, avg_steps, success_rate_predtarget, avg_steps_predtarget = self.evaluate_policy(self.policy)
 
         if self.tf_logger:
@@ -1018,9 +1094,12 @@ class MasterMind:
           self.tf_logger.add_scalar('ppo_eval_avg_steps', avg_steps, epoch)
           self.tf_logger.add_scalar('ppo_eval_success_rate_predtarget', success_rate_predtarget, epoch)
           self.tf_logger.add_scalar('ppo_eval_avg_steps_predtarget_to_success', avg_steps_predtarget, epoch)
+          self.tf_logger.add_scalar('ppo_eval_success_rate_imagination', success_rate_imagination, epoch)
+          self.tf_logger.add_scalar('ppo_eval_avg_steps_to_success_imagination', avg_steps_imagination, epoch)
 
         descr = f'PPO: p_loss={policy_loss:.4f}, v_loss={value_loss:.4f}, succ={success_rate:.2f}, steps={avg_steps:.2f}'
-        descr += f', tsucc={success_rate_predtarget:.2f}, tsteps={avg_steps_predtarget:.2f}'
+        descr += f' | sr_target={success_rate_predtarget:.2f} | steps={avg_steps_predtarget:.2f}'
+        descr += f' | sr_i={success_rate_imagination:.2f} | steps={avg_steps_imagination:.2f}'
         pbar.set_description(descr)
 
   def train(self):
