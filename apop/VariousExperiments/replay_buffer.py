@@ -204,9 +204,9 @@ class ReplayBuffer:
     
     return unique_eids, counts
 
-  def get_first_states(self):
+  def get_first_states(self, return_last_states=False):
     """
-    Provides the first state of all available episodes.
+    Provides the first and optionally the last state of all available episodes.
     The batch size will correspond to the number of episodes.
     """
     if self.size == 0:
@@ -229,6 +229,13 @@ class ReplayBuffer:
     # Get the indices within the `sorted_indices` tensor that correspond to the first state of each episode
     # Retrieve the original buffer indices
     first_state_idxs = sorted_indices[segment_starts]
+
+    if return_last_states:
+        # Calculate the ending position of each group
+        segment_ends = torch.cumsum(counts, 0) - 1
+        last_state_idxs = sorted_indices[segment_ends]
+        return self.get_batch(first_state_idxs), self.get_batch(last_state_idxs)
+    
     return self.get_batch(first_state_idxs)
   
   def get_sampling_indices(self, batch_size, distinct_episodes=False):
