@@ -81,33 +81,36 @@ class InternalStatePredictor(nn.Module):
     self.is1_head = nn.Linear(self.config['hidden_dim'], self.config['is1_n_values'])
     self.is2_head = mz.get_linear_net(self.config['hidden_dim'], self.config['hidden_dim']//2, self.config['is2_n_values'])
 
-    enriched_dim_size = self.config['hidden_dim'] + 2 * self.config['is_emb_dim'] + self.config['action_emb']
-    self.next_net = mz.get_linear_net(enriched_dim_size, 2*self.config['hidden_dim'], self.config['hidden_dim'])
+    enriched_dim_size = 2 * self.config['is_emb_dim'] + self.config['action_emb']
+    self.next_net = mz.get_linear_net(enriched_dim_size, 2 * self.config['hidden_dim'], self.config['hidden_dim'])
     self.nis1_head = nn.Linear(self.config['hidden_dim'], self.config['is1_n_values'])
-    self.nis2_head = mz.get_linear_net(self.config['hidden_dim'], self.config['hidden_dim']*2, self.config['is2_n_values'])
+    self.nis2_head = mz.get_linear_net(self.config['hidden_dim'], 2 * self.config['hidden_dim'], self.config['is2_n_values'])
+  
+  def get_is(self, emb):
+    x = self.net(emb)  # [B, 128] -> [B, 256]
+    return self.is1_head(x), self.is2_head(x)
+  
+  def get_next_is(self, is1_emb, is2_emb, action_emb):
+    x = self.next_net(torch.cat([is1_emb, is2_emb, action_emb], dim=-1))
+    return self.nis1_head(x), self.nis2_head(x)
 
   def forward(self, emb, action_emb, is1_emb, is2_emb):
-    x = self.net(emb)  # [B, 128] -> [B, 256]
-
-    is1_logits = self.is1_head(x)
-    is2_logits = self.is2_head(x)
-
-    x_enriched = self.next_net(torch.cat([x, action_emb, is1_emb, is2_emb], dim=-1))
-
-    nis1_logits = self.nis1_head(x_enriched)
-    nis2_logits = self.nis2_head(x_enriched)
-
+    is1_logits, is2_logits = self.get_is(emb)
+    nis1_logits, nis2_logits = self.get_next_is(is1_emb, is2_emb, action_emb)
     return is1_logits, is2_logits, nis1_logits, nis2_logits
 
 
 class WorldEncoder(nn.Module):
   CONFIG = {
-    'emb_dim':       256,
-    'action_emb':    16,
-    'is_emb_dim':    32,
-    'token_dim':     64,
-    'n_patches':     16*16,
-    'patch_emb_dim': 64,
+    'emb_dim':           256,
+    'action_emb':        8,
+    'is_emb_dim':        16,
+    'token_dim':         64,
+    'n_patches':         16*16,
+    'patch_emb_dim':     64,
+    'action_n_values':   5,
+    'is1_n_values':      19,
+    'is2_n_values':      37,
     'ae_config': {
       'encoder_archi': 'BigCNNEncoder',
       'skip_connection': True, 
@@ -118,6 +121,23 @@ class WorldEncoder(nn.Module):
   def __init__(self, config={}):
     super().__init__()
     self.config = {**WorldEncoder.CONFIG, **config}
+    # === ACTION EMBEDDING ===
+    self.action_emb = nn.Sequential(
+      nn.Embedding(self.config['action_n_values'], self.config['action_emb']),
+      nn.Linear(self.config['action_emb'], self.config['action_emb']),
+      nn.SiLU()
+    )
+    # === INTERNAL STATE EMBEDDING ===
+    self.is1_emb = nn.Sequential(
+      nn.Embedding(self.config['is1_n_values'], self.config['is_emb_dim']),
+      nn.Linear(self.config['is_emb_dim'], self.config['is_emb_dim']),
+      nn.SiLU()
+    )
+    self.is2_emb = nn.Sequential(
+      nn.Embedding(self.config['is2_n_values'], self.config['is_emb_dim']),
+      nn.Linear(self.config['is_emb_dim'], self.config['is_emb_dim']),
+      nn.SiLU()
+    )
     # === CNN Auto-Encoder ===
     self.ae = mz.CNNAE(self.config['ae_config'])
     self.emb_enricher = mz.Transformer(dim=self.config['token_dim'], depth=2, heads=4, dim_head=32, mlp_dim=128, dropout=0.0)
@@ -142,17 +162,21 @@ class WorldEncoder(nn.Module):
       nn.Linear(2 * self.config['emb_dim'], 1)
     )
     self.patch_emb = nn.Embedding(self.config['n_patches'], self.config['patch_emb_dim'])
-    self.find_next_hand_patch = nn.Sequential(
-      nn.Linear(self.config['patch_emb_dim'] + self.config['action_emb'] + 2 * self.config['is_emb_dim'] + self.config['emb_dim'],
-                2 * self.config['patch_emb_dim']),
-      nn.ReLU(True),
-      nn.Linear(2 * self.config['patch_emb_dim'], self.config['n_patches'])
-    )
     self.find_target_patch = nn.Sequential(
       nn.Linear(self.config['token_dim'], 2 * self.config['emb_dim']),
       nn.ReLU(True),
       nn.Linear(2 * self.config['emb_dim'], 1)
     )
+    # === Internal State from Patch ===
+    self.patch_to_is_emb = nn.Embedding(self.config['n_patches'], self.config['patch_emb_dim'])
+    self.patch_to_is_net = nn.Sequential(
+        nn.Linear(self.config['patch_emb_dim'], 128),
+        nn.SiLU(),
+        nn.Linear(128, self.config['is1_n_values'] + self.config['is2_n_values'])
+    )
+  
+  def get_is_from_patch_idx(self, patch_idx):
+    return self.patch_to_is_net(self.patch_to_is_emb(patch_idx))
   
   def scale_embs(self, emb, is1_emb, is2_emb, action_emb=None, only_action=False):
     scaled_embs = []
@@ -170,14 +194,30 @@ class WorldEncoder(nn.Module):
 
     return [emb_scale, is1_emb_scale, is2_emb_scale] + scaled_embs
 
-  def enrich_patchs(self, patchs, scaled_embs):
-    return self.object_enricher(torch.cat([patchs] + scaled_embs, dim=1))[:, :-len(scaled_embs)]
-  
-  def forward(self, image, action_emb, is1_emb, is2_emb):
-    # 1) Embed image and reconstruct it
-    rec, (d1, d2, d3), emb = self.ae(image, return_all=True)  # [B, 3, 32, 32] -> [B, 256], ([B, 64, 16, 16])
-    # Enrich embedding
+  def _get_base_representation(self, image, internal_state):
+    rec, (d1, d2, d3), emb = self.ae(image, return_all=True)
     emb = self.emb_enricher(emb.view(-1, 4, self.config['token_dim'])).view(-1, 256)
+
+    is1_emb = self.is1_emb(internal_state[:, 0])
+    is2_emb = self.is2_emb(internal_state[:, 1])
+
+    # C1 = d1 = [B, 64, 16, 16] -> [B, 16*16, 64]
+    patchs = d1.flatten(2).transpose(1, 2) + self.pos_emb(torch.arange(0, self.config['n_patches'], device=d1.device))
+    return rec, d1, emb, is1_emb, is2_emb, patchs
+
+  def get_state_representation(self, image, internal_state):
+    _, _, emb, is1_emb, is2_emb, patchs = self._get_base_representation(image, internal_state)
+
+    scaled_embs = self.scale_embs(emb, is1_emb, is2_emb)
+    patchs_enriched = self.object_enricher(torch.cat([patchs] + scaled_embs, dim=1))[:, :-len(scaled_embs)]
+    hand_pred = self.find_hand_patch(patchs_enriched).squeeze(-1).argmax(-1)
+
+    return emb, is1_emb, is2_emb, patchs, patchs_enriched, scaled_embs, hand_pred
+
+  def forward(self, image, action, internal_state):
+    action_emb = self.action_emb(action).squeeze(1)
+    rec, _, emb, is1_emb, is2_emb, patchs = self._get_base_representation(image, internal_state)
+    
     emb_action = torch.cat([emb, action_emb], dim=-1)         # -> [B, 256+16]
 
     # 2) Predict Next Embedding
@@ -187,81 +227,48 @@ class WorldEncoder(nn.Module):
     isp1, isp2, nisp1, nisp2 = self.isp(emb, action_emb, is1_emb, is2_emb)
 
     # 4) Predict Object Position - object = hand & target
-    # C1 = d1 = [B, 64, 16, 16] -> [B, 16*16, 64]
-    patchs = d1.flatten(2).transpose(1, 2) + self.pos_emb(torch.arange(0, self.config['n_patches'], device=d1.device))
-
-    scaled_embs = self.scale_embs(emb, is1_emb, is2_emb, action_emb)
-    patchs_enriched = self.enrich_patchs(patchs, scaled_embs[:-1])
+    scaled_embs = self.scale_embs(emb, is1_emb, is2_emb)
+    patchs_enriched = self.object_enricher(torch.cat([patchs] + scaled_embs, dim=1))[:, :-len(scaled_embs)]
 
     hand_pred = self.find_hand_patch(patchs_enriched).squeeze(-1)
-    next_hand_pred = self.find_next_hand_patch(torch.cat([self.patch_emb(hand_pred.argmax(-1)), emb_action, is1_emb, is2_emb], dim=-1))
     target_pred = self.find_target_patch(patchs_enriched).squeeze(-1)
+
+    # Predict next hand position
+    with torch.no_grad():
+      next_is1_emb = self.is1_emb(nisp1.argmax(dim=-1))
+      next_is2_emb = self.is2_emb(nisp2.argmax(dim=-1))
+    
+    scaled_embs_next = self.scale_embs(next_emb, next_is1_emb, next_is2_emb, action_emb)
+    next_patchs_enriched = self.object_enricher(torch.cat([patchs] + scaled_embs_next, dim=1))[:, :-len(scaled_embs_next)]
+    next_hand_pred = self.find_hand_patch(next_patchs_enriched).squeeze(-1)
       
     return emb, rec, next_emb, isp1, isp2, nisp1, nisp2, hand_pred, target_pred, next_hand_pred
 
 
 class Actor(nn.Module):
   CONFIG = {
-    'emb_dim':         256,
-    'action_emb':      16,
     'is_emb_dim':      16,
     'hidden_dim':      512,
     'action_n_values': 5,
-    'patch_emb_dim':   64,
   }
   def __init__(self, config={}):
     super().__init__()
     self.config = {**Actor.CONFIG, **config}
     self.net = mz.get_linear_net(
-      self.config['emb_dim'] + 2 * self.config['patch_emb_dim'] + 2 * self.config['is_emb_dim'],
+      4 * self.config['is_emb_dim'],
       self.config['hidden_dim'],
       self.config['action_n_values']
     )
 
-  def forward(self, states, goals):
-    # states: concatenated (emb, hand_patch_emb, is1_emb, is2_emb)
-    # goals: target_patch_emb
-    x = torch.cat([states, goals], dim=-1)
+  def forward(self, current_is_emb, goal_is_emb):
+    # current_is_emb: concatenated (is1_emb, is2_emb)
+    # goal_is_emb: concatenated (goal_is1_emb, goal_is2_emb)
+    x = torch.cat([current_is_emb, goal_is_emb], dim=-1)
     return self.net(x)
-  
-  def sample(self, state, goal):
+
+  def sample(self, current_is_emb, goal_is_emb):
     # ---- Policy forward pass π(a | s, g) ----
-    a_logits = self.forward(state, goal)
-    dist = torch.distributions.Categorical(logits=a_logits)
-    # Sample action (on-policy)
-    actions = dist.sample()
-    # Get log probs for RL learning
-    log_probs = dist.log_prob(actions)
-    return actions, log_probs, dist.entropy()
-
-
-class Policy(nn.Module):
-  CONFIG = {
-    'emb_dim':         256,
-    'action_emb':      16,
-    'is_emb_dim':      16,
-    'hidden_dim':      512,
-    'action_n_values': 5,
-    'patch_emb_dim':   64,
-  }
-  def __init__(self, config={}):
-    super().__init__()
-    self.config = {**Policy.CONFIG, **config}
-    self.net = mz.get_linear_net(
-      self.config['emb_dim'] + 2 * self.config['patch_emb_dim'] + 2 * self.config['is_emb_dim'],
-      self.config['hidden_dim'],
-      self.config['action_n_values']
-    )
-
-  def forward(self, state, goal):
-    # state: concatenated (emb, hand_patch_emb, is1_emb, is2_emb)
-    # goal: target_patch_emb
-    x = torch.cat([state, goal], dim=-1)
-    return self.net(x)
-  
-  def sample(self, state, goal):
-    # ---- Policy forward pass π(a | s, g) ----
-    a_logits = self.forward(state, goal)
+    a_logits = self.forward(current_is_emb, goal_is_emb)
     dist = torch.distributions.Categorical(logits=a_logits)
     # Sample action (on-policy)
     actions = dist.sample()
@@ -272,32 +279,29 @@ class Policy(nn.Module):
 
 class Critic(nn.Module):
   CONFIG = {
-    'emb_dim':         256,
-    'action_emb':      16,
     'is_emb_dim':      16,
     'hidden_dim':      512,
-    'patch_emb_dim':   64,
   }
   def __init__(self, config={}):
     super().__init__()
     self.config = {**Critic.CONFIG, **config}
     self.net = mz.get_linear_net(
-      self.config['emb_dim'] + 2 * self.config['patch_emb_dim'] + 2 * self.config['is_emb_dim'],
+      4 * self.config['is_emb_dim'],
       self.config['hidden_dim'],
       1
     )
 
-  def forward(self, state, goal):
-    # state: concatenated (emb, hand_patch_emb, is1_emb, is2_emb)
-    # goal: target_patch_emb
-    x = torch.cat([state, goal], dim=-1)
+  def forward(self, current_is_emb, goal_is_emb):
+    # state: concatenated (is1_emb, is2_emb)
+    # goal: concatenated (goal_is1_emb, goal_is2_emb)
+    x = torch.cat([current_is_emb, goal_is_emb], dim=-1)
     return self.net(x).squeeze(-1)
 
 
 class MasterMind:
   CONFIG = {
     'save_dir':                          'experiments/',
-    'exp_name':                          'master_mind_revisedHandTargetPredictors',
+    'exp_name':                          'master_mind_ppo',
     'use_tf_logger':                     True,
     'load_model':                        True,
     # === Replay Buffer & Models info ===
@@ -308,13 +312,9 @@ class MasterMind:
     'internal_state_dim':                2,       # Robot state: [angle_joint1, angle_joint2]
     'internal_state_n_values':           (90//5+1, 180//5+1),  # max_angle / angle_step +1 for inclusive
     'action_dim':                        1,       # Single action per step
-    'action_n_values':                   5,       # 5 possible actions (0-4)
-    'action_emb':                        8,       # Action embedding dimension
     'n_train_episodes':                  128,
     'n_test_episodes':                   10,
     'max_ep_len':                        60,
-    'is1_n_values':                      19,      # number of discrete values for internal state 1 (angle joint1)
-    'is2_n_values':                      37,      # number of discrete values for internal state 2 (angle joint2)
     'is_emb_dim':                        16,      # int: intermediate embedding dimension for internal states
     'n_patches':                         256,     # patchs of size 2*2 -> (32/2)*(32/2)
     'patch_emb_dim':                     64,
@@ -327,7 +327,7 @@ class MasterMind:
     self.device = torch.device('cuda' if torch.cuda.is_available() else
                                'mps' if torch.backends.mps.is_available() else
                                'cpu')
-    logger.info(f'Using device: {self.device}')
+    self.patch_to_internal_states = defaultdict(set)
     self.get_train_params = lambda m: sum(p.numel() for p in m.parameters() if p.requires_grad)
     
     # === TENSORBOARD LOGGING ===
@@ -343,7 +343,6 @@ class MasterMind:
     self.set_env()
 
     # === Models ===
-    # GPA (GoalPolicyActor)
     self.instanciate_models()
     # Replay Buffer - train / test - Optimizers
     self.set_utils()
@@ -360,26 +359,6 @@ class MasterMind:
     )
   
   def instanciate_models(self):
-    # === ACTION EMBEDDING ===
-    # Converts discrete action ID (0-4) → action_dim → dim embedding
-    # Discrete action becomes continuous representation that can be added to other embeddings
-    self.action_emb = nn.Sequential(
-      nn.Embedding(self.config['action_n_values'], self.config['action_emb']),  # [B, 1] → [B, 1, action_dim]
-      nn.Linear(self.config['action_emb'], self.config['action_emb']),          # [B, 1, action_dim] → [B, 1, dim]
-      nn.SiLU()
-    ).to(self.device)
-    # === INTERNAL STATE EMBEDDING ===
-    # Embed internal state (joint angles): converts discrete bin index to continuous
-    self.is1_emb = nn.Sequential(
-      nn.Embedding(self.config['is1_n_values'], self.config['is_emb_dim']),  # is1_n_values = 19 (0-18 inclusive)
-      nn.Linear(self.config['is_emb_dim'], self.config['is_emb_dim']),
-      nn.SiLU()
-    ).to(self.device)
-    self.is2_emb = nn.Sequential(
-      nn.Embedding(self.config['is2_n_values'], self.config['is_emb_dim']),  # is2_n_values = 37 (0-36 inclusive)
-      nn.Linear(self.config['is_emb_dim'], self.config['is_emb_dim']),
-      nn.SiLU()
-    ).to(self.device)
     # === WORLD ENCODER ===
     # CNN Auto-Encoder with Residual Connection and Linear Bottleneck
     # NEP (NextEmbeddingPredictor)
@@ -388,19 +367,11 @@ class MasterMind:
     # TP (TargetPredictor)
     self.we = WorldEncoder(config=self.config).to(self.device)
     logger.info(f'WorldEncoder instanciate with n_params={self.get_train_params(self.we):,}')
-    # === Patch Embedder ===
-    self.patch_emb = nn.Sequential(
-      nn.Embedding(self.config['n_patches'], self.config['patch_emb_dim']),
-      nn.Linear(self.config['patch_emb_dim'], self.config['patch_emb_dim']),
-      nn.SiLU()
-    ).to(self.device)
     # === Actor Network ===
     self.actor = Actor(config=self.config).to(self.device)
     logger.info(f'Actor instanciate with n_params={self.get_train_params(self.actor):,}')
-    # === Policy & Critic Networks ===
-    self.policy = Policy(config=self.config).to(self.device)
+    # === Critic Network ===
     self.critic = Critic(config=self.config).to(self.device)
-    logger.info(f'Policy instanciate with n_params={self.get_train_params(self.policy):,}')
     logger.info(f'Critic instanciate with n_params={self.get_train_params(self.critic):,}')
   
   def set_utils(self):
@@ -425,17 +396,11 @@ class MasterMind:
       device=self.config['replay_buffer_device'],
       target_device=self.device
     )
-    self.brain_optimizer = torch.optim.AdamW([
-      {'params': self.action_emb.parameters(), 'lr': 1e-4},
-      {'params': self.is1_emb.parameters(), 'lr': 1e-4},
-      {'params': self.is2_emb.parameters(), 'lr': 1e-4},
+    self.we_optimizer = torch.optim.AdamW([
       {'params': self.we.parameters(), 'lr': 1e-4},
     ])
-    self.actor_optimizer = torch.optim.AdamW([
-      {'params': self.patch_emb.parameters(), 'lr': 1e-4},
-      {'params': self.actor.parameters(), 'lr': 1e-4},
-    ])
-    self.policy_optimizer = torch.optim.AdamW(self.policy.parameters(), lr=1e-4)
+    self.actor_optimizer = torch.optim.AdamW(self.actor.parameters(), lr=1e-4)
+    self.ppo_actor_optimizer = torch.optim.AdamW(self.actor.parameters(), lr=1e-4)
     self.critic_optimizer = torch.optim.AdamW(self.critic.parameters(), lr=1e-4)
 
     self.hand_condition = lambda frames: (frames[:, 2, :, :] > frames[:, 0, :, :]) & \
@@ -448,18 +413,13 @@ class MasterMind:
     """Saves the state of all models and optimizers."""
     # logger.info(f"Saving models to {path}")
     torch.save({
-        'action_emb_state_dict': self.action_emb.state_dict(),
-        'is1_emb_state_dict': self.is1_emb.state_dict(),
-        'is2_emb_state_dict': self.is2_emb.state_dict(),
-        'we_state_dict': self.we.state_dict(),
-        'patch_emb_state_dict': self.patch_emb.state_dict(),
-        'actor_state_dict': self.actor.state_dict(),
-        'policy_state_dict': self.policy.state_dict(),
-        'critic_state_dict': self.critic.state_dict(),
-        'brain_optimizer_state_dict': self.brain_optimizer.state_dict(),
-        'actor_optimizer_state_dict': self.actor_optimizer.state_dict(),
-        'policy_optimizer_state_dict': self.policy_optimizer.state_dict(),
-        'critic_optimizer_state_dict': self.critic_optimizer.state_dict(),
+      'we_state_dict': self.we.state_dict(),
+      'actor_state_dict': self.actor.state_dict(),
+      'critic_state_dict': self.critic.state_dict(),
+      'we_optimizer_state_dict': self.we_optimizer.state_dict(),
+      'actor_optimizer_state_dict': self.actor_optimizer.state_dict(),
+      'ppo_actor_optimizer_state_dict': self.ppo_actor_optimizer.state_dict(),
+      'critic_optimizer_state_dict': self.critic_optimizer.state_dict(),
     }, path)
 
   def load_models(self, path):
@@ -469,17 +429,12 @@ class MasterMind:
       return
     logger.info(f"Loading models from {path}")
     checkpoint = torch.load(path, map_location=self.device)
-    self.action_emb.load_state_dict(checkpoint['action_emb_state_dict'])
-    self.is1_emb.load_state_dict(checkpoint['is1_emb_state_dict'])
-    self.is2_emb.load_state_dict(checkpoint['is2_emb_state_dict'])
     self.we.load_state_dict(checkpoint['we_state_dict'])
-    self.patch_emb.load_state_dict(checkpoint['patch_emb_state_dict'])
     self.actor.load_state_dict(checkpoint['actor_state_dict'])
-    self.policy.load_state_dict(checkpoint['policy_state_dict'])
     self.critic.load_state_dict(checkpoint['critic_state_dict'])
-    self.brain_optimizer.load_state_dict(checkpoint['brain_optimizer_state_dict'])
+    self.we_optimizer.load_state_dict(checkpoint['we_optimizer_state_dict'])
     self.actor_optimizer.load_state_dict(checkpoint['actor_optimizer_state_dict'])
-    self.policy_optimizer.load_state_dict(checkpoint['policy_optimizer_state_dict'])
+    self.ppo_actor_optimizer.load_state_dict(checkpoint['ppo_actor_optimizer_state_dict'])
     self.critic_optimizer.load_state_dict(checkpoint['critic_optimizer_state_dict'])
   
   def fill_memory(self, replay_buffer, act='random', n_episodes=128, max_episode_steps=60):
@@ -636,6 +591,33 @@ class MasterMind:
       gt_full[valid_mask] = gt
     return gt_full
 
+  def _fill_patch_to_internal_states_mapping(self):
+    logger.info("Filling patch_to_internal_states mapping...")
+    buffers = [self.train_buffer, self.test_buffer]
+    for buffer in buffers:
+      if buffer.size == 0:
+        continue
+      images = buffer.image[:buffer.size]
+      internal_states = buffer.internal_state[:buffer.size]
+
+      # Process in batches to avoid large tensors on device
+      batch_size = self.config['batch_size']
+      for i in tqdm(range(0, len(images), batch_size), leave=False, desc="Filling patch map"):
+        batch_images = images[i:i+batch_size].to(self.device)
+        batch_internal_states = internal_states[i:i+batch_size].to(self.device)
+        
+        hand_patch_indices = self._get_patch_from_img(batch_images, self.hand_condition)
+        
+        valid_mask = hand_patch_indices != -1
+        if valid_mask.any():
+          valid_indices = hand_patch_indices[valid_mask].cpu().numpy()
+          valid_states = batch_internal_states[valid_mask].cpu().numpy()
+          
+          for patch_idx, state in zip(valid_indices, valid_states):
+            # Convert state to a tuple to be able to use it in a set to avoid duplicates
+            state_tuple = tuple(state)
+            self.patch_to_internal_states[patch_idx].add(state_tuple)
+
   def _compute_object_prediction_loss_and_gt(self, image, prediction, condition):
     gt_full = self._get_patch_from_img(image, condition)
     loss = self._compute_loss_from_gt(prediction, gt_full)
@@ -655,19 +637,62 @@ class MasterMind:
     target_batch = buffer.sample_from_successful_episodes(batch_size, distinct_episodes=True)
     if target_batch:
       # A new forward pass is needed for the specialized batch
-      t_image = target_batch['image']
-      t_action_emb = self.action_emb(target_batch['action']).squeeze(1)
-      t_is1_emb = self.is1_emb(target_batch['internal_state'][:, 0])
-      t_is2_emb = self.is2_emb(target_batch['internal_state'][:, 1])
 
       # We only need the target prediction from this forward pass
-      _, _, _, _, _, _, _, _, t_target_pred, _ = self.we(t_image, t_action_emb, t_is1_emb, t_is2_emb)
+      _, _, _, _, _, _, _, _, t_target_pred, _ = self.we(
+          target_batch['image'], target_batch['action'], target_batch['internal_state']
+      )
       
       # Calculate loss only on this specialized batch
       target_patch_loss = self._compute_loss_from_gt(t_target_pred, target_batch['target_patch_gt'])
     return target_patch_loss
+  
+  def _compute_is_from_patch_accuracies(self, is1_pred_fp, is2_pred_fp, valid_patches):
+    is1_pred_argmax = is1_pred_fp.argmax(dim=1)
+    is2_pred_argmax = is2_pred_fp.argmax(dim=1)
+    
+    correct_is1 = 0
+    correct_is2 = 0
+    n_valid_patches_in_map = 0
 
-  def train_step(self, epoch, n_steps=10):
+    for i, patch_idx in enumerate(valid_patches):
+      patch_item = patch_idx.item()
+      possible_states = self.patch_to_internal_states.get(patch_item)
+      if possible_states:
+        n_valid_patches_in_map += 1
+        possible_is1s = {s[0] for s in possible_states}
+        possible_is2s = {s[1] for s in possible_states}
+
+        if is1_pred_argmax[i].item() in possible_is1s:
+          correct_is1 += 1
+        if is2_pred_argmax[i].item() in possible_is2s:
+          correct_is2 += 1
+    
+    is1_from_patch_acc = correct_is1 / n_valid_patches_in_map if n_valid_patches_in_map > 0 else 0.
+    is2_from_patch_acc = correct_is2 / n_valid_patches_in_map if n_valid_patches_in_map > 0 else 0.
+    return is1_from_patch_acc, is2_from_patch_acc
+  
+  def _compute_is_from_patch_loss_n_accuracies(self, batch, hand_patch_gt_full):
+    is_from_patch_loss = torch.tensor(0.0, device=self.device)
+    is1_from_patch_acc, is2_from_patch_acc = 0., 0.
+    valid_mask = hand_patch_gt_full != -1
+    if valid_mask.any():
+      is_from_patch_pred = self.we.get_is_from_patch_idx(hand_patch_gt_full[valid_mask])
+      is1_pred_fp = is_from_patch_pred[:, :self.config['internal_state_n_values'][0]]
+      is2_pred_fp = is_from_patch_pred[:, self.config['internal_state_n_values'][0]:]
+      
+      is1_gt_fp = batch['internal_state'][valid_mask][:, 0].long()
+      is2_gt_fp = batch['internal_state'][valid_mask][:, 1].long()
+
+      loss1 = F.cross_entropy(is1_pred_fp, is1_gt_fp)
+      loss2 = F.cross_entropy(is2_pred_fp, is2_gt_fp)
+      is_from_patch_loss = loss1 + loss2
+
+      is1_from_patch_acc, is2_from_patch_acc = self._compute_is_from_patch_accuracies(
+        is1_pred_fp, is2_pred_fp, hand_patch_gt_full[valid_mask])
+    return is_from_patch_loss, is1_from_patch_acc, is2_from_patch_acc
+
+  def train_we(self, epoch, n_steps=10):
     '''
       * Image Reconstruction
       * Next Embedding Prediction
@@ -675,7 +700,7 @@ class MasterMind:
       * Next Internal State Prediction
       * Hand & Target Prediction
     '''
-    self.action_emb.train();self.is1_emb.train();self.is2_emb.train();self.we.train()
+    self.we.train()
 
     self._reset_logs()
     batch_losses = []
@@ -683,12 +708,9 @@ class MasterMind:
       batch = self.train_buffer.sample(self.config['batch_size'], distinct_episodes=True)
 
       image = batch['image']
-      action_emb = self.action_emb(batch['action']).squeeze(1)  # -> [B, 1, 8]
-      is1_emb = self.is1_emb(batch['internal_state'][:, 0])     # -> [B, 16]
-      is2_emb = self.is2_emb(batch['internal_state'][:, 1])
 
       _, rec, next_emb, isp1, isp2, nisp1, nisp2, hand_pred, target_pred, next_hand_pred = self.we(
-        image, action_emb, is1_emb, is2_emb)
+        image, batch['action'], batch['internal_state'])
 
       # === Reconstruction Loss ===
       rec_loss = F.mse_loss(rec, image)
@@ -714,15 +736,19 @@ class MasterMind:
       target_patch_loss = self._compute_specialized_target_loss(self.train_buffer, self.config['batch_size'])
       target_patch_gt_full = batch['target_patch_gt']
 
-      loss = rec_loss + nep_loss + is1_loss + is2_loss + nis1_loss + nis2_loss + hand_patch_loss + target_patch_loss + next_hand_patch_loss
-      self.brain_optimizer.zero_grad()
+      # === Internal State from Patch Loss ===
+      is_from_patch_loss, is1_from_patch_acc, is2_from_patch_acc = self._compute_is_from_patch_loss_n_accuracies(batch, hand_patch_gt_full)
+
+      loss = rec_loss + nep_loss + is1_loss + is2_loss + nis1_loss + nis2_loss + hand_patch_loss + target_patch_loss + next_hand_patch_loss + is_from_patch_loss
+      self.we_optimizer.zero_grad()
       loss.backward()
-      self.brain_optimizer.step()
+      self.we_optimizer.step()
 
       step_losses = {
         'rec_loss': rec_loss, 'nep_loss': nep_loss, 'is1_loss': is1_loss, 'is2_loss': is2_loss,
         'nis1_loss': nis1_loss, 'nis2_loss': nis2_loss, 'hand_patch_loss': hand_patch_loss,
-        'target_patch_loss': target_patch_loss, 'next_hand_patch_loss': next_hand_patch_loss
+        'target_patch_loss': target_patch_loss, 'next_hand_patch_loss': next_hand_patch_loss,
+        'is_from_patch_loss': is_from_patch_loss,
       }
       is1_acc, is2_acc, nis1_acc, nis2_acc, hand_patch_acc, target_patch_acc, next_hand_patch_acc = self.compute_metrics(
         batch, isp1, isp2, nisp1, nisp2, hand_pred, target_pred, hand_patch_gt_full, target_patch_gt_full,
@@ -731,7 +757,8 @@ class MasterMind:
       step_accuracies = {
         'is1_acc': is1_acc, 'is2_acc': is2_acc, 'nis1_acc': nis1_acc, 'nis2_acc': nis2_acc,
         'hand_patch_acc': hand_patch_acc, 'target_patch_acc': target_patch_acc,
-        'next_hand_patch_acc': next_hand_patch_acc
+        'next_hand_patch_acc': next_hand_patch_acc, 'is1_from_patch_acc': is1_from_patch_acc,
+        'is2_from_patch_acc': is2_from_patch_acc
       }
       self._update_logs(step_losses, step_accuracies)
 
@@ -743,8 +770,8 @@ class MasterMind:
     return np.mean(batch_losses)
 
   @torch.no_grad()
-  def eval_step(self, epoch, n_steps=5):
-    self.action_emb.eval();self.is1_emb.eval();self.is2_emb.eval();self.we.eval()
+  def eval_we(self, epoch, n_steps=5):
+    self.we.eval()
 
     self._reset_logs()
     batch_losses = []
@@ -752,12 +779,9 @@ class MasterMind:
       batch = self.test_buffer.sample(self.config['n_test_episodes'], distinct_episodes=True)
 
       image = batch['image']
-      action_emb = self.action_emb(batch['action']).squeeze(1)  # -> [B, 8]
-      is1_emb = self.is1_emb(batch['internal_state'][:, 0])     # -> [B, 16]
-      is2_emb = self.is2_emb(batch['internal_state'][:, 1])
 
       _, rec, next_emb, isp1, isp2, nisp1, nisp2, hand_pred, target_pred, next_hand_pred = self.we(
-        image, action_emb, is1_emb, is2_emb)
+        image, batch['action'], batch['internal_state'])
 
       # === Reconstruction Loss ===
       rec_loss = F.mse_loss(rec, image)
@@ -783,13 +807,17 @@ class MasterMind:
       target_patch_loss = self._compute_specialized_target_loss(self.test_buffer, self.config['n_test_episodes'])
       target_patch_gt_full = batch['target_patch_gt']
       
-      loss = rec_loss + nep_loss + is1_loss + is2_loss + nis1_loss + nis2_loss + hand_patch_loss + target_patch_loss + next_hand_patch_loss
+      # === Internal State from Patch Loss ===
+      is_from_patch_loss, is1_from_patch_acc, is2_from_patch_acc = self._compute_is_from_patch_loss_n_accuracies(batch, hand_patch_gt_full)
+
+      loss = rec_loss + nep_loss + is1_loss + is2_loss + nis1_loss + nis2_loss + hand_patch_loss + target_patch_loss + next_hand_patch_loss + is_from_patch_loss
       batch_losses.append(loss.item())
 
       step_losses = {
         'rec_loss': rec_loss, 'nep_loss': nep_loss, 'is1_loss': is1_loss, 'is2_loss': is2_loss,
         'nis1_loss': nis1_loss, 'nis2_loss': nis2_loss, 'hand_patch_loss': hand_patch_loss,
-        'target_patch_loss': target_patch_loss, 'next_hand_patch_loss': next_hand_patch_loss
+        'target_patch_loss': target_patch_loss, 'next_hand_patch_loss': next_hand_patch_loss,
+        'is_from_patch_loss': is_from_patch_loss,
       }
       is1_acc, is2_acc, nis1_acc, nis2_acc, hand_patch_acc, target_patch_acc, next_hand_patch_acc = self.compute_metrics(
         batch, isp1, isp2, nisp1, nisp2, hand_pred, target_pred, hand_patch_gt_full, target_patch_gt_full,
@@ -798,7 +826,8 @@ class MasterMind:
       step_accuracies = {
         'is1_acc': is1_acc, 'is2_acc': is2_acc, 'nis1_acc': nis1_acc, 'nis2_acc': nis2_acc,
         'hand_patch_acc': hand_patch_acc, 'target_patch_acc': target_patch_acc,
-        'next_hand_patch_acc': next_hand_patch_acc
+        'next_hand_patch_acc': next_hand_patch_acc, 'is1_from_patch_acc': is1_from_patch_acc,
+        'is2_from_patch_acc': is2_from_patch_acc
       }
       self._update_logs(step_losses, step_accuracies)
 
@@ -806,36 +835,27 @@ class MasterMind:
     self.log_metrics(epoch, image, rec, hand_pred, target_pred, next_hand_pred, hand_patch_gt_full, target_patch_gt_full, next_hand_patch_gt_full, prefix='test')
 
     return np.mean(batch_losses)
-
-  def get_actor_intermediate_vars(self, image, internal_state):
-    rec, (d1, d2, d3), emb = self.we.ae(image, return_all=True)
-
-    emb = self.we.emb_enricher(emb.view(-1, 4, self.config['token_dim'])).view(-1, 256)
-
-    is1_emb = self.is1_emb(internal_state[:, 0])  # [1, 16]
-    is2_emb = self.is2_emb(internal_state[:, 1])  # [1, 16]
-
-    patchs = d1.flatten(2).transpose(1, 2) + self.we.pos_emb(torch.arange(0, 256, device=d1.device))
-    scaled_embs = self.we.scale_embs(emb, is1_emb, is2_emb)
-    patchs_enriched = self.we.enrich_patchs(patchs, scaled_embs)  # [B, 256, 64]
-
-    hand_pred = self.we.find_hand_patch(patchs_enriched).squeeze(-1).argmax(-1)  # [B]
-    return emb, is1_emb, is2_emb, patchs, patchs_enriched, scaled_embs, hand_pred
   
+  def get_goal_is_emb(self, target_patch_idx):
+    goal_is_logits = self.we.get_is_from_patch_idx(target_patch_idx)
+    goal_is1_idx = goal_is_logits[:, :self.config['internal_state_n_values'][0]].argmax(-1)
+    goal_is2_idx = goal_is_logits[:, self.config['internal_state_n_values'][0]:].argmax(-1)
+    goal_is1_emb = self.we.is1_emb(goal_is1_idx)
+    goal_is2_emb = self.we.is2_emb(goal_is2_idx)
+    return torch.stack([goal_is1_idx, goal_is2_idx], dim=1), torch.cat([goal_is1_emb, goal_is2_emb], dim=-1)
+
   @torch.no_grad()
-  def evaluate_policy_in_imagination(self, policy_net):
-    policy_net.eval();self.patch_emb.eval();self.is1_emb.eval();self.is2_emb.eval();self.we.eval()
+  def evaluate_policy_in_imagination(self):
+    self.actor.eval();self.we.eval()
 
     # --- Get starting point from buffer ---
     batch = self.test_buffer.get_first_states()
 
-    # --- Retrieves embeddings, Get hand and target position ---
-    # emb: [B, 256], is1_emb: [B, 16], patchs_enriched: [B, 256, 64], hand_pred: [B]
-    emb, is1_emb, is2_emb, patchs, patchs_enriched, scaled_embs, hand_pred = self.get_actor_intermediate_vars(
-      batch['image'], batch['internal_state'])
-    target_pred = batch['target_patch_gt']  # [B]
+    # --- Retrieves embeddings, Get Goal Internal State ---
+    is1_emb = self.we.is1_emb(batch['internal_state'][:, 0])
+    is2_emb = self.we.is2_emb(batch['internal_state'][:, 1])
 
-    hand_patch_emb, target_patch_emb = self.patch_emb(hand_pred), self.patch_emb(target_pred)
+    goal_is_idx, goal_is_emb = self.get_goal_is_emb(batch['target_patch_gt'])
 
     # --- Run Episodes ---
     batch_size = batch['image'].shape[0]
@@ -846,29 +866,20 @@ class MasterMind:
       if not active_episodes.any():
         break
 
-      state = torch.cat([emb, hand_patch_emb, is1_emb, is2_emb], dim=-1)  # [B, 352]
+      current_is_emb = torch.cat([is1_emb, is2_emb], dim=-1)
       # ---- Policy forward pass π(a | s, g) ----
-      action, _, _ = policy_net.sample(state, target_patch_emb)  # [B], [B], [B]
+      action, _, _ = self.actor.sample(current_is_emb, goal_is_emb)  # [B], [B], [B]
 
       # --- Get next states --- next_is1, next_is2
-      action_emb = self.action_emb(action)  # [B, 8]
+      action_emb = self.we.action_emb(action)  # [B, 8]
 
-      _, _, nisp1, nisp2 = self.we.isp(emb, action_emb, is1_emb, is2_emb)  # [B, 19], [B, 37]
-
-      # --- Get next state embeddings --- next_emb, next_hand_patch_emb, next_is1_emb, next_is2_emb
-      emb_action = torch.cat([emb, action_emb], dim=-1)  # -> [B, 256+8]
-      emb = self.we.nep(emb_action)  # next_emb
-      emb = self.we.emb_enricher(emb.view(-1, 4, 64)).view(-1, 256)
-
-      hand_pred = self.we.find_next_hand_patch(
-        torch.cat([self.we.patch_emb(hand_pred), emb_action, is1_emb, is2_emb], dim=-1)
-      ).argmax(-1)
-      hand_patch_emb = self.patch_emb(hand_pred)  # next_hand_patch_emb
-
-      is1_emb, is2_emb = self.is1_emb(nisp1.argmax(-1)), self.is2_emb(nisp2.argmax(-1))  # next_is_emb
+      nisp1, nisp2 = self.we.isp.get_next_is(is1_emb, is2_emb, action_emb)  # [B, 19], [B, 37]
+      nisp1_idx, nisp2_idx = nisp1.argmax(-1), nisp2.argmax(-1)
+      is1_emb = self.we.is1_emb(nisp1_idx)  # next_is1_emb
+      is2_emb = self.we.is2_emb(nisp2_idx)  # next_is2_emb
 
       # --- Termination criteria ---
-      reached = hand_pred == target_pred
+      reached = (torch.stack([nisp1_idx, nisp2_idx], dim=1) == goal_is_idx).all(dim=1)
       
       newly_reached = active_episodes & reached
       if newly_reached.any():
@@ -880,12 +891,12 @@ class MasterMind:
     success_rate = total_successes / batch_size if batch_size > 0 else 0.0
     avg_steps = steps_to_success[steps_to_success > 0].float().mean().item() if total_successes > 0 else 0.0
 
-    policy_net.train();self.patch_emb.train();self.is1_emb.train();self.is2_emb.train();self.we.train()
+    self.actor.train();self.we.train()
     return success_rate, avg_steps
   
   @torch.no_grad()
-  def evaluate_policy(self, policy_net, n_episodes=10):
-    policy_net.eval();self.patch_emb.eval()
+  def evaluate_policy(self, n_episodes=10):
+    self.actor.eval()
 
     total_successes = 0
     total_steps_to_success = []
@@ -897,14 +908,15 @@ class MasterMind:
       img = self.env.render()
       internal_state, _, image, _, _, _, _ = self.train_buffer.prepare_data(obs//5, None, img)
 
-      emb, is1_emb, is2_emb, patchs, patchs_enriched, scaled_embs, hand_pred = self.get_actor_intermediate_vars(
+      emb, is1_emb, is2_emb, patchs, patchs_enriched, scaled_embs, hand_pred = self.we.get_state_representation(
         image.unsqueeze(0).to(self.device), internal_state.unsqueeze(0).to(self.device))
       target_pred = self.we.find_target_patch(patchs_enriched).squeeze(-1).argmax(-1)  # [1]
       
+      goal_is_idx, goal_is_emb = self.get_goal_is_emb(target_pred)
+
       for step in range(self.config['max_ep_len']):
-        hand_patch_emb, target_patch_emb = self.patch_emb(hand_pred), self.patch_emb(target_pred)
-        state = torch.cat([emb, hand_patch_emb, is1_emb, is2_emb], dim=-1)
-        action_logits = policy_net(state, target_patch_emb)  # [1, 5]
+        current_is_emb = torch.cat([is1_emb, is2_emb], dim=-1)
+        action_logits = self.actor(current_is_emb, goal_is_emb)  # [1, 5]
         action = torch.distributions.Categorical(logits=action_logits).sample()    # [1]
 
         next_obs, reward, terminated, truncated, info = self.env.step(action.item())
@@ -917,97 +929,28 @@ class MasterMind:
           total_steps_to_reached_target.append(step)
           break
 
-        internal_state, _, image, _, _, _, _ = self.train_buffer.prepare_data(next_obs//5, None, next_img)
+        internal_state, _, _, _, _, _, _ = self.train_buffer.prepare_data(next_obs//5, None, next_img)
+        internal_state = internal_state.to(self.device).unsqueeze(0)
 
-        emb, is1_emb, is2_emb, patchs, patchs_enriched, scaled_embs, hand_pred = self.get_actor_intermediate_vars(
-        image.unsqueeze(0).to(self.device), internal_state.unsqueeze(0).to(self.device))
-
-        if hand_pred == target_pred:
+        if (internal_state == goal_is_idx).all():
           total_target_reached += 1
           total_steps_to_reached_target.append(step)
           break
+
+        is1_emb = self.we.is1_emb(internal_state[:, 0])
+        is2_emb = self.we.is2_emb(internal_state[:, 1])
     
     success_rate = total_successes / n_episodes
     avg_steps = np.mean(total_steps_to_success) if total_steps_to_success else 0.0
     success_rate_predtarget = total_target_reached / n_episodes
     avg_steps_predtarget = np.mean(total_steps_to_reached_target) if total_steps_to_reached_target else 0.0
 
-    policy_net.train();self.patch_emb.train()
+    self.actor.train()
     return success_rate, avg_steps, success_rate_predtarget, avg_steps_predtarget
-    
-  def train_actor(self, n_epochs=100, n_steps=100):
-    self.we.eval()
-    self.actor.train();self.patch_emb.train()
-    self._reset_logs()
-
-    pbar = tqdm(range(n_epochs), desc='Phase 2')
-    for epoch in pbar:
-      # --- Training Step ---
-      for step in tqdm(range(n_steps), leave=False):
-        batch = self.train_buffer.sample(self.config['batch_size'], distinct_episodes=True)
-        
-        # --- Get all embeddings, Hand & Target positions, rewards ---
-        with torch.no_grad():
-          # --- Retrieves embeddings, Get hand and target position ---
-          emb, is1_emb, is2_emb, patchs, patchs_enriched, scaled_embs, hand_pred = self.get_actor_intermediate_vars(
-            batch['image'], batch['internal_state'])
-          target_pred = self.we.find_target_patch(patchs_enriched).squeeze(-1).argmax(-1)  # [B]
-          # replace target value where true value available
-          target_pred = torch.where(batch['target_patch_gt'] != -1, batch['target_patch_gt'], target_pred)
-
-          hand_pos = torch.stack([hand_pred % 16, hand_pred // 16], dim=1).float()        # [B, 2]
-          target_pos = torch.stack([target_pred % 16, target_pred // 16], dim=1).float()  # [B, 2]
-          current_dist = torch.norm(hand_pos - target_pos, dim=1)                         # [B]
-
-          # --- Computes rewards ---
-          rewards = []
-          for action in range(self.config['action_n_values']):
-            action_emb = self.action_emb(torch.full((current_dist.shape[0],), action, device=self.device))  # [B, 8]
-            
-            next_hand_pred = self.we.find_next_hand_patch(
-              torch.cat([self.we.patch_emb(hand_pred), emb, action_emb, is1_emb, is2_emb], dim=-1)).argmax(-1)
-            next_hand_pos = torch.stack([next_hand_pred % 16, next_hand_pred // 16], dim=1).float()
-            next_dist = torch.norm(next_hand_pos - target_pos, dim=1)
-            
-            reward = current_dist - next_dist
-            rewards.append(reward)
-          
-          rewards = torch.stack(rewards, dim=1)  # [B, 5]
-        
-        # --- Get output distribution and compute loss ---
-        hand_patch_emb, target_patch_emb = self.patch_emb(hand_pred), self.patch_emb(target_pred)
-        state = torch.cat([emb, hand_patch_emb, is1_emb, is2_emb], dim=-1)
-        action_logits = self.actor(state, target_patch_emb)  # [1, 5]
-
-        target_dist = F.softmax(rewards, dim=1)
-        log_policy = F.log_softmax(action_logits, dim=1)
-        loss = F.kl_div(log_policy, target_dist.detach(), reduction='batchmean')
-
-        self.actor_optimizer.zero_grad()
-        loss.backward()
-        self.actor_optimizer.step()
-
-      if (epoch + 1) % 10 == 0:
-        success_rate_imagination, avg_steps_imagination = self.evaluate_policy_in_imagination(self.actor)
-        success_rate, avg_steps, success_rate_predtarget, avg_steps_predtarget = self.evaluate_policy(self.actor)
-
-        if self.tf_logger:
-          self.tf_logger.add_scalar('actor_loss', loss.item(), epoch)
-          self.tf_logger.add_scalar('actor_eval_success_rate', success_rate, epoch)
-          self.tf_logger.add_scalar('actor_eval_avg_steps_to_success', avg_steps, epoch)
-          self.tf_logger.add_scalar('actor_eval_success_rate_predtarget', success_rate_predtarget, epoch)
-          self.tf_logger.add_scalar('actor_eval_avg_steps_predtarget_to_success', avg_steps_predtarget, epoch)
-          self.tf_logger.add_scalar('actor_eval_success_rate_imagination', success_rate_imagination, epoch)
-          self.tf_logger.add_scalar('actor_eval_avg_steps_to_success_imagination', avg_steps_imagination, epoch)
-        
-        descr = f'Phase 2: loss={loss.item():.4f} | {success_rate=:.2f} | steps={avg_steps:.2f}'
-        descr += f' | sr_target={success_rate_predtarget:.2f} | steps={avg_steps_predtarget:.2f}'
-        descr += f' | sr_i={success_rate_imagination:.2f} | steps={avg_steps_imagination:.2f}'
-        pbar.set_description(descr)
   
   def ppo_train_actor(self, n_epochs=500):
     self.we.eval()
-    self.policy.train(); self.critic.train(); self.patch_emb.train()
+    self.actor.train(); self.critic.train()
     self._reset_logs()
 
     pbar = tqdm(range(n_epochs), desc='Phase 2 (PPO)')
@@ -1021,43 +964,34 @@ class MasterMind:
       with torch.no_grad():
         # --- Retrieves embeddings, Get hand and target position ---
         # emb: [B, 256], is1_emb: [B, 16], patchs_enriched: [B, 256, 64], hand_pred: [B]
-        emb, is1_emb, is2_emb, patchs, patchs_enriched, scaled_embs, hand_pred = self.get_actor_intermediate_vars(
+        emb, is1_emb, is2_emb, patchs, patchs_enriched, scaled_embs, hand_pred = self.we.get_state_representation(
           batch['image'], batch['internal_state'])
         target_pred = self.we.find_target_patch(patchs_enriched).squeeze(-1).argmax(-1)  # [B]
         # replace target value where true value available
         target_pred = torch.where(batch['target_patch_gt'] != -1, batch['target_patch_gt'], target_pred)
 
-        hand_patch_emb, target_patch_emb = self.patch_emb(hand_pred), self.patch_emb(target_pred)
+        current_is_emb = torch.cat([is1_emb, is2_emb], dim=-1)
+        goal_is_idx, goal_is_emb = self.get_goal_is_emb(target_pred)
 
         # --- Collect Episodes ---
         active_episodes = torch.ones(batch['image'].shape[0], dtype=torch.bool, device=self.device)
         for _ in tqdm(range(self.config['max_ep_len']), leave=False):
-          state = torch.cat([emb, hand_patch_emb, is1_emb, is2_emb], dim=-1)  # [B, 352]
           # ---- Policy forward pass π(a | s, g) ----
-          action, log_prob, entropy = self.policy.sample(state, target_patch_emb)  # [B], [B], [B]
+          action, log_prob, entropy = self.actor.sample(current_is_emb, goal_is_emb)  # [B], [B], [B]
 
           # --- Goal-conditioned value estimate V(s, g) ---
-          value = self.critic(state, target_patch_emb)
+          value = self.critic(current_is_emb, goal_is_emb)
 
           # --- Get next states --- next_is1, next_is2
-          action_emb = self.action_emb(action)  # [B, 8]
+          action_emb = self.we.action_emb(action)  # [B, 8]
 
-          isp1, isp2, nisp1, nisp2 = self.we.isp(emb, action_emb, is1_emb, is2_emb)  # [B, 19], [B, 37]
-
-          # --- Get next state embeddings --- next_emb, next_hand_patch_emb, next_is1_emb, next_is2_emb
-          emb_action = torch.cat([emb, action_emb], dim=-1)  # -> [B, 256+8]
-          emb = self.we.nep(emb_action)  # next_emb
-          emb = self.we.emb_enricher(emb.view(-1, 4, 64)).view(-1, 256)
-
-          hand_pred = self.we.find_next_hand_patch(
-            torch.cat([self.we.patch_emb(hand_pred), emb_action, is1_emb, is2_emb], dim=-1)
-          ).argmax(-1)
-          hand_patch_emb = self.patch_emb(hand_pred)  # next_hand_patch_emb
-
-          is1_emb, is2_emb = self.is1_emb(nisp1.argmax(-1)), self.is2_emb(nisp2.argmax(-1))  # next_is_emb
+          nisp1, nisp2 = self.we.isp.get_next_is(is1_emb, is2_emb, action_emb)  # [B, 19], [B, 37]
+          nisp1_idx, nisp2_idx = nisp1.argmax(-1), nisp2.argmax(-1)
+          is1_emb = self.we.is1_emb(nisp1_idx)  # next_is1_emb
+          is2_emb = self.we.is2_emb(nisp2_idx)  # next_is2_emb
 
           # --- Termination criteria, reward ---
-          reached = hand_pred == target_pred
+          reached = (goal_is_idx == torch.stack([nisp1_idx, nisp2_idx], dim=1)).all(dim=1)
           # The reward is 0 if the goal is reached, and -0.1 otherwise (sparse reward).
           reward = torch.where(reached, 0.0, -0.1)
           # The mask is 0 when the episode is terminal (goal reached), and 1 otherwise.
@@ -1065,27 +999,29 @@ class MasterMind:
           active_episodes.logical_and_(~reached)
 
           # --- Save step ---
-          traj['states'].append(state)
-          traj['goals'].append(target_patch_emb)
+          traj['states'].append(current_is_emb)
+          traj['goals'].append(goal_is_emb)
           traj['actions'].append(action)
           traj['rewards'].append(reward)
           traj['log_probs'].append(log_prob)
           traj['values'].append(value)
           traj['masks'].append(mask)
 
+          current_is_emb = torch.cat([is1_emb, is2_emb], dim=-1)
+
           if not active_episodes.any(): break
       
       # Bootstrap value V(s_T, g) for GAE
       with torch.no_grad():
-        final_val = self.critic(state, target_patch_emb)
+        final_val = self.critic(current_is_emb, goal_is_emb)
 
       policy_loss, value_loss = hz.ppo_update(
-        self.policy, self.critic, self.policy_optimizer, self.critic_optimizer, traj, final_val
+        self.actor, self.critic, self.ppo_actor_optimizer, self.critic_optimizer, traj, final_val
       )
       
       if (epoch + 1) % 10 == 0:
-        success_rate_imagination, avg_steps_imagination = self.evaluate_policy_in_imagination(self.policy)
-        success_rate, avg_steps, success_rate_predtarget, avg_steps_predtarget = self.evaluate_policy(self.policy)
+        success_rate_imagination, avg_steps_imagination = self.evaluate_policy_in_imagination()
+        success_rate, avg_steps, success_rate_predtarget, avg_steps_predtarget = self.evaluate_policy()
 
         if self.tf_logger:
           self.tf_logger.add_scalar('ppo_policy_loss', policy_loss, epoch)
@@ -1107,20 +1043,24 @@ class MasterMind:
     self.fill_memory(self.train_buffer, n_episodes=self.config['n_train_episodes'])
     self.fill_memory(self.test_buffer, n_episodes=self.config['n_test_episodes'], act='best')
 
+    self._fill_patch_to_internal_states_mapping()
+
     pbar = tqdm(range(1000), desc='Phase 1')
     eval_loss = 0.0
     best_loss = float('inf')
     patience = 0
+    save_at_epoch = 0
     for epoch in pbar:
-      train_loss = self.train_step(epoch)
+      train_loss = self.train_we(epoch)
 
       if (epoch + 1) % 10 == 0:
-        eval_loss = self.eval_step(epoch)
+        eval_loss = self.eval_we(epoch)
 
         if eval_loss < best_loss:
           self.save_models(os.path.join(self.save_dir, f"{self.config['exp_name']}.pt"))
           best_loss = eval_loss
           patience = 0
+          save_at_epoch = epoch
         else:
           patience += 1
         
@@ -1128,10 +1068,9 @@ class MasterMind:
           logger.info(f'The validation loss did not improve over the last 200 epochs -> training stopped')
           break
       
-      pbar.set_description(f'Phase 1: {train_loss=:.4f} - {eval_loss=:.4f}')
+      pbar.set_description(f'Phase 1: {train_loss=:.4f} - {eval_loss=:.4f} - {save_at_epoch=}')
 
     # === PHASE 2 ===
-    # self.train_actor()
     self.ppo_train_actor()
 
 
