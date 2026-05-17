@@ -26,6 +26,7 @@ import json
 import math
 import torch
 import random
+import imageio
 import numpy as np
 import torch.nn.functional as F
 
@@ -229,9 +230,6 @@ def create_gif_from_images(images, filename, duration=100):
   """
   Creates a GIF from a list of PIL images or numpy arrays.
   """
-  import imageio
-  import numpy as np
-  
   pil_images = []
   for img in images:
     if isinstance(img, torch.Tensor):

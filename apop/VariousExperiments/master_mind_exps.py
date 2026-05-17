@@ -155,19 +155,20 @@ class WorldEncoder(nn.Module):
     return target_pred
 
   def forward(self, image, action, internal_state):
+    # --- Encode, Embed ---
     action_emb = self.action_emb(action).squeeze(1)
     rec, _, emb, is1_emb, is2_emb, patchs = self._get_base_representation(image, internal_state)
     
     emb_action = torch.cat([emb, action_emb], dim=-1)         # -> [B, 256+16]
 
-    # 2) Predict Next Embedding
+    # --- Predict Next Embedding ---
     next_emb = self.nep(emb_action)
 
-    # 3) Predict Internal State
+    # --- Predict Internal State ---
     x_isp = self.isp_net(emb)
     isp1, isp2 = self.isp_is1_head(x_isp), self.isp_is2_head(x_isp)
 
-    # 4) Predict Object Position - object = hand & target
+    # --- Predict Object Position - object = hand & target ---
     scaled_embs = self.scale_embs(emb, is1_emb, is2_emb)
     patchs_enriched = self.object_enricher(torch.cat([patchs] + scaled_embs, dim=1))[:, :-len(scaled_embs)]
 
@@ -748,7 +749,7 @@ class MasterMind:
           break
       if not terminated:
         print(f'{distances=}')
-        print(f'Top 5 predicted target patches: {top_patches}')
+        print(f'Top 5 predicted target patches: {top_patches.tolist()}')
 
         # Visualization
         img_to_show = (image.squeeze(0).cpu() * 0.5) + 0.5  # De-normalize and move to CPU
@@ -767,9 +768,64 @@ class MasterMind:
 
     self.we.train()
 
+  def save_episode_gif(self, replay_buffer, filename, episode_index=None):
+    """
+    Retrieves a full episode from the replay buffer and saves it as a GIF.
+
+    Args:
+        replay_buffer (ReplayBuffer): The replay buffer to sample from.
+        filename (str): The path to save the GIF file.
+        episode_index (int, optional): The specific episode ID to retrieve. 
+                                       If None, a random episode is sampled. Defaults to None.
+    """
+    if replay_buffer.size == 0:
+      logger.warning("Replay buffer is empty. Cannot save episode GIF.")
+      return
+
+    episode_ids_tensor = None
+    if episode_index is not None:
+      episode_ids_tensor = torch.tensor([episode_index], device=replay_buffer.device)
+    
+    # Sample a single, full-length episode
+    # We use max_ep_len to ensure we get the whole episode, which will be padded if shorter
+    batch = replay_buffer.sample_episode_batch(
+      batch_size=1,
+      episode_length=self.config['max_ep_len'],
+      random_window=False, # Get the last part of the episode if it's too long
+      episode_ids=episode_ids_tensor
+    )
+
+    # Get the actual length of the sampled episode
+    episode_len = batch['episode_size'][0].item()
+
+    if episode_len == 0:
+      logger.warning("Sampled an empty episode. Cannot save GIF.")
+      return
+
+    # Get all images from the episode trajectory
+    # Shape: [T, C, H, W]
+    episode_images = batch['image'][0, :episode_len]
+
+    # Get the final 'next_image' of the last state in the episode
+    # Shape: [C, H, W]
+    last_next_image = batch['next_image'][0, episode_len - 1]
+
+    # Combine the sequence of images with the final next_image
+    all_images = list(episode_images) + [last_next_image]
+
+    # De-normalize images if they were normalized for the buffer
+    if self.config['normalize_image']:
+      all_images = [(img * 0.5) + 0.5 for img in all_images]
+
+    # Create and save the GIF
+    hz.create_gif_from_images(all_images, filename, duration=150)
+    logger.info(f"Saved episode GIF to {filename}")
+
   def train(self):
     # === PHASE 1 ===
+    logger.info('Phase 1: Train World Encoder-Model')
     self.fill_memory(self.train_buffer, n_episodes=self.config['n_train_episodes'])
+    logger.info(f'Successful episodes: {len(self.train_buffer.successful_episodes)}/{self.train_buffer.current_episode_id}')
     self.fill_memory(self.test_buffer, n_episodes=self.config['n_test_episodes'], act='best')
 
     self._fill_patch_to_internal_states_mapping()
@@ -806,4 +862,8 @@ class MasterMind:
 if __name__ == '__main__':
   mm = MasterMind()
   mm.train()
+  
+  # --- Save a GIF of a random episode from the test buffer ---
+  gif_save_path = os.path.join(mm.save_dir, "test_episode.gif")
+  mm.save_episode_gif(mm.test_buffer, gif_save_path)
   # TODO use RNN for next embedding prediction and add multistep training

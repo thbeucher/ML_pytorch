@@ -443,7 +443,7 @@ class ReplayBuffer:
     other_vars = {k: v[idxs].to(self.target_device) for k, v in self.other_stored_obj.items()}
     return {**batch, **other_vars}
   
-  def sample_episode_batch(self, batch_size, episode_length, random_window=True, success_reward=None):
+  def sample_episode_batch(self, batch_size, episode_length, random_window=True, success_reward=None, episode_ids=None):
     B, T = batch_size, episode_length
 
     batch = {
@@ -477,16 +477,17 @@ class ReplayBuffer:
     batch = {**batch, **{k: torch.zeros((B, T, *v.shape[1:]),
                                         device=self.target_device,
                                         dtype=v.dtype) for k, v in self.other_stored_obj.items()}}
+    
+    if episode_ids is None:
+      if success_reward is None:
+        # ---- sample random episode ids ----
+        episode_ids = torch.randint(0, self.current_episode_id, (batch_size,), device=self.device)
+      else:
+        # ---- find episodes whose final transition has reward == success_reward ----
+        valid_episode_ids = torch.tensor(self.successful_episodes, device=self.device)
 
-    if success_reward is None:
-      # ---- sample random episode ids ----
-      episode_ids = torch.randint(0, self.current_episode_id, (batch_size,), device=self.device)
-    else:
-      # ---- find episodes whose final transition has reward == success_reward ----
-      valid_episode_ids = torch.tensor(self.successful_episodes, device=self.device)
-
-      # ---- sample only valid episodes ----
-      episode_ids = valid_episode_ids[torch.randint(0, len(valid_episode_ids), (B,), device=self.device)]
+        # ---- sample only valid episodes ----
+        episode_ids = valid_episode_ids[torch.randint(0, len(valid_episode_ids), (B,), device=self.device)]
 
     for b, eid in enumerate(episode_ids):
       ep_mask = (self.episode_id[:self.size] == eid)
