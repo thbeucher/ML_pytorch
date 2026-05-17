@@ -410,10 +410,10 @@ class MasterMind:
     target_preds_indices = target_pred[:n_samples].argmax(dim=1)
 
     colors = {
-      'hand_gt': (0, 0, 1),        # Blue
-      'hand_pred': (0, 1, 1),       # Cyan
+      'hand_gt': (0.6, 0.8, 0.9),  # light Blue
+      'hand_pred': (0, 1, 1),      # Cyan
       'target_gt': (0, 1, 0),      # Green
-      'target_pred': (1, 1, 0),     # Yellow
+      'target_pred': (1, 1, 0),    # Yellow
     }
 
     for i in range(n_samples):
@@ -715,7 +715,8 @@ class MasterMind:
       distances.append(round(info['distance_to_target']))
       if terminated:
         break
-    return terminated, obs, distances
+    internal_state, *_ = self.train_buffer.prepare_data(obs//5)
+    return terminated, internal_state.to(self.device), distances
   
   @torch.no_grad()
   def evaluate_target_predictor(self, n_episodes=10):
@@ -740,8 +741,10 @@ class MasterMind:
         for goal_is1_idx, goal_is2_idx in zip(goal_is1_idxs, goal_is2_idxs):
           # --- Get actions sequence ---
           actions = self.get_actions_to_goal(internal_state, torch.stack([goal_is1_idx, goal_is2_idx]))
+          if not actions:
+            continue
           # --- Perform actions ---
-          terminated, obs, distances = self.perform_actions_sequence(self.env, actions)
+          terminated, internal_state, distances = self.perform_actions_sequence(self.env, actions)
           if terminated:
             total_successes += 1
             break
@@ -749,7 +752,7 @@ class MasterMind:
           break
       if not terminated:
         print(f'{distances=}')
-        print(f'Top 5 predicted target patches: {top_patches.tolist()}')
+        print(f'Top 3 predicted target patches: {top_patches.tolist()}')
 
         # Visualization
         img_to_show = (image.squeeze(0).cpu() * 0.5) + 0.5  # De-normalize and move to CPU
@@ -766,8 +769,59 @@ class MasterMind:
         plt.show()
     print(f'total_successes: {total_successes}/{n_episodes}')
 
-    self.we.train()
+  @torch.no_grad()
+  def plot_hand_patch_predictions(self, buffer=None):
+    """
+    Takes a random batch of 9, plots them in a 3x3 grid, 
+    and colors the top-3 hand patch predictions.
+    """
+    self.we.eval()
+    
+    if buffer is None:
+        buffer = self.train_buffer
 
+    if buffer.size == 0:
+      logger.warning("Buffer is empty. Cannot plot hand patch predictions.")
+      return
+
+    batch = buffer.sample(9)
+    
+    image = batch['image']
+    action = batch['action']
+    internal_state = batch['internal_state']
+
+    _, _, _, _, _, hand_pred, _, _ = self.we(image, action, internal_state)
+    
+    top_patches = hand_pred.topk(5, dim=1)[1]
+
+    # De-normalize and move to CPU for plotting
+    imgs_to_show = (image.cpu() * 0.5) + 0.5
+    
+    # Define colors for top predictions
+    colors = [(1, 0, 0), (0, 1, 0), (0, 0, 1), (0.9, 0.6, 0), (0.7, 0.1, 0.1)]  # Red, Green, Blue, Orange, Dark Red
+
+    fig, axs = plt.subplots(3, 3, figsize=(9, 9))
+    fig.suptitle("Top-5 Hand Patch Predictions (R,G,B) and GT (Yellow)", fontsize=16)
+
+    for i in range(9):
+      row, col = i // 3, i % 3
+      ax = axs[row, col]
+
+      img_viz = imgs_to_show[i].clone()
+      for j, patch_idx in enumerate(top_patches[i]):
+        img_viz = self.draw_patch(img_viz, patch_idx.item(), colors[j])
+
+      # Also draw the ground truth hand patch if available
+      # hand_patch_gt = self._get_patch_from_img(image[i].unsqueeze(0), self.hand_condition)
+      # if hand_patch_gt.item() != -1:
+      #   img_viz = self.draw_patch(img_viz, hand_patch_gt.item(), (1, 1, 0)) # Yellow for GT
+      
+      ax.imshow(img_viz.permute(1, 2, 0).numpy())
+      ax.axis('off')
+
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    plt.show()
+    
   def save_episode_gif(self, replay_buffer, filename, episode_index=None):
     """
     Retrieves a full episode from the replay buffer and saves it as a GIF.
@@ -858,12 +912,72 @@ class MasterMind:
     # === PHASE 2 ===
     self.evaluate_target_predictor()
 
+  @torch.no_grad()
+  def autoplay(self):
+    import pygame;import time
+
+    self.we.eval()
+    self.env.close()
+    self.set_env('human')
+
+    pygame.init()
+    running = True
+
+    while running:
+      # ---- Handle User Input ----
+      for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+          running = False
+
+      obs, _ = self.env.reset()
+      img = self.env.render()
+
+      internal_state, _, image, _, _, _, _ = self.train_buffer.prepare_data(obs//5, None, img)
+      image, internal_state = image.to(self.device), internal_state.to(self.device)
+
+      # --- Predict Target Patch Index ---
+      target_patch = self.we.get_target_prediction(image.unsqueeze(0), internal_state.unsqueeze(0))
+      top_patches = target_patch.topk(3)[-1].squeeze(0)
+
+      terminated = False
+      for patch_idx in top_patches:
+        # --- Predict Goal Internal State from Target Patch Index ---
+        goal_is_logits = self.we.get_is_from_patch_idx(patch_idx.unsqueeze(0))
+        goal_is1_idxs = goal_is_logits[:, :self.config['internal_state_n_values'][0]].topk(3)[-1].squeeze(0)
+        goal_is2_idxs = goal_is_logits[:, self.config['internal_state_n_values'][0]:].topk(3)[-1].squeeze(0)
+
+        for goal_is1_idx, goal_is2_idx in zip(goal_is1_idxs, goal_is2_idxs):
+          # --- Get actions sequence ---
+          actions = self.get_actions_to_goal(internal_state.to(self.device), torch.stack([goal_is1_idx, goal_is2_idx]))
+          if not actions: continue
+
+          # --- Perform actions and render each step---
+          for action in actions:
+            obs, _, terminated, *_ = self.env.step(action)
+            self.env.render()
+            if terminated: break
+          if terminated: break
+          internal_state, *_ = self.train_buffer.prepare_data(obs//5)
+        if terminated: break
+      time.sleep(1)
+    self.env.close()
+    pygame.quit()
+
 
 if __name__ == '__main__':
   mm = MasterMind()
-  mm.train()
+
+  rep = input('Start training? (y or n):')
+  if rep == 'y':
+    mm.train()
   
-  # --- Save a GIF of a random episode from the test buffer ---
-  gif_save_path = os.path.join(mm.save_dir, "test_episode.gif")
-  mm.save_episode_gif(mm.test_buffer, gif_save_path)
+  rep = input('Start Autoplay? (y or n):')
+  if rep == 'y':
+    mm.autoplay()
+  
   # TODO use RNN for next embedding prediction and add multistep training
+  # TODO add a model that take patches and emb as input and output a score for each patches.
+  #      For the ground truth, we take the sum of reconstruction error and next embedding error
+  #      and when available the success reward, the scores must be normalized and highest score should
+  #      correspond to the success
+  # TODO use Ensemble
