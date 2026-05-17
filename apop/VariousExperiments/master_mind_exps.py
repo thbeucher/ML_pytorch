@@ -280,14 +280,14 @@ class MasterMind:
       device=self.config['replay_buffer_device'],
       target_device=self.device
     )
-    self.we_optimizer = torch.optim.AdamW([
-      {'params': self.we.parameters(), 'lr': 1e-4},
-    ])
     self.hand_condition = lambda frames: (frames[:, 2, :, :] > frames[:, 0, :, :]) & \
                                           (frames[:, 2, :, :] > frames[:, 1, :, :]) & \
                                           (frames[:, 2, :, :] > 0.1)
     self.train_buffer.set_hand_condition(self.hand_condition)
     self.test_buffer.set_hand_condition(self.hand_condition)
+    self.we_optimizer = torch.optim.AdamW([
+      {'params': self.we.parameters(), 'lr': 1e-4},
+    ])
   
   def save_models(self, path):
     """Saves the state of all models and optimizers."""
@@ -709,17 +709,15 @@ class MasterMind:
     return actions
   
   def perform_actions_sequence(self, env, actions):
-    distances = []
     for action in actions:
       obs, reward, terminated, truncated, info = env.step(action)
-      distances.append(round(info['distance_to_target']))
       if terminated:
         break
     internal_state, *_ = self.train_buffer.prepare_data(obs//5)
-    return terminated, internal_state.to(self.device), distances
+    return terminated, internal_state.to(self.device)
   
   @torch.no_grad()
-  def evaluate_target_predictor(self, n_episodes=10):
+  def evaluate_target_predictor(self, n_episodes=100, show_unfinished=False):
     self.we.eval()
 
     total_successes = 0
@@ -744,21 +742,19 @@ class MasterMind:
           if not actions:
             continue
           # --- Perform actions ---
-          terminated, internal_state, distances = self.perform_actions_sequence(self.env, actions)
+          terminated, internal_state = self.perform_actions_sequence(self.env, actions)
           if terminated:
             total_successes += 1
             break
         if terminated:
           break
-      if not terminated:
-        print(f'{distances=}')
-        print(f'Top 3 predicted target patches: {top_patches.tolist()}')
-
+      if not terminated and show_unfinished:
         # Visualization
         img_to_show = (image.squeeze(0).cpu() * 0.5) + 0.5  # De-normalize and move to CPU
-        
+
         # Define colors for top predictions
-        colors = [(1, 1, 0), (0, 1, 0), (0.9, 0.6, 0), (0.7, 0.1, 0.1), (0.8, 0.2, 0)]  # Yellow, Green, Orange, Dark Red, Reddish
+        #          Yellow      Green       Orange         Dark Red         Reddish
+        colors = [(1, 1, 0), (0, 1, 0), (0.9, 0.6, 0), (0.7, 0.1, 0.1), (0.8, 0.2, 0)]
 
         img_viz = img_to_show.clone()
         for i, patch_idx in enumerate(top_patches):
@@ -910,7 +906,6 @@ class MasterMind:
       pbar.set_description(f'Phase 1: {train_loss=:.4f} - {eval_loss=:.4f} - {save_at_epoch=}')
 
     # === PHASE 2 ===
-    self.evaluate_target_predictor()
 
   @torch.no_grad()
   def autoplay(self):
@@ -965,14 +960,24 @@ class MasterMind:
 
 
 if __name__ == '__main__':
+  import argparse
+
+  parser = argparse.ArgumentParser(description='MasterMind Agent')
+  parser.add_argument('--train', '-t', action='store_true', help='Start training the model')
+  parser.add_argument('--evaluate', '-e', action='store_true', help='Evaluate the trained model')
+  parser.add_argument('--autoplay', '-a', action='store_true', help='Start autoplay with the trained model')
+  parser.add_argument('--show_unfinished', '-s', action='store_true', help='Show unfinished episode')
+  args = parser.parse_args()
+
   mm = MasterMind()
 
-  rep = input('Start training? (y or n):')
-  if rep == 'y':
+  if args.train:
     mm.train()
   
-  rep = input('Start Autoplay? (y or n):')
-  if rep == 'y':
+  if args.evaluate:
+    mm.evaluate_target_predictor(show_unfinished=args.show_unfinished)
+  
+  if args.autoplay:
     mm.autoplay()
   
   # TODO use RNN for next embedding prediction and add multistep training
