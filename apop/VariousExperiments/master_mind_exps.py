@@ -12,13 +12,13 @@ import matplotlib.pyplot as plt
 
 from tqdm import tqdm
 from collections import defaultdict
+from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 import models_zoo as mz
 import helpers_zoo as hz
 
-from replay_buffer import ReplayBuffer
-
+from replay_buffer import ReplayBuffer, ReplayBufferDataset
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -69,41 +69,28 @@ class WorldEncoder(nn.Module):
     )
     # === CNN Auto-Encoder ===
     self.ae = mz.CNNAE(self.config['ae_config'])
-    self.emb_enricher = mz.Transformer(dim=self.config['token_dim'], depth=2, heads=4, dim_head=32, mlp_dim=128, dropout=0.0)
+    self.emb_enricher = mz.Transformer(dim=self.config['token_dim'], depth=2, heads=4, dim_head=32, mlp_dim=128, dropout=0.)
     # === Next Embedding Predictor ===
-    self.nep = mz.get_linear_net(
-      self.config['emb_dim'] + self.config['action_emb'],
-      2 * self.config['emb_dim'],
-      self.config['emb_dim']
-    )
+    self.nep = mz.StandardMLP(self.config['emb_dim'] + self.config['action_emb'], 2*self.config['emb_dim'], self.config['emb_dim'],
+                              dropout=0.)
     # === Internal State Predictor ===
-    self.isp_net = mz.get_linear_net(self.config['emb_dim'], self.config['emb_dim'], self.config['emb_dim'])
+    self.isp_net = mz.StandardMLP(self.config['emb_dim'], 2*self.config['emb_dim'], self.config['emb_dim'], dropout=0., residual=True)
     self.isp_is1_head = nn.Linear(self.config['emb_dim'], self.config['is1_n_values'])
-    self.isp_is2_head = mz.get_linear_net(self.config['emb_dim'], self.config['emb_dim'] // 2, self.config['is2_n_values'])
+    self.isp_is2_head = nn.Linear(self.config['emb_dim'], self.config['is2_n_values'])
     # === Object Predictors ===
     self.pos_emb = nn.Embedding(self.config['n_patches'], self.config['token_dim'])
     self.is_scaler = nn.Linear(self.config['is_emb_dim'], self.config['token_dim'])
     self.emb_scaler = nn.Linear(self.config['emb_dim'], self.config['token_dim'])
     # C1 = d1 = [B, 64, 16, 16] -> [B, 16*16, 64]
-    self.object_enricher = mz.Transformer(dim=self.config['token_dim'], depth=2, heads=4, dim_head=32, mlp_dim=128, dropout=0.0)
-    self.find_hand_patch = nn.Sequential(
-      nn.Linear(self.config['token_dim'], 2 * self.config['emb_dim']),
-      nn.ReLU(True),
-      nn.Linear(2 * self.config['emb_dim'], 1)
-    )
+    self.object_enricher = mz.Transformer(dim=self.config['token_dim'], depth=2, heads=4, dim_head=32, mlp_dim=128, dropout=0.)
+    self.find_hand_patch = mz.StandardMLP(self.config['token_dim'], 4*self.config['token_dim'], 1, dropout=0.)
     self.patch_emb = nn.Embedding(self.config['n_patches'], self.config['patch_emb_dim'])
-    self.find_target_patch = nn.Sequential(
-      nn.Linear(self.config['token_dim'], 2 * self.config['emb_dim']),
-      nn.ReLU(True),
-      nn.Linear(2 * self.config['emb_dim'], 1)
-    )
+    self.find_target_patch = mz.StandardMLP(self.config['token_dim'], 2*self.config['token_dim'], 1, dropout=0.)
     # === Internal State from Patch ===
     self.patch_to_is_emb = nn.Embedding(self.config['n_patches'], self.config['patch_emb_dim'])
-    self.patch_to_is_net = nn.Sequential(
-      nn.Linear(self.config['patch_emb_dim'], 128),
-      nn.SiLU(),
-      nn.Linear(128, self.config['is1_n_values'] + self.config['is2_n_values'])
-    )
+    self.patch_to_is_net = mz.StandardMLP(self.config['patch_emb_dim'], 2*self.config['patch_emb_dim'],
+                                          self.config['is1_n_values'] + self.config['is2_n_values'],
+                                          dropout=0.)
   
   def get_is_from_patch_idx(self, patch_idx):
     return self.patch_to_is_net(self.patch_to_is_emb(patch_idx))
@@ -162,7 +149,7 @@ class WorldEncoder(nn.Module):
     emb_action = torch.cat([emb, action_emb], dim=-1)         # -> [B, 256+16]
 
     # --- Predict Next Embedding ---
-    next_emb = self.nep(emb_action)
+    next_emb = self.nep(emb_action.detach())
 
     # --- Predict Internal State ---
     x_isp = self.isp_net(emb)
@@ -191,7 +178,7 @@ class WorldEncoder(nn.Module):
 class MasterMind:
   CONFIG = {
     'save_dir':                          'experiments/',
-    'exp_name':                          'master_mind_cleaned',
+    'exp_name':                          'master_mind_checkDist15',
     'use_tf_logger':                     True,
     'load_model':                        True,
     # === Replay Buffer & Models info ===
@@ -238,7 +225,7 @@ class MasterMind:
     self.set_utils()
 
     if self.config['load_model']:
-      model_path = os.path.join(self.save_dir, f"{self.config['exp_name']}.pt")
+      model_path = self.config.get('model_path', os.path.join(self.save_dir, f"{self.config['exp_name']}.pt"))
       self.load_models(model_path)
   
   def set_env(self, render_mode='rgb_array'):
@@ -264,9 +251,10 @@ class MasterMind:
       self.config['internal_state_dim'],
       self.config['action_dim'],
       self.config['image_size'],
+      self.config['n_patches'],
       resize_to=self.config['resize_to'] if resize_img else None,
       normalize_img=self.config['normalize_image'],
-      capacity=self.config['n_train_episodes'] * self.config['max_ep_len'],
+      capacity=2 * self.config['n_train_episodes'] * self.config['max_ep_len'],
       device=self.config['replay_buffer_device'],
       target_device=self.device
     )
@@ -274,6 +262,7 @@ class MasterMind:
       self.config['internal_state_dim'],
       self.config['action_dim'],
       self.config['image_size'],
+      self.config['n_patches'],
       resize_to=self.config['resize_to'] if resize_img else None,
       normalize_img=self.config['normalize_image'],
       capacity=self.config['n_test_episodes'] * self.config['max_ep_len'],
@@ -313,6 +302,12 @@ class MasterMind:
     img = self.env.render()
 
     for _ in tqdm(range(n_episodes)):
+      if act == 'random_target':
+        self.get_target_and_reach_it(obs, img, max_ep_steps=max_episode_steps, replay_buffer=replay_buffer)
+        obs, _ = self.env.reset()
+        img = self.env.render()
+        continue
+
       episode_step = 0
       for _ in range(max_episode_steps):
         if act == 'policy':
@@ -327,8 +322,9 @@ class MasterMind:
 
         episode_step += 1
 
-        replay_buffer.add(obs//5, action, img, reward, terminated or episode_step >= max_episode_steps,
-                          next_obs//5, next_img)
+        replay_buffer.add(obs//5, action, img, reward,
+                          terminated or episode_step >= max_episode_steps,
+                          next_obs//5, next_img, info)
         obs, img = next_obs, next_img
 
         if terminated or episode_step >= max_episode_steps:
@@ -381,6 +377,29 @@ class MasterMind:
     start_y = patch_y * patch_size
     for c_idx, c_val in enumerate(color):
       img_copy[c_idx, start_y:start_y+patch_size, start_x:start_x+patch_size] = c_val
+    return img_copy
+  
+  def draw_all_patches(self, img, patch_values, cmap, alpha=0.6):
+    img_copy = img.clone()
+    patch_size = 2
+    grid_size = 16
+    
+    # Normalize patch_values for this image to [0, 1] for the colormap
+    normalized_values = (patch_values - patch_values.min()) / (patch_values.max() - patch_values.min() + 1e-8)
+
+    for patch_idx in range(len(patch_values)):
+        patch_y = patch_idx // grid_size
+        patch_x = patch_idx % grid_size
+        start_x = patch_x * patch_size
+        start_y = patch_y * patch_size
+        
+        color = torch.tensor(cmap(normalized_values[patch_idx].cpu().item())[:3], device=img.device, dtype=img.dtype)
+        
+        # Blend the color with the original image patch
+        original_patch = img_copy[:, start_y:start_y+patch_size, start_x:start_x+patch_size]
+        blended_patch = (1 - alpha) * original_patch + alpha * color.view(3, 1, 1)
+        img_copy[:, start_y:start_y+patch_size, start_x:start_x+patch_size] = blended_patch
+            
     return img_copy
   
   def log_metrics(self, epoch, image, rec, hand_pred, target_pred, hand_patch_gt, target_patch_gt, prefix='train'):
@@ -494,17 +513,6 @@ class MasterMind:
       loss = F.cross_entropy(valid_pred, valid_gt)
     return loss
 
-  def _compute_specialized_target_loss(self, buffer, batch_size):
-    target_patch_loss = torch.tensor(0.0, device=self.device)
-    target_batch = buffer.sample_from_successful_episodes(batch_size, distinct_episodes=True)
-    if target_batch:
-      # A new forward pass is needed for the specialized batch
-      # We only need the target prediction from this forward pass
-      *_, t_target_pred, _ = self.we(target_batch['image'], target_batch['action'], target_batch['internal_state'])
-      # Calculate loss only on this specialized batch
-      target_patch_loss = self._compute_loss_from_gt(t_target_pred, target_batch['target_patch_gt'])
-    return target_patch_loss
-  
   def _compute_is_from_patch_accuracies(self, is1_pred_fp, is2_pred_fp, valid_patches):
     is1_pred_argmax = is1_pred_fp.argmax(dim=1)
     is2_pred_argmax = is2_pred_fp.argmax(dim=1)
@@ -549,8 +557,8 @@ class MasterMind:
       is1_from_patch_acc, is2_from_patch_acc = self._compute_is_from_patch_accuracies(
         is1_pred_fp, is2_pred_fp, hand_patch_gt[valid_mask])
     return is_from_patch_loss, is1_from_patch_acc, is2_from_patch_acc
-
-  def train_we(self, epoch, n_steps=10):
+ 
+  def train_we(self, epoch):
     '''
       * Image Reconstruction
       * Next Embedding Prediction
@@ -562,16 +570,14 @@ class MasterMind:
 
     self._reset_logs()
     batch_losses = []
-    for step in tqdm(range(n_steps), leave=False):
-      batch = self.train_buffer.sample(self.config['batch_size'], distinct_episodes=True)
+    for batch in tqdm(self.dataloader, leave=False):
+      batch = {k: v.to(self.device) for k, v in batch.items()}
 
-      image = batch['image']
-
-      _, rec, next_emb, isp1, isp2, hand_pred, target_pred, next_hand_pred = self.we(
-        image, batch['action'], batch['internal_state'])
+      emb, rec, next_emb, isp1, isp2, hand_pred, target_pred, next_hand_pred = self.we(
+        batch['image'], batch['action'], batch['internal_state'])
 
       # === Reconstruction Loss ===
-      rec_loss = F.mse_loss(rec, image)
+      rec_loss = F.mse_loss(rec, batch['image'])
 
       # === Next Embedding Prediction Loss ===
       with torch.no_grad():
@@ -583,12 +589,13 @@ class MasterMind:
       is2_loss = F.cross_entropy(isp2, batch['internal_state'][:, 1].long())
 
       # === Hand and Target Prediction Loss ===
-      hand_patch_loss, hand_patch_gt = self._compute_object_prediction_loss_and_gt(image, hand_pred, self.hand_condition)
+      hand_patch_loss, hand_patch_gt = self._compute_object_prediction_loss_and_gt(batch['image'], hand_pred, self.hand_condition)
+      
       next_hand_patch_loss, next_hand_patch_gt = self._compute_object_prediction_loss_and_gt(
         batch['next_image'], next_hand_pred, self.hand_condition
       )
-      target_patch_loss = self._compute_specialized_target_loss(self.train_buffer, self.config['batch_size'])
       target_patch_gt = batch['target_patch_gt']
+      target_patch_loss = self._compute_loss_from_gt(target_pred, target_patch_gt)
 
       # === Internal State from Patch Loss ===
       is_fp_loss, is1_fp_acc, is2_fp_acc = self._compute_is_from_patch_loss_n_accuracies(batch, hand_patch_gt)
@@ -617,7 +624,7 @@ class MasterMind:
       batch_losses.append(loss.item())
 
     # === Log losses & metrics ===
-    self.log_metrics(epoch, image, rec, hand_pred, target_pred, hand_patch_gt, target_patch_gt, prefix='train')
+    self.log_metrics(epoch, batch['image'], rec, hand_pred, target_pred, hand_patch_gt, target_patch_gt, prefix='train')
 
     return np.mean(batch_losses)
 
@@ -630,7 +637,7 @@ class MasterMind:
 
     image = batch['image']
 
-    _, rec, next_emb, isp1, isp2, hand_pred, target_pred, next_hand_pred = self.we(
+    emb, rec, next_emb, isp1, isp2, hand_pred, target_pred, next_hand_pred = self.we(
       image, batch['action'], batch['internal_state'])
 
     # === Reconstruction Loss ===
@@ -647,21 +654,23 @@ class MasterMind:
     # === Hand and Target Prediction Loss ===
     hand_patch_loss, hand_patch_gt = self._compute_object_prediction_loss_and_gt(
       image, hand_pred, self.hand_condition)
+    
     next_hand_patch_loss, next_hand_patch_gt = self._compute_object_prediction_loss_and_gt(
       batch['next_image'], next_hand_pred, self.hand_condition
     )
-    target_patch_loss = self._compute_specialized_target_loss(self.test_buffer, self.config['n_test_episodes'])
     target_patch_gt = batch['target_patch_gt']
+    target_patch_loss = self._compute_loss_from_gt(target_pred, target_patch_gt)
     
     # === Internal State from Patch Loss ===
     is_fp_loss, is1_fp_acc, is2_fp_acc = self._compute_is_from_patch_loss_n_accuracies(batch, hand_patch_gt)
 
-    loss = rec_loss + nep_loss + is1_loss + is2_loss + hand_patch_loss + target_patch_loss + next_hand_patch_loss + is_fp_loss
+    internal_loss = rec_loss + is1_loss + is2_loss + hand_patch_loss + next_hand_patch_loss + is_fp_loss
+    loss = internal_loss + target_patch_loss + nep_loss
 
     step_losses = {
       'rec_loss': rec_loss, 'nep_loss': nep_loss, 'is1_loss': is1_loss, 'is2_loss': is2_loss,
       'hand_patch_loss': hand_patch_loss, 'target_patch_loss': target_patch_loss,
-      'next_hand_patch_loss': next_hand_patch_loss, 'is_from_patch_loss': is_fp_loss,
+      'next_hand_patch_loss': next_hand_patch_loss, 'is_from_patch_loss': is_fp_loss, 'internal_loss': internal_loss, 'global_loss': loss,
     }
     is1_acc, is2_acc, hand_patch_acc, target_patch_acc, next_hand_patch_acc = self.compute_metrics(
       batch, isp1, isp2, hand_pred, target_pred, hand_patch_gt, target_patch_gt,
@@ -677,7 +686,7 @@ class MasterMind:
     # === Log losses & metrics ===
     self.log_metrics(epoch, image, rec, hand_pred, target_pred, hand_patch_gt, target_patch_gt, prefix='test')
 
-    return loss.item()
+    return internal_loss.item()
     
   def get_actions_to_goal(self, current_is, goal_is):
     """
@@ -708,54 +717,106 @@ class MasterMind:
       
     return actions
   
-  def perform_actions_sequence(self, env, actions):
+  def perform_actions_sequence(self, actions, replay_buffer=None, ep_step=0, max_ep_steps=0, img=None, obs=None):
+    next_img = None
     for action in actions:
-      obs, reward, terminated, truncated, info = env.step(action)
-      if terminated:
-        break
-    internal_state, *_ = self.train_buffer.prepare_data(obs//5)
-    return terminated, internal_state.to(self.device)
+      next_obs, reward, terminated, truncated, info = self.env.step(action)
+
+      ep_step += 1
+      if replay_buffer is not None:
+        next_img = self.env.render()
+        replay_buffer.add(obs//5, action, img, reward,
+                          (terminated or ep_step >= max_ep_steps) if max_ep_steps > 0 else terminated,
+                          next_obs//5, next_img, info)
+        obs, img = next_obs, next_img
+      if terminated or (max_ep_steps > 0 and ep_step >= max_ep_steps): break
+
+    internal_state, *_ = self.train_buffer.prepare_data(next_obs//5)
+    return terminated, internal_state.to(self.device), next_img, next_obs, ep_step
   
+  def get_target_and_reach_it(self, obs, img, max_ep_steps=0, replay_buffer=None, topk_patches=2, topk_goals=2):
+    '''if replay_buffer provided, it will be feed with simulated steps'''
+    internal_state, _, image, _, _, _, _ = self.train_buffer.prepare_data(obs//5, None, img)
+    image, internal_state = image.to(self.device), internal_state.to(self.device)
+    
+    initial_image = image.clone()
+
+    # --- Predict Target Patch Index ---
+    patch_predictions = self.we.get_target_prediction(image.unsqueeze(0), internal_state.unsqueeze(0))
+    top_patches = patch_predictions.topk(topk_patches)[-1].squeeze(0)
+
+    ep_step = 0
+    terminated = False
+    
+    for patch_idx in top_patches:
+      # --- Predict Goal Internal State from Target Patch Index ---
+      goal_is_logits = self.we.get_is_from_patch_idx(patch_idx.unsqueeze(0))
+      goal_is1_idxs = goal_is_logits[:, :self.config['internal_state_n_values'][0]].topk(topk_goals)[-1].squeeze(0)
+      goal_is2_idxs = goal_is_logits[:, self.config['internal_state_n_values'][0]:].topk(topk_goals)[-1].squeeze(0)
+
+      for goal_is1_idx, goal_is2_idx in zip(goal_is1_idxs, goal_is2_idxs):
+        # --- Get actions sequence ---
+        actions = self.get_actions_to_goal(internal_state.squeeze(0), torch.stack([goal_is1_idx, goal_is2_idx]))
+        if not actions: continue
+
+        # --- Perform actions ---
+        terminated, new_internal_state, new_img, new_obs, ep_step_after = self.perform_actions_sequence(
+          actions, replay_buffer=replay_buffer, ep_step=ep_step, max_ep_steps=max_ep_steps, img=img, obs=obs
+        )
+        ep_step = ep_step_after
+        internal_state, obs, img = new_internal_state, new_obs, new_img
+
+        if terminated or (max_ep_steps > 0 and ep_step >= max_ep_steps): break
+
+      if terminated or (max_ep_steps > 0 and ep_step >= max_ep_steps): break
+
+    return terminated, initial_image, top_patches, ep_step
+
   @torch.no_grad()
-  def evaluate_target_predictor(self, n_episodes=100, show_unfinished=False):
+  def evaluate_target_predictor(self, n_episodes=100, show_unfinished=False, topk_patches=3, topk_goals=3):
     self.we.eval()
 
     total_successes = 0
+    steps_to_success = []
+    
+    gif_dir = os.path.join(self.save_dir, 'trajectory_gifs')
+    os.makedirs(gif_dir, exist_ok=True)
+
     for ep in tqdm(range(n_episodes), leave=False):
       obs, _ = self.env.reset()
       img = self.env.render()
-      internal_state, _, image, _, _, _, _ = self.train_buffer.prepare_data(obs//5, None, img)
-      image, internal_state = image.to(self.device), internal_state.to(self.device)
-      # --- Predict Target Patch Index ---
-      target_patch = self.we.get_target_prediction(image.unsqueeze(0), internal_state.unsqueeze(0))
-      top_patches = target_patch.topk(3)[-1].squeeze(0)
 
-      for patch_idx in top_patches:
-        # --- Predict Goal Internal State from Target Patch Index ---
-        goal_is_logits = self.we.get_is_from_patch_idx(patch_idx.unsqueeze(0))
-        goal_is1_idxs = goal_is_logits[:, :self.config['internal_state_n_values'][0]].topk(3)[-1].squeeze(0)
-        goal_is2_idxs = goal_is_logits[:, self.config['internal_state_n_values'][0]:].topk(3)[-1].squeeze(0)
+      # Create a temporary replay buffer for the current episode
+      episode_buffer = ReplayBuffer(
+        self.config['internal_state_dim'], self.config['action_dim'],
+        self.config['image_size'], self.config['n_patches'],
+        resize_to=self.config['resize_to'],
+        normalize_img=self.config['normalize_image'],
+        capacity=self.config['max_ep_len'] + 1,
+        device=self.config['replay_buffer_device'],
+        target_device=self.device
+      )
+      episode_buffer.set_hand_condition(self.hand_condition)
 
-        for goal_is1_idx, goal_is2_idx in zip(goal_is1_idxs, goal_is2_idxs):
-          # --- Get actions sequence ---
-          actions = self.get_actions_to_goal(internal_state, torch.stack([goal_is1_idx, goal_is2_idx]))
-          if not actions:
-            continue
-          # --- Perform actions ---
-          terminated, internal_state = self.perform_actions_sequence(self.env, actions)
-          if terminated:
-            total_successes += 1
-            break
-        if terminated:
-          break
-      if not terminated and show_unfinished:
-        # Visualization
-        img_to_show = (image.squeeze(0).cpu() * 0.5) + 0.5  # De-normalize and move to CPU
+      terminated, image, top_patches, ep_step = self.get_target_and_reach_it(
+        obs, img, topk_patches=topk_patches, topk_goals=topk_goals,
+        max_ep_steps=self.config['max_ep_len'],
+        replay_buffer=episode_buffer
+      )
 
-        # Define colors for top predictions
+      if terminated:
+        total_successes += 1
+        steps_to_success.append(ep_step)
+      elif show_unfinished:
+        # Save GIF of the failed trajectory
+        gif_filename = os.path.join(gif_dir, f"failed_ep_{ep+1}.gif")
+        # The episode just finished (by timing out), so its ID is the one before the current counter.
+        self.save_episode_gif(episode_buffer, gif_filename, episode_index=episode_buffer.current_episode_id - 1)
+
+        # Visualization of the initial state and target predictions
+        img_to_show = (image.squeeze(0).cpu() * 0.5) + 0.5
         #          Yellow      Green       Orange         Dark Red         Reddish
         colors = [(1, 1, 0), (0, 1, 0), (0.9, 0.6, 0), (0.7, 0.1, 0.1), (0.8, 0.2, 0)]
-
         img_viz = img_to_show.clone()
         for i, patch_idx in enumerate(top_patches):
           img_viz = self.draw_patch(img_viz, patch_idx.item(), colors[i])
@@ -763,7 +824,8 @@ class MasterMind:
         plt.imshow(img_viz.permute(1, 2, 0).numpy())
         plt.title(f"Episode {ep+1}: Target Prediction (Not Terminated)")
         plt.show()
-    print(f'total_successes: {total_successes}/{n_episodes}')
+
+    print(f'total_successes: {total_successes}/{n_episodes} | avg_steps_to_success: {int(np.mean(steps_to_success)) if steps_to_success else 0}')
 
   @torch.no_grad()
   def plot_hand_patch_predictions(self, buffer=None):
@@ -786,7 +848,7 @@ class MasterMind:
     action = batch['action']
     internal_state = batch['internal_state']
 
-    _, _, _, _, _, hand_pred, _, _ = self.we(image, action, internal_state)
+    hand_pred = self.we(image, action, internal_state)[5]
     
     top_patches = hand_pred.topk(5, dim=1)[1]
 
@@ -880,6 +942,12 @@ class MasterMind:
 
     self._fill_patch_to_internal_states_mapping()
 
+    self.dataloader = DataLoader(
+      ReplayBufferDataset(self.train_buffer, sample_from_successful_episodes=False),
+      batch_size=self.config['batch_size'],
+      shuffle=True
+    )
+
     pbar = tqdm(range(1000), desc='Phase 1')
     eval_loss = 0.0
     best_loss = float('inf')
@@ -888,7 +956,7 @@ class MasterMind:
     for epoch in pbar:
       train_loss = self.train_we(epoch)
 
-      if (epoch + 1) % 10 == 0:
+      if (epoch + 1) % 5 == 0:
         eval_loss = self.eval_we(epoch)
 
         if eval_loss < best_loss:
@@ -899,16 +967,52 @@ class MasterMind:
         else:
           patience += 1
         
-        if patience > 20:
+        if patience > 5:
           logger.info(f'The validation loss did not improve over the last 200 epochs -> training stopped')
           break
       
       pbar.set_description(f'Phase 1: {train_loss=:.4f} - {eval_loss=:.4f} - {save_at_epoch=}')
 
     # === PHASE 2 ===
+    logger.info('Phase 2: Train World Encoder-Model with new data from policy')
+    self.fill_memory(self.train_buffer, act='random_target', n_episodes=self.config['n_train_episodes'])
+    logger.info(f'Successful episodes: {len(self.train_buffer.successful_episodes)}/{self.train_buffer.current_episode_id}')
+
+    self._fill_patch_to_internal_states_mapping()
+
+    self.dataloader = DataLoader(
+      ReplayBufferDataset(self.train_buffer, sample_from_successful_episodes=True),
+      batch_size=self.config['batch_size'],
+      shuffle=True
+    )
+
+    pbar = tqdm(range(1000), desc='Phase 2')
+    eval_loss = 0.0
+    best_loss = float('inf')
+    patience = 0
+    save_at_epoch = 0
+    for epoch in pbar:
+      train_loss = self.train_we(epoch)
+
+      if (epoch + 1) % 2 == 0:
+        eval_loss = self.eval_we(epoch)
+
+        if eval_loss < best_loss:
+          self.save_models(os.path.join(self.save_dir, f"{self.config['exp_name']}_pass2.pt"))
+          best_loss = eval_loss
+          patience = 0
+          save_at_epoch = epoch + 1
+        else:
+          patience += 1
+        
+        if patience > 10:
+          logger.info(f'The validation loss did not improve over the last 200 epochs -> training stopped')
+          break
+      
+      pbar.set_description(f'Phase 2: {train_loss=:.4f} - {eval_loss=:.4f} - {save_at_epoch=}')
 
   @torch.no_grad()
-  def autoplay(self):
+  def autoplay(self, topk_patches=5, topk_goals=4):
     import pygame;import time
 
     self.we.eval()
@@ -931,15 +1035,17 @@ class MasterMind:
       image, internal_state = image.to(self.device), internal_state.to(self.device)
 
       # --- Predict Target Patch Index ---
-      target_patch = self.we.get_target_prediction(image.unsqueeze(0), internal_state.unsqueeze(0))
-      top_patches = target_patch.topk(3)[-1].squeeze(0)
+      # target_patch = self.we.get_target_prediction(image.unsqueeze(0), internal_state.unsqueeze(0))
+      # top_patches = target_patch.topk(topk_patches)[-1].squeeze(0)
+      patch_predictions = self.we.get_target_prediction(image.unsqueeze(0), internal_state.unsqueeze(0))
+      top_patches = patch_predictions.topk(topk_patches)[-1].squeeze(0)
 
       terminated = False
       for patch_idx in top_patches:
         # --- Predict Goal Internal State from Target Patch Index ---
         goal_is_logits = self.we.get_is_from_patch_idx(patch_idx.unsqueeze(0))
-        goal_is1_idxs = goal_is_logits[:, :self.config['internal_state_n_values'][0]].topk(3)[-1].squeeze(0)
-        goal_is2_idxs = goal_is_logits[:, self.config['internal_state_n_values'][0]:].topk(3)[-1].squeeze(0)
+        goal_is1_idxs = goal_is_logits[:, :self.config['internal_state_n_values'][0]].topk(topk_goals)[-1].squeeze(0)
+        goal_is2_idxs = goal_is_logits[:, self.config['internal_state_n_values'][0]:].topk(topk_goals)[-1].squeeze(0)
 
         for goal_is1_idx, goal_is2_idx in zip(goal_is1_idxs, goal_is2_idxs):
           # --- Get actions sequence ---
@@ -967,22 +1073,32 @@ if __name__ == '__main__':
   parser.add_argument('--evaluate', '-e', action='store_true', help='Evaluate the trained model')
   parser.add_argument('--autoplay', '-a', action='store_true', help='Start autoplay with the trained model')
   parser.add_argument('--show_unfinished', '-s', action='store_true', help='Show unfinished episode')
+  parser.add_argument('--load_model', '-l', action='store_true', help='Load trained model if available')
+  parser.add_argument('--experiment_name', '-en', type=str, default=None, help='Name of the experiment')
+  parser.add_argument('--model_path', '-mp', type=str, default=None, help='Path to the model file to load')
   args = parser.parse_args()
 
-  mm = MasterMind()
+  config = {
+    'load_model': args.load_model,
+    'model_path': args.model_path,
+  }
+  if args.experiment_name:
+    config['exp_name'] = args.experiment_name
+  mm = MasterMind(config)
 
   if args.train:
     mm.train()
   
   if args.evaluate:
-    mm.evaluate_target_predictor(show_unfinished=args.show_unfinished)
+    mm.evaluate_target_predictor(
+      show_unfinished=args.show_unfinished
+    )
   
   if args.autoplay:
     mm.autoplay()
   
   # TODO use RNN for next embedding prediction and add multistep training
-  # TODO add a model that take patches and emb as input and output a score for each patches.
-  #      For the ground truth, we take the sum of reconstruction error and next embedding error
-  #      and when available the success reward, the scores must be normalized and highest score should
-  #      correspond to the success
   # TODO use Ensemble
+
+  # To model dynamical system (robot), try SINDy (Sparse Identification of Nonlinear Dynamics) (https://arxiv.org/abs/2403.09110)
+  #                                    or NGRC (Next Generation Reservoir Computing)

@@ -43,6 +43,23 @@ def get_linear_net(input_dim, hidden_dim, output_dim):
                        nn.Linear(hidden_dim, output_dim))
 
 
+class StandardMLP(nn.Module):
+  def __init__(self, input_dim, hidden_dim, output_dim, dropout=0.0, residual=False):
+    super().__init__()
+    self.norm = nn.RMSNorm(input_dim)
+    self.fc1 = nn.Linear(input_dim, hidden_dim)
+    self.act = nn.SiLU()
+    self.dropout = nn.Dropout(dropout)
+    self.fc2 = nn.Linear(hidden_dim, output_dim)
+    self.residual = residual
+  
+  def forward(self, x):
+    out = self.fc2(self.dropout(self.act(self.fc1(self.norm(x)))))
+    if self.residual:
+      out = out + x
+    return out
+
+
 class DeepLinear(nn.Module):
   CONFIG = {
     'input_dim':           128,
@@ -56,7 +73,7 @@ class DeepLinear(nn.Module):
     super().__init__()
     self.config = {**DeepLinear.CONFIG, **config}
     self.input_scaler = torch.nn.Linear(self.config['input_dim'], self.config['hidden_dim'])
-    self.blocks = nn.ModuleList([get_linear_net(
+    self.blocks = nn.ModuleList([StandardMLP(
       self.config['hidden_dim'], self.config['block_hidden_dim'], self.config['hidden_dim']
     ) for _ in range(self.config['n_blocks'])])
     self.output_scaler = torch.nn.Linear(self.config['hidden_dim'], self.config['output_dim'])

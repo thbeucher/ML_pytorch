@@ -20,10 +20,10 @@
 # | `sample_episode_batch(...)`     | Samples a batch of entire episodes (or fixed-length windows from them).                                 |
 #
 import torch
+import numpy as np
+
 from torchvision import transforms
 from torch.utils.data import Dataset
-
-import helpers_zoo as hz
 
 
 class ReplayBuffer:
@@ -31,6 +31,7 @@ class ReplayBuffer:
                internal_state_dim: int,
                action_dim: int,
                image_size: int,
+               n_patches: int,
                image_chan: int = 3,
                resize_to: int | None = None,
                normalize_img: bool = False,
@@ -40,6 +41,7 @@ class ReplayBuffer:
                internal_state_dtype=torch.long,
                action_dtype=torch.long):
     self.capacity = capacity
+    self.n_patches = n_patches
 
     self.device = torch.device(device)
     self.target_device = target_device if target_device is not None else self.device
@@ -63,6 +65,7 @@ class ReplayBuffer:
     self.reward = torch.zeros((capacity, 1), device=self.device, dtype=torch.float32)
     self.done = torch.zeros((capacity, 1), device=self.device, dtype=torch.long)
     self.target_patch_gt = torch.full((capacity,), -1, dtype=torch.long, device=self.device)
+    self.discounted_reward = torch.zeros((capacity, 1), device=self.device, dtype=torch.float32)
 
     self.successful_episodes = []
 
@@ -84,23 +87,64 @@ class ReplayBuffer:
   def set_hand_condition(self, hand_condition):
     self.hand_condition = hand_condition
 
-  def _update_target_for_episode(self, episode_id, next_image_of_rewarded_state):
-    if self.hand_condition is None:
+  def _update_target_for_episode(self, episode_id, info):
+    if 'hand_pos' not in info or 'direction_to_target' not in info:
       return
 
-    # find_object_center expects a batch.
-    pos = hz.find_object_center(next_image_of_rewarded_state.unsqueeze(0), self.hand_condition)
+    hand_pos = info['hand_pos']
+    direction_vec = info['direction_to_target']
 
-    if not torch.isnan(pos).any():
-      # The image is 32x32, and the patch grid is 16x16. Patch size is 2x2.
-      patch_x = (pos[0, 0] / 2).long()
-      patch_y = (pos[0, 1] / 2).long()
-      patch_idx = patch_y * 16 + patch_x
+    # Move 10 pixels in the direction of the target to find the next patch
+    next_pos = np.array(hand_pos) + direction_vec * 10
 
-      # Update all transitions of this episode
-      episode_indices = torch.where(self.episode_id == episode_id)[0]
-      if episode_indices.numel() > 0:
-        self.target_patch_gt[episode_indices] = patch_idx.item()
+    # The image is 400x400, cropped to 256x256, and then resized to 32x32.
+    # The patch grid is 16x16. Patch size is 2x2 pixels in the 32x32 image.
+    # First, transform coordinates from 400x400 to 32x32 space.
+    # Cropping: img[89:345, 109:365] -> 256x256
+    # Resizing: 256x256 -> 32x32
+    # So, (x, y) in 400x400 becomes ((x - 109)/256 * 32, (y - 89)/256 * 32) in 32x32
+    
+    # We are working with a 32x32 image representation, so let's check the position
+    # in that space. The info from the environment is in the 400x400 space.
+    # Let's assume the cropping and resizing logic from the environment
+    # crop_box = [109, 365, 89, 345]  # [x1, x2, y1, y2]
+    
+    x, y = next_pos
+    
+    # Remap from 400x400 coordinate space to 32x32
+    new_x = (x - 109) * (32 / 256)
+    new_y = (y - 89) * (32 / 256)
+    
+    # Now, calculate the patch index in the 16x16 grid
+    patch_x = int(new_x / 2)
+    patch_y = int(new_y / 2)
+    
+    # Clamp values to be within the 16x16 grid
+    patch_x = max(0, min(15, patch_x))
+    patch_y = max(0, min(15, patch_y))
+    
+    patch_idx = patch_y * 16 + patch_x
+
+    # Update all transitions of this episode
+    episode_indices = torch.where(self.episode_id == episode_id)[0]
+    if episode_indices.numel() > 0:
+      self.target_patch_gt[episode_indices] = patch_idx
+
+  def compute_discounted_rewards(self, episode_id, gamma=0.99):
+    ep_indices = torch.where(self.episode_id == episode_id)[0]
+    ep_len = len(ep_indices)
+    
+    if ep_len == 0:
+      return
+        
+    discounted_reward = 0.0
+    # Iterate backwards through the episode
+    for i in reversed(range(ep_len)):
+      idx = ep_indices[i]
+      reward = self.reward[idx].item()
+      # The reward is for the current state, so it should be applied to the current discounted_reward
+      discounted_reward = reward + gamma * discounted_reward
+      self.discounted_reward[idx] = discounted_reward
 
   def prepare_data(self, internal_state=None, action=None, image=None, reward=None, done=None,
                    next_internal_state=None, next_image=None):
@@ -117,7 +161,7 @@ class ReplayBuffer:
     return internal_state, action, image, reward, done, next_internal_state, next_image
 
   @torch.no_grad()
-  def add(self, internal_state, action, image, reward, done, next_internal_state, next_image, sucess_reward=10):
+  def add(self, internal_state, action, image, reward, done, next_internal_state, next_image, info, sucess_reward=10):
     state = self.prepare_data(internal_state, action, image, reward, done, next_internal_state, next_image)
     internal_state, action, image, reward, done, next_internal_state, next_image = state
 
@@ -133,7 +177,8 @@ class ReplayBuffer:
     if done:
       if reward == sucess_reward:
         self.successful_episodes.append(self.current_episode_id)
-        self._update_target_for_episode(self.current_episode_id, next_image)
+        self._update_target_for_episode(self.current_episode_id, info)
+        self.compute_discounted_rewards(self.current_episode_id)
       self.current_episode_id += 1
 
     self.ptr = (self.ptr + 1) % self.capacity
@@ -185,6 +230,7 @@ class ReplayBuffer:
       "next_internal_state": self.next_internal_state[idxs].to(self.target_device),
       "next_image": self.next_image[idxs].to(self.target_device),
       "target_patch_gt": self.target_patch_gt[idxs].to(self.target_device),
+      "discounted_reward": self.discounted_reward[idxs].to(self.target_device),
       "loss": self.loss[idxs].to(self.target_device),
     }
     other_vars = {k: v[idxs].to(self.target_device) for k, v in self.other_stored_obj.items()}
@@ -540,21 +586,67 @@ class ReplayBuffer:
 
     return batch
 
+  def get_sample_weights(self):
+    """
+    Computes sample weights for weighted sampling based on internal_state diversity.
+    States that are less frequent will receive higher weights.
+    Weight = 1 / count(state)
+    """
+    if self.size == 0:
+      return torch.tensor([], dtype=torch.float32, device=self.device)
+
+    states = self.internal_state[:self.size]
+    
+    # Get unique states and their counts
+    # Using .cpu() for unique operation as it might not be implemented for all backends/versions
+    # and for this operation it's not a big performance bottleneck.
+    unique_states, inverse_indices, counts = torch.unique(
+        states.cpu(), dim=0, return_inverse=True, return_counts=True
+    )
+    
+    # Calculate weight for each unique state
+    unique_weights = 1.0 / counts.float()
+    
+    # Assign the corresponding weight to each sample in the buffer
+    sample_weights = unique_weights[inverse_indices]
+    
+    return sample_weights.to(self.device)
+
 
 class ReplayBufferDataset(Dataset):
-  def __init__(self, replay_buffer):
+  def __init__(self, replay_buffer, sample_from_successful_episodes=False):
     self.buffer = replay_buffer
+    self.sample_from_successful_episodes = sample_from_successful_episodes
+    if self.sample_from_successful_episodes:
+      if not self.buffer.successful_episodes:
+        self.indices = torch.tensor([], dtype=torch.long, device=self.buffer.device)
+      else:
+        successful_eids = torch.tensor(list(set(self.buffer.successful_episodes)), device=self.buffer.device)
+        mask = torch.isin(self.buffer.episode_id[:self.buffer.size], successful_eids)
+        self.indices = torch.where(mask)[0]
+    else:
+      self.indices = torch.arange(len(self.buffer))
 
   def __len__(self):
-    return len(self.buffer)
+    return len(self.indices)
 
   def __getitem__(self, idx):
+    buffer_idx = self.indices[idx]
     return {
-      "internal_state": self.buffer.internal_state[idx],
-      "action": self.buffer.action[idx],
-      "image": self.buffer.image[idx],
-      "reward": self.buffer.reward[idx],
-      "done": self.buffer.done[idx],
-      "next_internal_state": self.buffer.next_internal_state[idx],
-      "next_image": self.buffer.next_image[idx],
+      "internal_state": self.buffer.internal_state[buffer_idx],
+      "action": self.buffer.action[buffer_idx],
+      "image": self.buffer.image[buffer_idx],
+      "reward": self.buffer.reward[buffer_idx],
+      "done": self.buffer.done[buffer_idx],
+      "next_internal_state": self.buffer.next_internal_state[buffer_idx],
+      "next_image": self.buffer.next_image[buffer_idx],
+      "target_patch_gt": self.buffer.target_patch_gt[buffer_idx],
+      "discounted_reward": self.buffer.discounted_reward[buffer_idx],
+      "loss": self.buffer.loss[buffer_idx],
     }
+
+# from torch.utils.data import DataLoader, WeightedRandomSampler
+# dataset = ReplayBufferDataset(self.train_buffer)
+# sample_weights = self.train_buffer.get_sample_weights()
+# sampler = WeightedRandomSampler(weights=sample_weights, num_samples=len(dataset), replacement=False)
+# dataloader = DataLoader(dataset, batch_size=self.config['batch_size'], sampler=sampler, shuffle=False)
