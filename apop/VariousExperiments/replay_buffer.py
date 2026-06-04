@@ -95,7 +95,7 @@ class ReplayBuffer:
     direction_vec = info['direction_to_target']
 
     # Move 10 pixels in the direction of the target to find the next patch
-    next_pos = np.array(hand_pos) + direction_vec * 10
+    next_pos = np.array(hand_pos) + direction_vec * 15
 
     # The image is 400x400, cropped to 256x256, and then resized to 32x32.
     # The patch grid is 16x16. Patch size is 2x2 pixels in the 32x32 image.

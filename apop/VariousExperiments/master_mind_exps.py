@@ -178,7 +178,7 @@ class WorldEncoder(nn.Module):
 class MasterMind:
   CONFIG = {
     'save_dir':                          'experiments/',
-    'exp_name':                          'master_mind_checkDist15',
+    'exp_name':                          'master_mind_checkRefactor',
     'use_tf_logger':                     True,
     'load_model':                        True,
     # === Replay Buffer & Models info ===
@@ -225,7 +225,9 @@ class MasterMind:
     self.set_utils()
 
     if self.config['load_model']:
-      model_path = self.config.get('model_path', os.path.join(self.save_dir, f"{self.config['exp_name']}.pt"))
+      model_path = self.config.get('model_path', None)
+      if model_path is None:
+        model_path = os.path.join(self.save_dir, f"{self.config['exp_name']}.pt")
       self.load_models(model_path)
   
   def set_env(self, render_mode='rgb_array'):
@@ -410,8 +412,8 @@ class MasterMind:
       self.tf_logger.add_scalar(f'{prefix}_{name}', np.mean(val), epoch)
 
     if self.accuracies:
-      accuracy_scalars = {name: np.mean(val) for name, val in self.accuracies.items()}
-      self.tf_logger.add_scalars(f'{prefix}/accuracies', accuracy_scalars, epoch)
+      for name, val in self.accuracies.items():
+        self.tf_logger.add_scalar(f'{prefix}_{name}', np.mean(val), epoch)
     
     self.tf_logger.add_images(
       f'{prefix}_reconstructed_image',
@@ -558,7 +560,7 @@ class MasterMind:
         is1_pred_fp, is2_pred_fp, hand_patch_gt[valid_mask])
     return is_from_patch_loss, is1_from_patch_acc, is2_from_patch_acc
  
-  def train_we(self, epoch):
+  def train_we(self, epoch, prefix='train'):
     '''
       * Image Reconstruction
       * Next Embedding Prediction
@@ -624,12 +626,12 @@ class MasterMind:
       batch_losses.append(loss.item())
 
     # === Log losses & metrics ===
-    self.log_metrics(epoch, batch['image'], rec, hand_pred, target_pred, hand_patch_gt, target_patch_gt, prefix='train')
+    self.log_metrics(epoch, batch['image'], rec, hand_pred, target_pred, hand_patch_gt, target_patch_gt, prefix=prefix)
 
     return np.mean(batch_losses)
 
   @torch.no_grad()
-  def eval_we(self, epoch):
+  def eval_we(self, epoch, prefix='test'):
     self.we.eval()
 
     self._reset_logs()
@@ -684,7 +686,7 @@ class MasterMind:
     self._update_logs(step_losses, step_accuracies)
 
     # === Log losses & metrics ===
-    self.log_metrics(epoch, image, rec, hand_pred, target_pred, hand_patch_gt, target_patch_gt, prefix='test')
+    self.log_metrics(epoch, image, rec, hand_pred, target_pred, hand_patch_gt, target_patch_gt, prefix=prefix)
 
     return internal_loss.item()
     
@@ -773,7 +775,7 @@ class MasterMind:
     return terminated, initial_image, top_patches, ep_step
 
   @torch.no_grad()
-  def evaluate_target_predictor(self, n_episodes=100, show_unfinished=False, topk_patches=3, topk_goals=3):
+  def evaluate_target_predictor(self, n_episodes=100, show_unfinished=False, topk_patches=2, topk_goals=2):
     self.we.eval()
 
     total_successes = 0
@@ -933,6 +935,35 @@ class MasterMind:
     hz.create_gif_from_images(all_images, filename, duration=150)
     logger.info(f"Saved episode GIF to {filename}")
 
+  def train_loop(self, phase='Phase 1', model_path=None, eval_step=5, patience_step=5, n_max_epochs=1000):
+    if model_path is None:
+      model_path = os.path.join(self.save_dir, f"{self.config['exp_name']}.pt")
+
+    pbar = tqdm(range(n_max_epochs), desc=phase)
+    eval_loss = 0.0
+    best_loss = float('inf')
+    patience = 0
+    save_at_epoch = 0
+    for epoch in pbar:
+      train_loss = self.train_we(epoch, prefix=f'{phase}_train')
+
+      if (epoch + 1) % eval_step == 0:
+        eval_loss = self.eval_we(epoch, prefix=f'{phase}_test')
+
+        if eval_loss < best_loss:
+          self.save_models(model_path)
+          best_loss = eval_loss
+          patience = 0
+          save_at_epoch = epoch + 1
+        else:
+          patience += 1
+        
+        if patience > patience_step:
+          logger.info(f'The validation loss did not improve over the last {eval_step * patience_step} epochs -> training stopped')
+          break
+      
+      pbar.set_description(f'{phase}: {train_loss=:.4f} - {eval_loss=:.4f} - {save_at_epoch=}')
+
   def train(self):
     # === PHASE 1 ===
     logger.info('Phase 1: Train World Encoder-Model')
@@ -948,30 +979,7 @@ class MasterMind:
       shuffle=True
     )
 
-    pbar = tqdm(range(1000), desc='Phase 1')
-    eval_loss = 0.0
-    best_loss = float('inf')
-    patience = 0
-    save_at_epoch = 0
-    for epoch in pbar:
-      train_loss = self.train_we(epoch)
-
-      if (epoch + 1) % 5 == 0:
-        eval_loss = self.eval_we(epoch)
-
-        if eval_loss < best_loss:
-          self.save_models(os.path.join(self.save_dir, f"{self.config['exp_name']}.pt"))
-          best_loss = eval_loss
-          patience = 0
-          save_at_epoch = epoch + 1
-        else:
-          patience += 1
-        
-        if patience > 5:
-          logger.info(f'The validation loss did not improve over the last 200 epochs -> training stopped')
-          break
-      
-      pbar.set_description(f'Phase 1: {train_loss=:.4f} - {eval_loss=:.4f} - {save_at_epoch=}')
+    self.train_loop()
 
     # === PHASE 2 ===
     logger.info('Phase 2: Train World Encoder-Model with new data from policy')
@@ -986,30 +994,11 @@ class MasterMind:
       shuffle=True
     )
 
-    pbar = tqdm(range(1000), desc='Phase 2')
-    eval_loss = 0.0
-    best_loss = float('inf')
-    patience = 0
-    save_at_epoch = 0
-    for epoch in pbar:
-      train_loss = self.train_we(epoch)
-
-      if (epoch + 1) % 2 == 0:
-        eval_loss = self.eval_we(epoch)
-
-        if eval_loss < best_loss:
-          self.save_models(os.path.join(self.save_dir, f"{self.config['exp_name']}_pass2.pt"))
-          best_loss = eval_loss
-          patience = 0
-          save_at_epoch = epoch + 1
-        else:
-          patience += 1
-        
-        if patience > 10:
-          logger.info(f'The validation loss did not improve over the last 200 epochs -> training stopped')
-          break
-      
-      pbar.set_description(f'Phase 2: {train_loss=:.4f} - {eval_loss=:.4f} - {save_at_epoch=}')
+    self.train_loop(
+      phase='Phase 2',
+      model_path=os.path.join(self.save_dir, f"{self.config['exp_name']}_pass2.pt"),
+      eval_step=2, patience_step=10
+    )
 
   @torch.no_grad()
   def autoplay(self, topk_patches=5, topk_goals=4):
